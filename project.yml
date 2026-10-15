@@ -7,7 +7,8 @@ options:
   xcodeVersion: "16.0"
 settings:
   base:
-    SWIFT_VERSION: "6.0"
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
     DEVELOPMENT_TEAM: ""          # set your Team in Xcode (Signing & Capabilities) or put your Team ID here
     CODE_SIGN_STYLE: Automatic
     MARKETING_VERSION: "1.0"
@@ -28,6 +29,8 @@ targets:
         PRODUCT_NAME: JARVIS
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_CFBundleDisplayName: JARVIS
+        SWIFT_VERSION: "5.0"
+        SWIFT_STRICT_CONCURRENCY: minimal
     info:
       path: JARVIS/Info.plist
       properties:
@@ -89,6 +92,8 @@ targets:
         PRODUCT_NAME: JARVISWidgets
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WIDGET_EXTENSION"
         SKIP_INSTALL: YES
+        SWIFT_VERSION: "5.0"
+        SWIFT_STRICT_CONCURRENCY: minimal
     info:
       path: JARVISWidgets/Info.plist
       properties:

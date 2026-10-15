@@ -19,12 +19,20 @@ struct MessageComposer: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: MFMessageComposeViewController, context: Context) {}
 
     final class Coordinator: NSObject, MFMessageComposeViewControllerDelegate {
-        let onFinish: @MainActor () -> Void
-        init(onFinish: @escaping @MainActor () -> Void) { self.onFinish = onFinish }
+        /// Created on the main actor so the nonisolated delegate callback can finish
+        /// without sending `self` into a main-actor closure.
+        private let finishOnMain: @Sendable () -> Void
+
+        @MainActor
+        init(onFinish: @escaping @MainActor () -> Void) {
+            self.finishOnMain = { @Sendable in
+                Task { @MainActor in onFinish() }
+            }
+        }
 
         nonisolated func messageComposeViewController(_ controller: MFMessageComposeViewController,
                                                       didFinishWith result: MessageComposeResult) {
-            MainActor.assumeIsolated { onFinish() }
+            finishOnMain()
         }
     }
 }
