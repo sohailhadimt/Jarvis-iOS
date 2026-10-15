@@ -221,12 +221,16 @@ struct LevelWaveform: View {
     var active: Bool
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
-            let t: Double = timeline.date.timeIntervalSinceReferenceDate
-            HStack(alignment: .center, spacing: 3) {
-                ForEach(0..<5, id: \.self) { i in
-                    waveformBar(index: i, time: t)
-                }
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { timeline in
+            waveform(date: timeline.date)
+        }
+    }
+
+    private func waveform(date: Date) -> some View {
+        let t: Double = date.timeIntervalSinceReferenceDate
+        return HStack(alignment: .center, spacing: 3) {
+            ForEach(0..<5, id: \.self) { i in
+                waveformBar(index: i, time: t)
             }
         }
     }

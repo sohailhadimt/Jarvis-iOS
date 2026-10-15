@@ -60,28 +60,44 @@ struct VoiceOrbView: View {
     @State private var meter = OrbMeter()
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: paused ? 1.0 : 1.0 / 30.0, paused: paused)) { timeline in
-            let time: Double = timeline.date.timeIntervalSinceReferenceDate
-            let smoothed: Double = meter.push(level, at: timeline.date)
-            let speed: Double = cloudSpeed
-            let advanced: Double = time * speed
-            let muted: Double = state == .muted ? 0.15 : 1.0
-            orb(time: advanced)
-                .scaleEffect(scale(time: time, level: smoothed))
-                .opacity(opacity(time: time))
-                .saturation(muted)
-                .hueRotation(.degrees(hue(time: time)))
+        TimelineView(.animation(minimumInterval: frameInterval, paused: paused)) { timeline in
+            voiceFrame(date: timeline.date)
         }
         .accessibilityLabel("Voice orb")
     }
 
+    private var frameInterval: Double {
+        if paused { return 1.0 }
+        return 1.0 / 30.0
+    }
+
+    private func voiceFrame(date: Date) -> some View {
+        let time: Double = date.timeIntervalSinceReferenceDate
+        let smoothed: Double = meter.push(level, at: date)
+        let advanced: Double = time * cloudSpeed
+        let muted: Double = state == .muted ? 0.15 : 1.0
+        let scaled: CGFloat = scale(time: time, level: smoothed)
+        let fade: Double = opacity(time: time)
+        let tilt: Double = hue(time: time)
+        return orb(time: advanced)
+            .scaleEffect(scaled)
+            .opacity(fade)
+            .saturation(muted)
+            .hueRotation(.degrees(tilt))
+    }
+
     private func orb(time: Double) -> some View {
         GeometryReader { geo in
-            let side: CGFloat = min(geo.size.width, geo.size.height)
-            let bandW: CGFloat = side * 1.15
-            let bandH: CGFloat = side * 0.45
-            let bandY: CGFloat = side * 0.30
-            ZStack {
+            orbLayers(side: min(geo.size.width, geo.size.height), time: time)
+                .frame(width: geo.size.width, height: geo.size.height)
+        }
+    }
+
+    private func orbLayers(side: CGFloat, time: Double) -> some View {
+        let bandW: CGFloat = side * 1.15
+        let bandH: CGFloat = side * 0.45
+        let bandY: CGFloat = side * 0.30
+        return ZStack {
                 Circle()
                     .fill(VoiceLook.core)
                     .blur(radius: 20)
@@ -110,38 +126,41 @@ struct VoiceOrbView: View {
                     clouds(side: side, time: time)
                 }
                 .clipShape(Circle())
-            }
-            .frame(width: geo.size.width, height: geo.size.height)
         }
     }
 
     private func clouds(side: CGFloat, time: Double) -> some View {
-        let seeds: [(Double, Double, CGFloat, CGFloat)] = [
-            (6.0, 0.2, 0.34, 8.0),
-            (7.5, 1.4, 0.28, 10.0),
-            (9.0, 2.2, 0.40, 12.0),
-            (10.0, 3.1, 0.24, 14.0),
-        ]
-        return ZStack {
-            ForEach(0..<seeds.count, id: \.self) { index in
-                let seed = seeds[index]
-                let turn: Double = 2.0 * Double.pi
-                let xPhase: Double = time * turn / seed.0 + seed.1
-                let yPeriod: Double = seed.0 + 1.3
-                let yPhase: Double = time * turn / yPeriod + seed.1
-                let x: CGFloat = CGFloat(sin(xPhase)) * side * 0.16
-                let yWave: CGFloat = CGFloat(cos(yPhase)) * side * 0.08
-                let y: CGFloat = yWave + side * 0.16
-                let blob: CGFloat = side * seed.2
-                let blobH: CGFloat = blob * 0.62
-                Ellipse()
-                    .fill(.white.opacity(0.9))
-                    .frame(width: blob, height: blobH)
-                    .blur(radius: seed.3)
-                    .offset(x: x, y: y)
+        ZStack {
+            ForEach(0..<Self.cloudSeeds.count, id: \.self) { index in
+                cloudBlob(index: index, side: side, time: time)
             }
         }
     }
+
+    private func cloudBlob(index: Int, side: CGFloat, time: Double) -> some View {
+        let seed = Self.cloudSeeds[index]
+        let turn: Double = 2.0 * Double.pi
+        let xPhase: Double = time * turn / seed.0 + seed.1
+        let yPeriod: Double = seed.0 + 1.3
+        let yPhase: Double = time * turn / yPeriod + seed.1
+        let x: CGFloat = CGFloat(sin(xPhase)) * side * 0.16
+        let yWave: CGFloat = CGFloat(cos(yPhase)) * side * 0.08
+        let y: CGFloat = yWave + side * 0.16
+        let blob: CGFloat = side * seed.2
+        let blobH: CGFloat = blob * 0.62
+        return Ellipse()
+            .fill(.white.opacity(0.9))
+            .frame(width: blob, height: blobH)
+            .blur(radius: seed.3)
+            .offset(x: x, y: y)
+    }
+
+    private static let cloudSeeds: [(Double, Double, CGFloat, CGFloat)] = [
+        (6.0, 0.2, 0.34, 8.0),
+        (7.5, 1.4, 0.28, 10.0),
+        (9.0, 2.2, 0.40, 12.0),
+        (10.0, 3.1, 0.24, 14.0),
+    ]
 
     private func scale(time: Double, level: Double) -> CGFloat {
         switch state {

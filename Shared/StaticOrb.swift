@@ -9,16 +9,22 @@ struct StaticOrb: View {
     var accent: Color = Color(hex: SharedConfig.defaults.string(forKey: SharedConfig.Key.accentHex) ?? Theme.defaultAccentHex)
 
     var body: some View {
-        Canvas { ctx, size in
-            let stored: Double = SharedConfig.defaults.object(forKey: SharedConfig.Key.orbTintAmount) as? Double ?? 0.0
-            let mix: Double = stored >= 0.5 ? 0.85 : 0.18
-            OrbRenderer.draw(ctx: &ctx, size: size, time: 9.2,
-                             amp: Self.amp(phase), glow: 0.6, level: Self.level(phase), flow: 0.35,
-                             palette: OrbPalette.reference.tinted(with: Self.components(primary), amount: mix),
-                             detailed: false)
+        Canvas { context, size in
+            paint(context: &context, size: size)
         }
         .aspectRatio(1, contentMode: .fit)
         .accessibilityLabel("JARVIS")
+    }
+
+    private func paint(context: inout GraphicsContext, size: CGSize) {
+        let stored: Double = SharedConfig.defaults.object(forKey: SharedConfig.Key.orbTintAmount) as? Double ?? 0.0
+        let mix: Double = stored >= 0.5 ? 0.85 : 0.18
+        let amplitude: Double = Self.amp(phase)
+        let loudness: Double = Self.level(phase)
+        let palette = OrbPalette.reference.tinted(with: Self.components(primary), amount: mix)
+        OrbRenderer.draw(ctx: &context, size: size, time: 9.2,
+                         amp: amplitude, glow: 0.6, level: loudness, flow: 0.35,
+                         palette: palette, detailed: false)
     }
 
     private static func amp(_ phase: JarvisPhase) -> Double {
@@ -33,7 +39,7 @@ struct StaticOrb: View {
     private static func level(_ phase: JarvisPhase) -> Double {
         switch phase {
         case .listening, .speaking: 0.55
-        case .idle, .thinking: 0
+        case .idle, .thinking: 0.0
         }
     }
 
