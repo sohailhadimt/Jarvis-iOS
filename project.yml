@@ -31,6 +31,7 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: JARVIS
         SWIFT_VERSION: "5.0"
         SWIFT_STRICT_CONCURRENCY: minimal
+        TARGETED_DEVICE_FAMILY: "1"
     info:
       path: JARVIS/Info.plist
       properties:
@@ -42,6 +43,7 @@ targets:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+        UIRequiresFullScreen: true
         UIBackgroundModes:
           - audio
         NSMicrophoneUsageDescription: "JARVIS listens to your voice so it can answer your questions."
@@ -94,6 +96,7 @@ targets:
         SKIP_INSTALL: YES
         SWIFT_VERSION: "5.0"
         SWIFT_STRICT_CONCURRENCY: minimal
+        TARGETED_DEVICE_FAMILY: "1"
     info:
       path: JARVISWidgets/Info.plist
       properties:
