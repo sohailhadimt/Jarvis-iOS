@@ -1,11 +1,14 @@
 import simd
 import SwiftUI
+import UIKit
 
 /// Hard-edged sky circle. `boost` speeds the shader clock and the swirl.
 struct SkyCloudOrbView: View {
     var level: Double
     var state: VoiceState
     var closing: Bool = false
+    var tint: Color = Color(red: 0.1, green: 0.65, blue: 1)
+    var tintAmount: Double = 0
 
     @State private var meter = LevelSmooth()
     @State private var closeScale: CGFloat = 1
@@ -26,7 +29,9 @@ struct SkyCloudOrbView: View {
                         ShaderLibrary.default.skyClouds(
                             .float(Float(time)),
                             .float(boost),
-                            .float2(SIMD2(Float(geo.size.width), Float(geo.size.height)))
+                            .float2(SIMD2(Float(geo.size.width), Float(geo.size.height))),
+                            .float3(Self.rgb(tint)),
+                            .float(Float(tintAmount))
                         )
                     )
             }
@@ -44,6 +49,22 @@ struct SkyCloudOrbView: View {
             }
         }
         .accessibilityLabel("Voice orb")
+    }
+
+    private static func rgb(_ color: Color) -> SIMD3<Float> {
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+        let ui = UIColor(color)
+        if ui.getRed(&red, green: &green, blue: &blue, alpha: &alpha) {
+            return SIMD3(Float(red), Float(green), Float(blue))
+        }
+        let converted = ui.cgColor.converted(to: CGColorSpaceCreateDeviceRGB(), intent: .defaultIntent, options: nil)
+        if let comps = converted?.components, comps.count >= 3 {
+            return SIMD3(Float(comps[0]), Float(comps[1]), Float(comps[2]))
+        }
+        return SIMD3(0.1, 0.65, 1)
     }
 
     /// Speaking maps the smoothed voice level onto 0...2. Listening only nudges it.

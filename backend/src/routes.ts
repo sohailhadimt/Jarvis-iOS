@@ -30,6 +30,7 @@ import {
   nowIso,
   readJson,
 } from "./http";
+import { markPersonaDraft, routePersona } from "./personas";
 import { optionalSourceUrls } from "./sources";
 import { isPipelineStage, parseMrr } from "./tools";
 import type {
@@ -82,6 +83,8 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "POST" && parts[0] === "pipeline" && parts[1] && parts.length === 2) {
       return writePipeline(request, env, parts[1]);
     }
+    const persona = await routePersona(request, env, path, parts);
+    if (persona) return persona;
     return apiError(404, "not_found", `No route for ${request.method} ${path}.`);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Request failed.";
@@ -260,6 +263,16 @@ async function decideApproval(
     now,
     id,
   ]);
+  if (row.action === "persona_external" && row.payload_json) {
+    try {
+      const payload = JSON.parse(row.payload_json) as { persona_task_id?: unknown };
+      if (typeof payload.persona_task_id === "string" && payload.persona_task_id) {
+        await markPersonaDraft(env, payload.persona_task_id, status === "approved");
+      }
+    } catch {
+      // The approval row is already decided. A bad payload does not undo that.
+    }
+  }
   if (row.subtask_id) {
     if (status === "approved") {
       await dbRun(

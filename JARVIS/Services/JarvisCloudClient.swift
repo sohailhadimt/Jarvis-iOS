@@ -683,8 +683,118 @@ struct CloudClient: Sendable {
         return .http(status, text.isEmpty ? "no details" : String(text.prefix(200)))
     }
 
+    func personaAgents() async throws -> [CloudPersona] {
+        let envelope: PersonaListEnvelope = try await sendNoBody(method: "GET", path: "/agents")
+        return envelope.agents
+    }
+
+    func savePersona(_ agent: CloudPersona, creating: Bool) async throws -> CloudPersona {
+        let body: [String: Any] = [
+            "id": agent.id,
+            "name": agent.name,
+            "role": agent.role,
+            "instructions": agent.instructions,
+            "avatar": agent.avatar,
+            "color_hex": agent.colorHex,
+            "memory": agent.memory,
+        ]
+        let path = creating ? "/agents" : "/agents/\(Self.path(agent.id))"
+        let envelope: PersonaEnvelope = try await sendJSON(method: "POST", path: path, body: body)
+        return envelope.agent
+    }
+
+    func deletePersona(id: String) async throws {
+        let _: DeletedEnvelope = try await sendNoBody(method: "DELETE", path: "/agents/\(Self.path(id))")
+    }
+
+    func enqueuePersona(id: String, agentID: String, goal: String) async throws -> CloudPersonaTask {
+        let envelope: PersonaTaskEnvelope = try await sendJSON(
+            method: "POST", path: "/agent-tasks",
+            body: ["id": id, "agent_id": agentID, "goal": goal])
+        return envelope.task
+    }
+
+    func personaTasks() async throws -> [CloudPersonaTask] {
+        let envelope: PersonaTaskListEnvelope = try await sendNoBody(method: "GET", path: "/agent-tasks")
+        return envelope.tasks
+    }
+
+    func settlePersona(id: String, approve: Bool) async throws {
+        let action = approve ? "approve" : "decline"
+        let _: PersonaTaskEnvelope = try await sendNoBody(method: "POST", path: "/agent-tasks/\(Self.path(id))/\(action)")
+    }
+
+    func personaMessages(agentID: String) async throws -> [CloudGroupLine] {
+        let envelope: GroupEnvelope = try await sendNoBody(method: "GET", path: "/agents/\(Self.path(agentID))/messages")
+        return envelope.messages
+    }
+
+    func addPersonaMessage(agentID: String, author: String, role: String, text: String) async throws {
+        let _: AckEnvelope = try await sendJSON(
+            method: "POST", path: "/agents/\(Self.path(agentID))/messages",
+            body: ["author": author, "role": role, "text": text])
+    }
+
+    func groupLines() async throws -> [CloudGroupLine] {
+        let envelope: GroupEnvelope = try await sendNoBody(method: "GET", path: "/group")
+        return envelope.messages
+    }
+
+    func postGroupLine(author: String, text: String) async throws {
+        let _: AckEnvelope = try await sendJSON(method: "POST", path: "/group", body: ["author": author, "text": text])
+    }
+
+    private struct PersonaListEnvelope: Decodable { var agents: [CloudPersona] }
+    private struct PersonaEnvelope: Decodable { var agent: CloudPersona }
+    private struct PersonaTaskEnvelope: Decodable { var task: CloudPersonaTask }
+    private struct PersonaTaskListEnvelope: Decodable { var tasks: [CloudPersonaTask] }
+    private struct GroupEnvelope: Decodable { var messages: [CloudGroupLine] }
+    private struct AckEnvelope: Decodable { var ok: Bool? }
+
     private static func path(_ id: String) -> String {
         id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+    }
+}
+
+struct CloudPersona: Decodable, Sendable {
+    var id: String
+    var name: String
+    var role: String
+    var instructions: String
+    var avatar: String
+    var colorHex: String
+    var memory: String
+    var builtin: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, role, instructions, avatar, memory, builtin
+        case colorHex = "color_hex"
+    }
+}
+
+struct CloudPersonaTask: Decodable, Sendable {
+    var id: String
+    var agentId: String
+    var goal: String
+    var status: String
+    var result: String?
+    var approvalSummary: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, goal, status, result
+        case agentId = "agent_id"
+        case approvalSummary = "approval_summary"
+    }
+}
+
+struct CloudGroupLine: Decodable, Sendable {
+    var id: String
+    var author: String
+    var text: String
+    var role: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, author, text, role
     }
 }
 

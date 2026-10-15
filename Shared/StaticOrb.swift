@@ -10,9 +10,11 @@ struct StaticOrb: View {
 
     var body: some View {
         Canvas { ctx, size in
+            let stored = SharedConfig.defaults.object(forKey: SharedConfig.Key.orbTintAmount) as? Double ?? 0
+            let mix = stored >= 0.5 ? 0.85 : 0.18
             OrbRenderer.draw(ctx: &ctx, size: size, time: 9.2,
                              amp: Self.amp(phase), glow: 0.6, level: Self.level(phase), flow: 0.35,
-                             palette: OrbPalette.reference.tinted(with: Self.components(primary)),
+                             palette: OrbPalette.reference.tinted(with: Self.components(primary), amount: mix),
                              detailed: false)
         }
         .aspectRatio(1, contentMode: .fit)

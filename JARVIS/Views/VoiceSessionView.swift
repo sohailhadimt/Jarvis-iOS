@@ -52,6 +52,9 @@ struct ChatView: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 8)
             }
+            AgentJobStrip()
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
             composer
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
@@ -232,6 +235,7 @@ struct MessageList: View {
 /// Default voice screen. Black field, sky orb, hamburger, sliders, and the ask capsule.
 struct FullScreenVoiceView: View {
     @Environment(AssistantEngine.self) private var engine
+    @Environment(AppSettings.self) private var settings
     var orbSpace: Namespace.ID
     var onMenu: () -> Void
     var onSettings: () -> Void
@@ -248,7 +252,8 @@ struct FullScreenVoiceView: View {
             let orbY = geo.size.height * 0.56
             ZStack {
                 Color.black
-                SkyCloudOrbView(level: engine.level, state: engine.voiceState, closing: voice.exiting)
+                SkyCloudOrbView(level: engine.level, state: engine.voiceState, closing: voice.exiting,
+                                tint: settings.orbTintColor, tintAmount: settings.orbTintAmount)
                     .frame(width: diameter, height: diameter)
                     .matchedGeometryEffect(id: "voice-orb", in: orbSpace)
                     .position(x: geo.size.width / 2, y: orbY)
@@ -288,6 +293,7 @@ struct FullScreenVoiceView: View {
                     if engine.pendingSummary != nil {
                         ApprovalCard()
                     }
+                    AgentJobStrip()
                     bottomBar
                 }
                 .padding(.top, geo.safeAreaInsets.top + 8)
@@ -492,7 +498,8 @@ private struct VoiceOrbSlot: View {
                         executing: engine.phase == .thinking || engine.cloudExecuting,
                         hasError: engine.errorMessage != nil)
             } else {
-                VoiceOrbView(level: engine.level, state: engine.voiceState)
+                SkyCloudOrbView(level: engine.level, state: engine.voiceState,
+                                tint: settings.orbTintColor, tintAmount: settings.orbTintAmount)
             }
         }
         .frame(width: side, height: side)

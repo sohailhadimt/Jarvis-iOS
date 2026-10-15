@@ -15,6 +15,8 @@ enum SharedConfig {
         static let lastReply = "shared.lastReply"
         static let primaryHex = "shared.primaryHex"
         static let accentHex = "shared.accentHex"
+        static let orbTintHex = "shared.orbTintHex"
+        static let orbTintAmount = "shared.orbTintAmount"
         /// True while a hands-free session is running. The control reads this to draw on/off.
         static let sessionActive = "shared.sessionActive"
     }

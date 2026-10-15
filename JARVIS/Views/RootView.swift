@@ -30,6 +30,7 @@ struct RootView: View {
             engine.setForeground(scenePhase == .active)
             CloudMonitor.shared.setVisible(scenePhase == .active)
             startListeningIfRequested()
+            AgentStore.shared.startCloudSync()
             if settings.startWithVoice, !engine.isSessionActive {
                 Task { await engine.startSession(continuous: true) }
             }

@@ -544,3 +544,19 @@ Update a row. Omitted fields stay as they are. You cannot clear `source_urls`.
 5. `quality_control` runs last when the plan includes it. A final message containing `"pass": false` fails the task. Missing a pass/fail object still completes the task, and `result_summary` says the verdict was missing.
 6. Rate limits and upstream errors are written to `progress` and retried with backoff (about 5 minutes, then 15). After the attempt budget, the subtask and the task are `failed` with the real error string.
 7. Nothing in this version leaves Cloudflare except reads (model APIs, search, and page fetches) and the JSON this API returns to the app.
+
+## Named agents
+
+`GET /agents` returns `{ "agents": [] }` and seeds J.A.R.V.I.S., E.D.I.T.H., U.L.T.R.O.N., and F.R.I.D.A.Y. when they are missing.
+
+`POST /agents` creates one. Body: `name`, `role`, `instructions`, optional `avatar` and `color_hex`. `201` `{ "agent": {} }`.
+
+`POST /agents/:id` updates name, role, instructions, memory, avatar, or color. `DELETE /agents/:id` removes the agent and its thread.
+
+`GET /agents/:id/messages` and `POST /agents/:id/messages` with `{ "author", "role", "text" }` are that agent's thread.
+
+`POST /agent-tasks` with `{ "agent_id", "goal", "id?" }` queues work. `GET /agent-tasks` lists it. Status is `queued`, `working`, `done`, or `needs_approval`. The cron tick runs one queued task through Gemini. Sending, publishing, or spending becomes `needs_approval` and an approval row. Nothing is sent.
+
+`POST /agent-tasks/:id/approve` and `POST /agent-tasks/:id/decline` mark the draft done and return `external_action_taken: false`. Approving or rejecting the matching row in `/approvals` does the same and still does not send, publish, or pay.
+
+`GET /group` and `POST /group` with `{ "author", "text" }` are the shared room.

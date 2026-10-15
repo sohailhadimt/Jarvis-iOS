@@ -663,6 +663,19 @@ final class AssistantEngine {
         turnAssistantStored = false
         let recordedUser = recordUser(text)
 
+        if let delegation = AgentStore.shared.delegation(in: text) {
+            let ack = "\(delegation.agent.name) is on that."
+            recordAssistant(ack)
+            saveForWidget(transcript: text, reply: ack)
+            await say(ResponsesClient.spokenText(ack))
+            let agent = delegation.agent
+            let goal = delegation.goal
+            Task { await AgentStore.shared.delegate(agent: agent, goal: goal) }
+            guard !Task.isCancelled else { return }
+            afterTurn()
+            return
+        }
+
         if wantsCloudTool(text) && CloudMonitor.shared.hasRunningWork {
             cloudExecuting = true
         }
@@ -865,18 +878,18 @@ final class AssistantEngine {
         }
         defer { listener.setBargeMonitor(false) }
         let s = AppSettings.shared
-        if let key = KeychainStore.get(.elevenLabs) {
-            do {
-                try await output.speakElevenLabs(text: text, voiceID: s.voiceID, apiKey: key,
-                                                 stability: s.stability, similarity: s.similarity,
-                                                 monitorMicrophone: monitor)
-                return
-            } catch {
-                if Task.isCancelled { return }
-                errorMessage = "ElevenLabs failed (\(error.localizedDescription)); using the system voice."
-            }
+        guard let key = KeychainStore.get(.elevenLabs) else {
+            errorMessage = "Add an ElevenLabs key in Settings. ElevenLabs is the only voice."
+            return
         }
-        await output.speakSystem(text)
+        do {
+            try await output.speakElevenLabs(text: text, voiceID: s.voiceID, apiKey: key,
+                                             stability: s.stability, similarity: s.similarity,
+                                             monitorMicrophone: monitor)
+        } catch {
+            if Task.isCancelled { return }
+            errorMessage = "ElevenLabs failed (\(error.localizedDescription))."
+        }
     }
 
     private func noteBarge(_ value: Double) {
@@ -923,6 +936,14 @@ final class AssistantEngine {
         conversation.append(ChatMessage(role: "user", content: trimmed))
         turns.append(VoiceTurn(role: "user", text: trimmed))
         return true
+    }
+
+    /// A background agent posts its result into this chat without starting another turn.
+    func postAgentUpdate(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        recordAssistant(trimmed)
+        saveForWidget(transcript: "Agent", reply: trimmed)
     }
 
     private func recordAssistant(_ text: String, truncated: Bool = false) {

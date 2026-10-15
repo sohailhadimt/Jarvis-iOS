@@ -1,5 +1,6 @@
-import { route } from "./routes";
 import { runTick } from "./execute";
+import { runPersonaTick } from "./personas";
+import { route } from "./routes";
 import type { Env } from "./types";
 
 export default {
@@ -7,6 +8,6 @@ export default {
     return route(request, env, ctx);
   },
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(runTick(env, `cron:${controller.cron}`));
+    ctx.waitUntil(Promise.all([runTick(env, `cron:${controller.cron}`), runPersonaTick(env)]));
   },
 };

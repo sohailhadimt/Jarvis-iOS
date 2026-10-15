@@ -8,7 +8,7 @@ struct JarvisLiveActivity: Widget {
         ActivityConfiguration(for: JarvisActivityAttributes.self) { context in
             LockScreenActivityView(state: context.state)
                 .activityBackgroundTint(Color.black.opacity(0.85))
-                .activitySystemActionForegroundColor(.cyan)
+                .activitySystemActionForegroundColor(IslandStyle.teal)
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
@@ -56,13 +56,15 @@ struct JarvisLiveActivity: Widget {
                 StaticOrb(phase: context.state.phase).frame(width: 18, height: 18)
             }
             .widgetURL(URL(string: "jarvis://open"))
-            .keylineTint(.cyan)
+            .keylineTint(IslandStyle.teal)
         }
     }
 }
 
 private enum IslandStyle {
-    static let teal = Color(hex: Theme.defaultAccentHex)
+    static var teal: Color {
+        Color(hex: SharedConfig.defaults.string(forKey: SharedConfig.Key.accentHex) ?? Theme.defaultAccentHex)
+    }
 }
 
 struct LockScreenActivityView: View {

@@ -37,7 +37,9 @@ float fbm(float2 p) {
                                   half4 color,
                                   float time,
                                   float boost,
-                                  float2 size) {
+                                  float2 size,
+                                  float3 tint,
+                                  float tintAmount) {
     float2 safe = max(size, float2(1.0));
     float2 uv = position / safe;
     float2 centered = uv * 2.0 - 1.0;
@@ -74,11 +76,17 @@ float fbm(float2 p) {
     float3 skyBlue = float3(0.1, 0.65, 1.0);
     float3 cloudWhite = float3(0.95, 0.97, 1.0);
     float3 warmWhite = float3(1.0, 0.965, 0.93);
+    float amount = saturate(tintAmount);
+    float3 chosen = max(tint, float3(0.02));
+    deepBlue = mix(deepBlue, chosen, amount);
+    skyBlue = mix(skyBlue, chosen, amount * 0.72);
 
     float3 sky = mix(deepBlue, skyBlue, smoothstep(0.0, 1.0, uv.y));
     float cover = smoothstep(0.36, 0.74, shaped);
     float3 rgb = mix(sky, cloudWhite, cover);
     float hottest = smoothstep(0.78, 0.98, shaped);
-    rgb = mix(rgb, warmWhite, hottest * 0.4);
+    if (amount < 0.05) {
+        rgb = mix(rgb, warmWhite, hottest * 0.4);
+    }
     return half4(half3(rgb), 1.0h);
 }

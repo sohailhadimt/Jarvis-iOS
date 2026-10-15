@@ -4,7 +4,7 @@ import SwiftUI
 import WidgetKit
 
 enum LLMProvider: String, CaseIterable, Identifiable, Sendable {
-    case openAI, gemini, groq, custom
+    case gemini, openAI, groq, custom
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -13,6 +13,35 @@ enum LLMProvider: String, CaseIterable, Identifiable, Sendable {
         case .groq: "Groq"
         case .custom: "Custom"
         }
+    }
+}
+
+enum AppearancePreset: String, CaseIterable, Identifiable, Sendable {
+    case sky, cyan, red, gold, purple, custom
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .sky: "ChatGPT Sky"
+        case .cyan: "JARVIS Cyan"
+        case .red: "Red"
+        case .gold: "Gold"
+        case .purple: "Purple"
+        case .custom: "Custom"
+        }
+    }
+    var tintHex: String {
+        switch self {
+        case .sky: "4BA8EEFF"
+        case .cyan: "00E5F2FF"
+        case .red: "FF3B30FF"
+        case .gold: "D4AF37FF"
+        case .purple: "AF52DEFF"
+        case .custom: "4BA8EEFF"
+        }
+    }
+    /// 0 leaves the sky palette alone. Any other preset shifts the sky toward the colour and leaves clouds white.
+    var tintAmount: Double {
+        self == .sky ? 0 : 1
     }
 }
 
@@ -130,9 +159,14 @@ final class AppSettings {
     var cloudBaseURL: String { didSet { d.set(cloudBaseURL, forKey: "cloudBaseURL") } }
     var primaryHex: String { didSet { persistColour(primaryHex, key: SharedConfig.Key.primaryHex) } }
     var accentHex: String { didSet { persistColour(accentHex, key: SharedConfig.Key.accentHex) } }
+    /// Chosen wheel colour. Amount 0 keeps the ChatGPT sky palette; 1 shifts the sky hue toward it.
+    var orbTintHex: String { didSet { persistTint() } }
+    var orbTintAmount: Double { didSet { persistTint() } }
+    var appearancePreset: String { didSet { d.set(appearancePreset, forKey: "appearancePreset") } }
 
     var primaryColor: Color { Color(hex: primaryHex) }
     var accentColor: Color { Color(hex: accentHex) }
+    var orbTintColor: Color { Color(hex: orbTintHex) }
 
     private init() {
         let d = UserDefaults.standard
@@ -201,6 +235,11 @@ final class AppSettings {
                                                          fallback: Theme.defaultAccentHex)
         primaryHex = resolvedPrimary
         accentHex = resolvedAccent
+        orbTintHex = d.string(forKey: "orbTintHex") ?? "4BA8EEFF"
+        orbTintAmount = d.object(forKey: "orbTintAmount") as? Double ?? 0
+        appearancePreset = d.string(forKey: "appearancePreset") ?? AppearancePreset.sky.rawValue
+        SharedConfig.defaults.set(orbTintHex, forKey: SharedConfig.Key.orbTintHex)
+        SharedConfig.defaults.set(orbTintAmount, forKey: SharedConfig.Key.orbTintAmount)
         // didSet does not run during init, so write a migrated factory colour through explicitly.
         if d.string(forKey: SharedConfig.Key.primaryHex) != resolvedPrimary {
             persistColour(resolvedPrimary, key: SharedConfig.Key.primaryHex)
@@ -223,8 +262,40 @@ final class AppSettings {
     }
 
     func resetColours() {
-        primaryHex = Theme.defaultPrimaryHex
-        accentHex = Theme.defaultAccentHex
+        apply(preset: .sky)
+    }
+
+    func apply(preset: AppearancePreset) {
+        appearancePreset = preset.rawValue
+        orbTintHex = preset.tintHex
+        orbTintAmount = preset.tintAmount
+        primaryHex = preset.tintHex
+        accentHex = preset.tintHex
+    }
+
+    func applyCustomTint(_ color: Color) {
+        appearancePreset = AppearancePreset.custom.rawValue
+        let hex = color.hexString
+        orbTintHex = hex
+        orbTintAmount = 1
+        primaryHex = hex
+        accentHex = hex
+    }
+
+    /// Agents and tools ask Gemini directly. The main voice still falls back when that key is missing.
+    func geminiEndpoint() throws -> LLMEndpoint {
+        if let endpoint = try configuredEndpoint(for: .gemini, strict: true) {
+            return endpoint
+        }
+        throw LLMError.missingKey("Gemini")
+    }
+
+    private func persistTint() {
+        d.set(orbTintHex, forKey: "orbTintHex")
+        d.set(orbTintAmount, forKey: "orbTintAmount")
+        SharedConfig.defaults.set(orbTintHex, forKey: SharedConfig.Key.orbTintHex)
+        SharedConfig.defaults.set(orbTintAmount, forKey: SharedConfig.Key.orbTintAmount)
+        WidgetCenter.shared.reloadTimelines(ofKind: SharedConfig.standByWidgetKind)
     }
 
     /// The selected provider when its key is saved. If that key is missing, another saved provider is used.

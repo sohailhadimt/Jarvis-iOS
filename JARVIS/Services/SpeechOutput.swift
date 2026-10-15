@@ -1,15 +1,11 @@
 import AVFoundation
 import Foundation
 
-/// Speaks replies: ElevenLabs streaming PCM through AVAudioEngine, or AVSpeechSynthesizer as a fallback.
+/// Speaks replies with ElevenLabs streaming PCM through AVAudioEngine. There is no system-voice fallback.
 @MainActor
 final class SpeechOutput: NSObject {
     var onLevel: ((Double) -> Void)?
     var onBargeIn: (() -> Void)?
-
-    private let synth = AVSpeechSynthesizer()
-    private var synthContinuation: CheckedContinuation<Void, Never>?
-    private var fakeLevelTask: Task<Void, Never>?
 
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
@@ -26,7 +22,6 @@ final class SpeechOutput: NSObject {
 
     override init() {
         super.init()
-        synth.delegate = self
     }
 
     // MARK: ElevenLabs (streaming)
@@ -53,9 +48,6 @@ final class SpeechOutput: NSObject {
 
     func speakElevenLabs(text: String, voiceID: String, apiKey: String,
                          stability: Double, similarity: Double, monitorMicrophone: Bool) async throws {
-        if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }
-        fakeLevelTask?.cancel()
-        finishSynth()
         playbackSignal?.fire()
         playbackSignal = nil
         player?.stop()
@@ -217,59 +209,7 @@ final class SpeechOutput: NSObject {
         onLevel?(0)
     }
 
-    // MARK: System voice fallback
-
-    func speakSystem(_ text: String) async {
-        stop()
-        preparePlayback()
-        let seconds = max(0.35, Double(text.count) / 13.5)
-        playbackAnchor = Date()
-        scheduledFrames = max(1, Int(seconds * pcmFormat.sampleRate))
-        let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = AVSpeechSynthesisVoice(language: "en-GB")
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
-        startFakeLevel()
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            synthContinuation = cont
-            synth.speak(utterance)
-        }
-        fakeLevelTask?.cancel()
-        onLevel?(0)
-    }
-
-    /// AVSpeechSynthesizer doesn't expose output levels, so animate a plausible speaking envelope.
-    private func startFakeLevel() {
-        fakeLevelTask?.cancel()
-        fakeLevelTask = Task { [weak self] in
-            var t = 0.0
-            while !Task.isCancelled {
-                t += 0.05
-                let v = 0.35 + 0.3 * abs(sin(t * 7)) + 0.15 * abs(sin(t * 13))
-                self?.onLevel?(v)
-                try? await Task.sleep(for: .milliseconds(50))
-            }
-        }
-    }
-
-    fileprivate func finishSynth() {
-        synthContinuation?.resume()
-        synthContinuation = nil
-    }
-
     func stop() {
-        if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }
-        fakeLevelTask?.cancel()
-        finishSynth()
         stopEngine()
-    }
-}
-
-extension SpeechOutput: AVSpeechSynthesizerDelegate {
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        Task { @MainActor in self.finishSynth() }
-    }
-
-    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
-        Task { @MainActor in self.finishSynth() }
     }
 }

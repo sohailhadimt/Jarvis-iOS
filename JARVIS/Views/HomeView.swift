@@ -16,7 +16,7 @@ struct HomeView: View {
     @State private var showVoiceSettings = false
     @State private var panel: HomePanel?
 
-    private var cyan: Color { Color(red: 0, green: 0.898, blue: 0.949) }
+    private var cyan: Color { settings.accentColor }
 
     var body: some View {
         Group {
@@ -74,6 +74,7 @@ struct HomeView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 0) {
+                    sheetLink("Agents", systemImage: "person.3") { AgentsView() }
                     sheetLink("Conversation", systemImage: "text.bubble") { ReplyDetailView() }
                     sheetLink("Briefing", systemImage: "sun.horizon") { CloudBriefingView() }
                     sheetLink("Tasks", systemImage: "checklist") { CloudTasksView() }

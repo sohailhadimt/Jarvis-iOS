@@ -174,3 +174,47 @@ SELECT
 WHERE NOT EXISTS (
   SELECT 1 FROM scheduled_jobs WHERE id = 'job_nightly_lead_research'
 );
+
+-- Named persona agents (J.A.R.V.I.S., E.D.I.T.H., and the ones the phone creates).
+CREATE TABLE IF NOT EXISTS persona_agents (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  role TEXT NOT NULL,
+  instructions TEXT NOT NULL,
+  avatar TEXT NOT NULL,
+  color_hex TEXT NOT NULL,
+  memory TEXT NOT NULL DEFAULT '',
+  builtin INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS persona_messages (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  author TEXT NOT NULL,
+  text TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS persona_tasks (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  goal TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('queued', 'working', 'done', 'needs_approval')),
+  result TEXT,
+  approval_summary TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS group_messages (
+  id TEXT PRIMARY KEY,
+  author TEXT NOT NULL,
+  text TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_persona_messages_agent ON persona_messages (agent_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_persona_tasks_status ON persona_tasks (status, created_at);

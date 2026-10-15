@@ -21,13 +21,14 @@ struct OrbPalette: Sendable {
         partR: 0.00, partG: 0.898, partB: 0.949
     )
 
-    func tinted(with primary: (Double, Double, Double)) -> OrbPalette {
+    func tinted(with primary: (Double, Double, Double), amount: Double = 0.18) -> OrbPalette {
         func mix(_ r: Double, _ g: Double, _ b: Double, _ t: Double) -> (Double, Double, Double) {
             (r + (primary.0 - r) * t, g + (primary.1 - g) * t, b + (primary.2 - b) * t)
         }
-        let line = mix(lineR, lineG, lineB, 0.18)
-        let seg = mix(segR, segG, segB, 0.05)
-        let part = mix(partR, partG, partB, 0.14)
+        let scale = min(1, max(0, amount)) / 0.18
+        let line = mix(lineR, lineG, lineB, min(1, 0.18 * scale))
+        let seg = mix(segR, segG, segB, min(1, 0.05 * scale))
+        let part = mix(partR, partG, partB, min(1, 0.14 * scale))
         return OrbPalette(lineR: line.0, lineG: line.1, lineB: line.2,
                           segR: seg.0, segG: seg.1, segB: seg.2,
                           partR: part.0, partG: part.1, partB: part.2)

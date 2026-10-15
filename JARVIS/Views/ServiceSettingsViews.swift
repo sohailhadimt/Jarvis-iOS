@@ -361,18 +361,39 @@ struct AppearanceSettingsView: View {
         @Bindable var settings = settings
         Form {
             Section {
-                OrbView(level: 0, phase: .idle, primary: settings.primaryColor, accent: settings.accentColor)
-                    .frame(height: 200)
+                SkyCloudOrbView(level: 0.2, state: .listening, tint: settings.orbTintColor, tintAmount: settings.orbTintAmount)
+                    .frame(width: 180, height: 180)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
                     .listRowBackground(Color.black)
+            } header: {
+                Text("Preview")
             }
-            Section("Colours") {
-                ColorPicker("Primary (orb glow)", selection: Binding(
-                    get: { settings.primaryColor },
-                    set: { settings.primaryHex = $0.hexString }))
-                ColorPicker("Accent", selection: Binding(
-                    get: { settings.accentColor },
-                    set: { settings.accentHex = $0.hexString }))
-                Button("Reset to cyan") { settings.resetColours() }
+            Section("Presets") {
+                ForEach(AppearancePreset.allCases.filter { $0 != .custom }) { preset in
+                    Button {
+                        settings.apply(preset: preset)
+                    } label: {
+                        HStack {
+                            Circle().fill(Color(hex: preset.tintHex)).frame(width: 18, height: 18)
+                            Text(preset.title)
+                            Spacer()
+                            if settings.appearancePreset == preset.rawValue {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            Section("Colour wheel") {
+                ColorPicker("Orb and accent", selection: Binding(
+                    get: { settings.orbTintColor },
+                    set: { settings.applyCustomTint($0) }), supportsOpacity: false)
+                Text("The sky shifts toward this colour. The clouds stay white. The same colour is saved for the widget and Live Activity.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button("Reset to ChatGPT Sky") { settings.resetColours() }
             }
             Section {
                 Toggle("Auto StandBy view when charging in landscape", isOn: $settings.autoStandBy)
