@@ -16,7 +16,8 @@ final class SpeechOutput: NSObject {
     private var playbackSignal: OnceSignal?
     private var mixerTapInstalled = false
     private var inputTapInstalled = false
-    private var bargeFrames = 0
+    private var bargeSince: Date?
+    private var engineMonitorsMic = false
     private var playbackAnchor: Date?
     private var scheduledFrames = 0
     private let pcmFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
@@ -42,16 +43,28 @@ final class SpeechOutput: NSObject {
         scheduledFrames = 0
     }
 
+    /// Opens the playback engine while listening so the first sentence does not pay startup cost.
+    func prewarm() {
+        guard engine == nil else { return }
+        if (try? openEngine(monitorMicrophone: false)) != nil {
+            engineMonitorsMic = false
+        }
+    }
+
     func speakElevenLabs(text: String, voiceID: String, apiKey: String,
                          stability: Double, similarity: Double, monitorMicrophone: Bool) async throws {
-        stop()
+        if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }
+        fakeLevelTask?.cancel()
+        finishSynth()
+        playbackSignal?.fire()
+        playbackSignal = nil
+        player?.stop()
         preparePlayback()
         let bytes = try await ElevenLabsClient.streamSpeech(
             text: text, voiceID: voiceID, apiKey: apiKey, stability: stability, similarity: similarity)
         try Task.checkCancellation()
 
-        let player = try openEngine(monitorMicrophone: monitorMicrophone)
-        defer { stopEngine() }
+        let player = try ensureEngine(monitorMicrophone: monitorMicrophone)
 
         var primed = false
         var pending = Data()
@@ -156,20 +169,31 @@ final class SpeechOutput: NSObject {
         player.play()
         self.engine = engine
         self.player = player
-        bargeFrames = 0
+        engineMonitorsMic = monitoring
+        bargeSince = nil
         return player
+    }
+
+    private func ensureEngine(monitorMicrophone: Bool) throws -> AVAudioPlayerNode {
+        if let engine, engine.isRunning, let player, engineMonitorsMic == monitorMicrophone {
+            if !player.isPlaying { player.play() }
+            return player
+        }
+        stopEngine()
+        return try openEngine(monitorMicrophone: monitorMicrophone)
     }
 
     private func noteBarge(_ value: Double) {
         guard player != nil else { return }
         if value > 0.36 {
-            bargeFrames += 1
-            if bargeFrames >= 4 {
-                bargeFrames = 0
+            let start = bargeSince ?? Date()
+            bargeSince = start
+            if Date().timeIntervalSince(start) >= 0.25 {
+                bargeSince = nil
                 onBargeIn?()
             }
         } else if value < 0.18 {
-            bargeFrames = 0
+            bargeSince = nil
         }
     }
 
@@ -188,7 +212,8 @@ final class SpeechOutput: NSObject {
         engine?.stop()
         player = nil
         engine = nil
-        bargeFrames = 0
+        engineMonitorsMic = false
+        bargeSince = nil
         onLevel?(0)
     }
 

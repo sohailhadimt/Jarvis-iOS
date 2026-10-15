@@ -109,6 +109,12 @@ final class AppSettings {
     var startWithVoice: Bool { didSet { d.set(startWithVoice, forKey: "startWithVoice") } }
     /// When on, an in-app voice session keeps listening after the app leaves the screen.
     var backgroundConversations: Bool { didSet { d.set(backgroundConversations, forKey: "backgroundConversations") } }
+    /// BCP-47 locale for on-device speech recognition.
+    var speechLocale: String { didSet { d.set(speechLocale, forKey: "speechLocale") } }
+    /// Full-screen captions start on when a voice session opens.
+    var captionsDefault: Bool { didSet { d.set(captionsDefault, forKey: "captionsDefault") } }
+    /// 0 is patient, 1 ends a turn sooner. 0.5 is about 700ms of silence.
+    var vadSensitivity: Double { didSet { d.set(vadSensitivity, forKey: "vadSensitivity") } }
     var routing: TaskRouting { didSet { d.set(routing.rawValue, forKey: "routing") } }
     var searchModel: String { didSet { d.set(searchModel, forKey: "searchModel") } }
     var shortcuts: [RegisteredShortcut] {
@@ -167,6 +173,9 @@ final class AppSettings {
         voiceSeparateMode = d.object(forKey: "voiceSeparateMode") as? Bool ?? false
         startWithVoice = d.object(forKey: "startWithVoice") as? Bool ?? false
         backgroundConversations = d.object(forKey: "backgroundConversations") as? Bool ?? false
+        speechLocale = d.string(forKey: "speechLocale") ?? "en-GB"
+        captionsDefault = d.object(forKey: "captionsDefault") as? Bool ?? true
+        vadSensitivity = d.object(forKey: "vadSensitivity") as? Double ?? 0.5
         routing = TaskRouting(rawValue: d.string(forKey: "routing") ?? "") ?? .split
         searchModel = d.string(forKey: "searchModel") ?? "gpt-4.1-mini"
         shortcuts = (d.data(forKey: "shortcuts")).flatMap { try? JSONDecoder().decode([RegisteredShortcut].self, from: $0) } ?? []

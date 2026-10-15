@@ -268,10 +268,27 @@ struct VoicesSettingsView: View {
                 Toggle("Separate full-screen mode", isOn: $settings.voiceSeparateMode)
                 Toggle("Start with voice", isOn: $settings.startWithVoice)
                 Toggle("Background conversations", isOn: $settings.backgroundConversations)
+                Toggle("Captions on", isOn: $settings.captionsDefault)
+                Picker("Language", selection: $settings.speechLocale) {
+                    Text("English (UK)").tag("en-GB")
+                    Text("English (US)").tag("en-US")
+                    Text("English (Australia)").tag("en-AU")
+                    Text("French").tag("fr-FR")
+                    Text("German").tag("de-DE")
+                    Text("Spanish").tag("es-ES")
+                }
+                VStack(alignment: .leading) {
+                    Text("VAD sensitivity \(settings.vadSensitivity, format: .number.precision(.fractionLength(2)))")
+                    Slider(value: $settings.vadSensitivity, in: 0...1)
+                }
+                Picker("Orb style", selection: $settings.orbStyle) {
+                    Text("ChatGPT").tag(OrbStyle.chatGPT)
+                    Text("JARVIS classic").tag(OrbStyle.classic)
+                }
             } header: {
                 Text("Voice mode")
             } footer: {
-                Text("In-chat voice is the default: the transcript stays on screen with the cloud orb, mute and end. Separate mode is a full-screen orb. Start with voice begins a session when JARVIS opens. Background conversations keep an in-app session listening after you leave the app. The Action Button session is unaffected.")
+                Text("In-chat voice keeps the transcript and puts a small orb above the composer. Separate mode is a full-screen orb. Captions are the two lines under that orb. VAD sensitivity changes how quickly silence ends your turn; the middle is about 700ms. Background conversations keep an in-app session listening after you leave the app. The Action Button session is unaffected.")
             }
             Section("Selected: \(settings.voiceName)") {
                 VStack(alignment: .leading) {

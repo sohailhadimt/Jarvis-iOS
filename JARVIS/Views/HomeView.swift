@@ -10,6 +10,8 @@ struct HomeView: View {
     @Environment(AppSettings.self) private var settings
     var openStandBy: () -> Void
 
+    @Namespace private var voiceOrb
+    @State private var voice = VoiceSession.shared
     @State private var showSheet = false
     @State private var panel: HomePanel?
     @State private var showCaption = false
@@ -28,8 +30,12 @@ struct HomeView: View {
             let midY = top + (geo.size.height - top - bottom - 72) * 0.5
             ZStack {
                 Color.black
-                if engine.isSessionActive {
-                    VoiceSessionView()
+                if settings.voiceSeparateMode && (engine.isSessionActive || voice.exiting) {
+                    FullScreenVoiceView(orbSpace: voiceOrb)
+                } else if voice.chatPresented || engine.isSessionActive {
+                    ChatView(orbSpace: voiceOrb, onPlus: { showSheet = true }, onClose: { closeChat() })
+                        .padding(.top, top)
+                        .padding(.bottom, bottom)
                 } else {
                     orb
                         .frame(width: side, height: side)
@@ -40,7 +46,7 @@ struct HomeView: View {
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .overlay(alignment: .bottom) {
-                if !engine.isSessionActive {
+                if !voice.chatPresented && !engine.isSessionActive {
                     homeDock
                         .padding(.bottom, max(bottom, 8))
                 }
@@ -116,6 +122,16 @@ struct HomeView: View {
         .allowsHitTesting(false)
     }
 
+    private func closeChat() {
+        Task {
+            if engine.isSessionActive {
+                await engine.endSession(reason: "close-chat")
+                try? await Task.sleep(for: .milliseconds(260))
+            }
+            voice.chatPresented = false
+        }
+    }
+
     private var captionText: String {
         if !engine.reply.isEmpty { return engine.reply }
         return engine.transcript
@@ -124,7 +140,7 @@ struct HomeView: View {
     private var homeDock: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                dockButton("Chat", systemImage: "text.bubble") { panel = .chat }
+                dockButton("Chat", systemImage: "text.bubble") { voice.chatPresented = true }
                 dockButton("Tasks", systemImage: "checklist") { panel = .tasks }
                 dockButton("Approvals", systemImage: "checkmark.circle") { panel = .approvals }
                 dockButton("Business", systemImage: "chart.bar") { panel = .business }

@@ -11,7 +11,6 @@ struct JARVISApp: App {
             RootView()
                 .environment(engine)
                 .environment(settings)
-                .preferredColorScheme(.dark)
         }
         .modelContainer(JarvisStore.container)
     }

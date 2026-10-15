@@ -21,7 +21,7 @@ final class SpeechListener {
     var onTranscript: ((String, Bool) -> Void)?
     var onError: ((any Error) -> Void)?
 
-    private let recognizer: SFSpeechRecognizer? = SFSpeechRecognizer(locale: Locale(identifier: "en-GB")) ?? SFSpeechRecognizer()
+    private var recognizer: SFSpeechRecognizer? = SFSpeechRecognizer(locale: Locale(identifier: "en-GB")) ?? SFSpeechRecognizer()
     private var engine: AVAudioEngine?
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
@@ -48,6 +48,8 @@ final class SpeechListener {
         endRecognition()
         discardWriter()
         lastCaptureFailure = nil
+        let locale = Locale(identifier: AppSettings.shared.speechLocale)
+        recognizer = SFSpeechRecognizer(locale: locale) ?? SFSpeechRecognizer()
         guard let recognizer, recognizer.isAvailable else { throw ListenerError.unavailable }
 
         let request = SFSpeechAudioBufferRecognitionRequest()

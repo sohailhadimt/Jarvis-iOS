@@ -4,11 +4,13 @@ struct VoiceTurn: Identifiable, Equatable {
     let id: UUID
     var role: String
     var text: String
+    var truncated: Bool
 
-    init(role: String, text: String) {
+    init(role: String, text: String, truncated: Bool = false) {
         id = UUID()
         self.role = role
         self.text = text
+        self.truncated = truncated
     }
 }
 import AVFoundation
@@ -40,6 +42,12 @@ final class AssistantEngine {
     private(set) var cloudExecuting = false
     private(set) var turns: [VoiceTurn] = []
     private(set) var microphoneMuted = false
+    /// True from the moment a session is requested until the microphone is actually listening.
+    private(set) var voiceConnecting = false
+    /// Energy or a partial transcript while listening.
+    private(set) var userIsSpeaking = false
+    private(set) var dictationText = ""
+    private(set) var isDictating = false
     var messageDraft: MessageDraft?
 
     @ObservationIgnored private var conversation: [ChatMessage] = []
@@ -65,7 +73,7 @@ final class AssistantEngine {
     @ObservationIgnored private var wakeArmed = false
     @ObservationIgnored private var appInForeground = false
     @ObservationIgnored private var wakeRestarts = 0
-    @ObservationIgnored private var bargeFrames = 0
+    @ObservationIgnored private var bargeSince: Date?
     @ObservationIgnored private var launchedFromControl = false
     @ObservationIgnored private var utteranceBeingSpoken = ""
     @ObservationIgnored private var spokenSoFar = ""
@@ -73,8 +81,27 @@ final class AssistantEngine {
     /// Smoothed mic level used only to detect the end of a Groq recording.
     @ObservationIgnored private var captureMeter = 0.0
 
-    /// Seconds of silence that end an utterance in hands-free mode.
-    private let silenceTimeout: Duration = .milliseconds(1400)
+    /// Silence that ends a turn. Sensitivity 0.5 is about 700ms.
+    private var silenceTimeout: Duration {
+        let sensitivity = min(1, max(0, AppSettings.shared.vadSensitivity))
+        return .milliseconds(Int(1100 - sensitivity * 800))
+    }
+
+    /// off → connecting → listening ↔ userSpeaking → thinking → aiSpeaking → listening.
+    /// Mute drops into muted. Barge-in (speech for 250ms during playback) returns to userSpeaking.
+    var voiceState: VoiceState {
+        if VoiceSession.shared.exiting { return .ended }
+        guard isSessionActive else { return .off }
+        if voiceConnecting { return .connecting }
+        if errorMessage != nil, phase == .idle { return .error }
+        if microphoneMuted, phase == .listening { return .muted }
+        switch phase {
+        case .idle: return .listening
+        case .listening: return userIsSpeaking ? .userSpeaking : .listening
+        case .thinking: return .thinking
+        case .speaking: return .aiSpeaking
+        }
+    }
 
     private init() {
         listener.onLevel = { [weak self] value in self?.ingestLevel(value) }
@@ -107,10 +134,39 @@ final class AssistantEngine {
 
     func toggleMute() {
         microphoneMuted.toggle()
+        UISelectionFeedbackGenerator().selectionChanged()
         if microphoneMuted {
             if phase == .listening { listener.stop() }
+            userIsSpeaking = false
         } else if isSessionActive, pendingAction == nil, phase != .speaking, phase != .thinking {
             beginListening(manual: false)
+        }
+    }
+
+    /// Fills the composer from one on-device utterance. Does not open a voice session.
+    func toggleDictation() {
+        if isDictating {
+            listener.stop()
+            isDictating = false
+            refreshWake()
+            return
+        }
+        guard !isSessionActive else { return }
+        isDictating = true
+        dictationText = ""
+        Task {
+            guard await prepareAudio() else {
+                isDictating = false
+                return
+            }
+            stopWake()
+            do {
+                try listener.start()
+            } catch {
+                isDictating = false
+                errorMessage = error.localizedDescription
+                refreshWake()
+            }
         }
     }
 
@@ -127,6 +183,17 @@ final class AssistantEngine {
         launchedFromControl = fromControl
         microphoneMuted = false
         wakeArmed = false
+        if isDictating {
+            isDictating = false
+            listener.stop()
+        }
+        voiceConnecting = true
+        userIsSpeaking = false
+        VoiceSession.shared.chatPresented = true
+        VoiceSession.shared.exiting = false
+        VoiceSession.shared.captionsOn = AppSettings.shared.captionsDefault
+        VoiceSession.shared.showTranscript = false
+        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
         sessionEpoch += 1
         let epoch = sessionEpoch
         let state = UIApplication.shared.applicationState
@@ -194,6 +261,8 @@ final class AssistantEngine {
     func endSession(reason: String = "toggle-off") async {
         sessionEpoch += 1
         sessionLog.info("endSession \(reason, privacy: .public)")
+        VoiceSession.shared.exiting = true
+        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
         interrupt()
         listener.holdEngine = false
         listener.stop()
@@ -201,6 +270,8 @@ final class AssistantEngine {
         isContinuous = false
         launchedFromControl = false
         microphoneMuted = false
+        voiceConnecting = false
+        userIsSpeaking = false
         phase = .idle
         level = 0
         await LiveActivityManager.shared.end(finalState: activityState)
@@ -208,6 +279,10 @@ final class AssistantEngine {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         audioConfigured = false
         refreshWake()
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(260))
+            VoiceSession.shared.exiting = false
+        }
     }
 
     /// Foreground-only. Backgrounding stops the wake recogniser and leaves a control session alone.
@@ -262,8 +337,7 @@ final class AssistantEngine {
         Task {
             let session = AVAudioSession.sharedInstance()
             do {
-                try session.setCategory(.playAndRecord, mode: .default,
-                                        options: [.defaultToSpeaker, .allowBluetoothA2DP, .duckOthers])
+                try Self.configureVoiceSession(session)
                 try session.setActive(true)
                 audioConfigured = true
             } catch {
@@ -334,15 +408,19 @@ final class AssistantEngine {
         return true
     }
 
+    private static func configureVoiceSession(_ session: AVAudioSession) throws {
+        try session.setCategory(.playAndRecord, mode: .voiceChat,
+                                options: [.defaultToSpeaker, .allowBluetoothHFP])
+    }
+
     private func activateAudioSession() -> Bool {
         if !audioConfigured {
             do {
                 let session = AVAudioSession.sharedInstance()
-                try session.setCategory(.playAndRecord, mode: .default,
-                                        options: [.defaultToSpeaker, .allowBluetoothA2DP, .duckOthers])
+                try Self.configureVoiceSession(session)
                 try session.setActive(true)
                 audioConfigured = true
-                sessionLog.info("AVAudioSession active playAndRecord")
+                sessionLog.info("AVAudioSession active playAndRecord voiceChat")
             } catch {
                 errorMessage = "Audio session error: \(error.localizedDescription)"
                 sessionLog.error("AVAudioSession failed: \(error.localizedDescription, privacy: .public)")
@@ -368,6 +446,8 @@ final class AssistantEngine {
         loudFrames = 0
         captureMeter = 0
         captureFile = false
+        userIsSpeaking = false
+        voiceConnecting = false
         if microphoneMuted {
             listener.stop()
             phase = .listening
@@ -388,6 +468,7 @@ final class AssistantEngine {
             }
             phase = .listening
             listenRetries = 0
+            output.prewarm()
         } catch {
             errorMessage = error.localizedDescription
             sessionLog.error("beginListening failed: \(error.localizedDescription, privacy: .public)")
@@ -417,6 +498,15 @@ final class AssistantEngine {
     }
 
     private func handleTranscript(_ text: String, isFinal: Bool) {
+        if isDictating {
+            dictationText = text
+            if isFinal {
+                isDictating = false
+                listener.stop()
+                refreshWake()
+            }
+            return
+        }
         if wakeArmed, !isSessionActive {
             if Self.hearsWakeWord(text) {
                 wakeArmed = false
@@ -429,6 +519,7 @@ final class AssistantEngine {
         }
         guard phase == .listening, pendingAction == nil, !microphoneMuted else { return }
         transcript = text
+        userIsSpeaking = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         guard !manualTurn else { return }
         if isFinal {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -442,8 +533,9 @@ final class AssistantEngine {
             return
         }
         silenceTask?.cancel()
-        silenceTask = Task { [weak self, silenceTimeout] in
-            try? await Task.sleep(for: silenceTimeout)
+        let timeout = silenceTimeout
+        silenceTask = Task { [weak self] in
+            try? await Task.sleep(for: timeout)
             guard !Task.isCancelled else { return }
             self?.finishUtterance()
         }
@@ -789,18 +881,20 @@ final class AssistantEngine {
 
     private func noteBarge(_ value: Double) {
         guard phase == .speaking else {
-            bargeFrames = 0
+            bargeSince = nil
             return
         }
-        let threshold = listener.voiceProcessingEnabled ? 0.32 : 0.48
+        let sensitivity = min(1, max(0, AppSettings.shared.vadSensitivity))
+        let threshold = (listener.voiceProcessingEnabled ? 0.32 : 0.48) * (1.2 - sensitivity * 0.4)
         if value > threshold {
-            bargeFrames += 1
-            if bargeFrames >= 4 {
-                bargeFrames = 0
+            let start = bargeSince ?? Date()
+            bargeSince = start
+            if Date().timeIntervalSince(start) >= 0.25 {
+                bargeSince = nil
                 bargeIn()
             }
         } else if value < threshold * 0.6 {
-            bargeFrames = 0
+            bargeSince = nil
         }
     }
 
@@ -808,11 +902,13 @@ final class AssistantEngine {
     private func bargeIn() {
         guard phase == .speaking else { return }
         sessionLog.info("barge-in")
+        UISelectionFeedbackGenerator().selectionChanged()
         commitSpokenFragment()
         let keepListening = isSessionActive || isContinuous
         interrupt()
         if keepListening {
             beginListening(manual: false)
+            userIsSpeaking = true
         } else {
             phase = .idle
             level = 0
@@ -829,9 +925,9 @@ final class AssistantEngine {
         return true
     }
 
-    private func recordAssistant(_ text: String) {
+    private func recordAssistant(_ text: String, truncated: Bool = false) {
         conversation.append(ChatMessage(role: "assistant", content: text))
-        turns.append(VoiceTurn(role: "assistant", text: text))
+        turns.append(VoiceTurn(role: "assistant", text: text, truncated: truncated))
         reply = text
         turnAssistantStored = true
     }
@@ -847,7 +943,8 @@ final class AssistantEngine {
         if kept.isEmpty {
             reply = ""
         } else {
-            recordAssistant(kept)
+            let marked = kept.hasSuffix("…") ? kept : kept + "…"
+            recordAssistant(marked, truncated: true)
         }
         spokenSoFar = ""
         utteranceBeingSpoken = ""
@@ -978,19 +1075,25 @@ final class AssistantEngine {
         return StreamedReply(text: full, spoken: false)
     }
 
+    /// A chunk is ready at punctuation, or at 40 characters when the model has not paused yet.
     private static func firstSentence(in text: String) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count >= 12 else { return nil }
+        guard !trimmed.isEmpty else { return nil }
         let chars = Array(trimmed)
         for index in 0..<chars.count {
             let ch = chars[index]
-            guard ch == "." || ch == "!" || ch == "?" else { continue }
-            guard index >= 11 else { continue }
+            guard ch == "." || ch == "!" || ch == "?" || ch == ";" else { continue }
+            guard index >= 1 else { continue }
             if ch == ".", index > 0, chars[index - 1].isNumber { continue }
             if index + 1 < chars.count, chars[index + 1].isLetter { continue }
             return String(chars[0...index])
         }
-        return nil
+        guard trimmed.count >= 40 else { return nil }
+        let window = trimmed.prefix(80)
+        if let space = window.lastIndex(of: " "), trimmed.distance(from: trimmed.startIndex, to: space) >= 40 {
+            return String(trimmed[..<space])
+        }
+        return String(trimmed.prefix(40))
     }
 
     private static func hearsWakeWord(_ text: String) -> Bool {
@@ -1061,9 +1164,11 @@ final class AssistantEngine {
             loudFrames += 1
             if loudFrames >= 3 {
                 heardVoice = true
+                userIsSpeaking = true
                 silenceTask?.cancel()
-                silenceTask = Task { [weak self, silenceTimeout] in
-                    try? await Task.sleep(for: silenceTimeout)
+                let timeout = silenceTimeout
+                silenceTask = Task { [weak self] in
+                    try? await Task.sleep(for: timeout)
                     guard !Task.isCancelled else { return }
                     self?.finishUtterance()
                 }
