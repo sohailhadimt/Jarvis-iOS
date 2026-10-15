@@ -544,7 +544,7 @@ struct CloudClient: Sendable {
     func createTask(goal: String, schedule: String?) async throws -> CloudTask {
         var body: [String: Any] = ["goal": goal]
         if let schedule, !schedule.isEmpty { body["schedule"] = schedule }
-        let envelope: TaskEnvelope = try await send(method: "POST", path: "/tasks", body: body)
+        let envelope: TaskEnvelope = try await sendJSON(method: "POST", path: "/tasks", body: body)
         return envelope.task
     }
 
@@ -557,9 +557,11 @@ struct CloudClient: Sendable {
     }
 
     func decide(id: String, approve: Bool, reason: String?) async throws -> CloudDecision {
-        var body: [String: Any]?
-        if let reason, !reason.isEmpty { body = ["reason": reason] }
-        return try await send(method: "POST", path: "/approvals/\(Self.path(id))/\(approve ? "approve" : "reject")", body: body)
+        let path = "/approvals/\(Self.path(id))/\(approve ? "approve" : "reject")"
+        if let reason, !reason.isEmpty {
+            return try await sendJSON(method: "POST", path: path, body: ["reason": reason])
+        }
+        return try await sendNoBody(method: "POST", path: path)
     }
 
     func memory(query: String?) async throws -> [CloudMemory] {
@@ -572,12 +574,12 @@ struct CloudClient: Sendable {
         var body: [String: Any] = ["content": content, "source_urls": sourceURLs]
         if let key, !key.isEmpty { body["key"] = key }
         if !tags.isEmpty { body["tags"] = tags }
-        let envelope: MemoryEnvelope = try await send(method: "POST", path: "/memory", body: body)
+        let envelope: MemoryEnvelope = try await sendJSON(method: "POST", path: "/memory", body: body)
         return envelope.memory
     }
 
     func deleteMemory(id: String) async throws {
-        let _: DeletedEnvelope = try await send(method: "DELETE", path: "/memory/\(Self.path(id))", body: nil)
+        let _: DeletedEnvelope = try await sendNoBody(method: "DELETE", path: "/memory/\(Self.path(id))")
     }
 
     func activity() async throws -> [CloudActivity] {
@@ -591,12 +593,12 @@ struct CloudClient: Sendable {
     }
 
     func createLead(_ fields: [String: Any]) async throws -> CloudLead {
-        let envelope: LeadEnvelope = try await send(method: "POST", path: "/pipeline", body: fields)
+        let envelope: LeadEnvelope = try await sendJSON(method: "POST", path: "/pipeline", body: fields)
         return envelope.pipeline
     }
 
     func updateLead(id: String, fields: [String: Any]) async throws -> CloudLead {
-        let envelope: LeadEnvelope = try await send(method: "POST", path: "/pipeline/\(Self.path(id))", body: fields)
+        let envelope: LeadEnvelope = try await sendJSON(method: "POST", path: "/pipeline/\(Self.path(id))", body: fields)
         return envelope.pipeline
     }
 
@@ -606,12 +608,12 @@ struct CloudClient: Sendable {
     private struct DeletedEnvelope: Decodable { var deleted: Bool }
 
     private func list<Item: Decodable>(_ keyPath: KeyPath<ListEnvelope<Item>, [Item]?>, path: String, query: [URLQueryItem]) async throws -> [Item] {
-        let envelope: ListEnvelope<Item> = try await send(method: "GET", path: path, query: query, body: nil)
+        let envelope: ListEnvelope<Item> = try await sendNoBody(method: "GET", path: path, query: query)
         return envelope[keyPath: keyPath] ?? []
     }
 
     private func decode<T: Decodable>(path: String) async throws -> T {
-        try await send(method: "GET", path: path, body: nil)
+        try await sendNoBody(method: "GET", path: path)
     }
 
     private func query(status: String?, limit: Int) -> [URLQueryItem] {
@@ -620,16 +622,22 @@ struct CloudClient: Sendable {
         return items
     }
 
-    private func send<T: Decodable>(method: String, path: String, query: [URLQueryItem] = [], body: [String: Any]?) async throws -> T {
-        let data = try body.map { try JSONSerialization.data(withJSONObject: $0) }
-        return try await send(method: method, path: path, query: query, body: data)
+    /// JSON object body. The dictionary is not optional, so a nil literal cannot select this overload.
+    private func sendJSON<R: Decodable>(method: String, path: String, query: [URLQueryItem] = [], body: [String: Any]) async throws -> R {
+        let data = try JSONSerialization.data(withJSONObject: body)
+        return try await sendData(method: method, path: path, query: query, body: data)
     }
 
-    private func send<T: Decodable>(method: String, path: String, query: [URLQueryItem] = [], body: Data?) async throws -> T {
+    /// No request body. Used by GET and by DELETE, whose JSON reply is still decoded.
+    private func sendNoBody<R: Decodable>(method: String, path: String, query: [URLQueryItem] = []) async throws -> R {
+        try await sendData(method: method, path: path, query: query, body: nil)
+    }
+
+    private func sendData<R: Decodable>(method: String, path: String, query: [URLQueryItem] = [], body: Data?) async throws -> R {
         let (data, status) = try await raw(method: method, path: path, authorize: true, body: body, query: query)
         guard (200..<300).contains(status) else { throw Self.failure(data: data, status: status) }
         do {
-            return try JSONDecoder().decode(T.self, from: data)
+            return try JSONDecoder().decode(R.self, from: data)
         } catch {
             throw CloudFailure.http(status, "The reply could not be read.")
         }
