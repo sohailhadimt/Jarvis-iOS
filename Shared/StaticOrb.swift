@@ -1,35 +1,45 @@
 import SwiftUI
+import UIKit
 
-/// Non-animated orb used in widgets, Live Activities and the reply card.
-/// WidgetKit can't run the home screen's particle field, so this is the still version of it.
+/// Still frame of the geodesic orb for widgets, Live Activities and the reply card.
+/// WidgetKit does not run the home screen's 60 fps timeline.
 struct StaticOrb: View {
     var phase: JarvisPhase = .idle
     var primary: Color = Color(hex: SharedConfig.defaults.string(forKey: SharedConfig.Key.primaryHex) ?? Theme.defaultPrimaryHex)
     var accent: Color = Color(hex: SharedConfig.defaults.string(forKey: SharedConfig.Key.accentHex) ?? Theme.defaultAccentHex)
 
     var body: some View {
-        GeometryReader { geo in
-            let d = min(geo.size.width, geo.size.height)
-            ZStack {
-                Circle()
-                    .fill(RadialGradient(colors: [primary.opacity(0.45), .clear],
-                                         center: .center, startRadius: 0, endRadius: d * 0.5))
-                Circle()
-                    .stroke(primary.opacity(0.35), lineWidth: max(0.5, d * 0.015))
-                    .frame(width: d * 0.86, height: d * 0.86)
-                Circle()
-                    .stroke(primary.opacity(phase == .idle ? 0.75 : 1), lineWidth: max(1, d * 0.035))
-                    .frame(width: d * 0.68, height: d * 0.68)
-                Circle()
-                    .fill(RadialGradient(colors: [.white, primary.opacity(0.9), primary.opacity(0.15)],
-                                         center: .center, startRadius: 0, endRadius: d * 0.16))
-                    .frame(width: d * 0.28, height: d * 0.28)
-                Circle()
-                    .stroke(accent.opacity(0.8), lineWidth: max(0.5, d * 0.012))
-                    .frame(width: d * 0.34, height: d * 0.34)
-            }
-            .frame(width: geo.size.width, height: geo.size.height)
+        Canvas { ctx, size in
+            OrbRenderer.draw(ctx: &ctx, size: size, time: 9.2,
+                             amp: Self.amp(phase), glow: 0.6, level: Self.level(phase), flow: 0.35,
+                             palette: OrbPalette.reference.tinted(with: Self.components(primary)),
+                             detailed: false)
         }
         .aspectRatio(1, contentMode: .fit)
+        .accessibilityLabel("JARVIS")
+    }
+
+    private static func amp(_ phase: JarvisPhase) -> Double {
+        switch phase {
+        case .idle: 0.12
+        case .listening: 0.45
+        case .thinking: 0.32
+        case .speaking: 0.55
+        }
+    }
+
+    private static func level(_ phase: JarvisPhase) -> Double {
+        switch phase {
+        case .listening, .speaking: 0.55
+        case .idle, .thinking: 0
+        }
+    }
+
+    private static func components(_ color: Color) -> (Double, Double, Double) {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        if UIColor(color).getRed(&r, green: &g, blue: &b, alpha: &a) {
+            return (Double(r), Double(g), Double(b))
+        }
+        return (0.247, 0.847, 0.878)
     }
 }
