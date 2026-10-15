@@ -9,19 +9,14 @@ private let controlLog = Logger(subsystem: "com.sohail.jarvis", category: "contr
 /// Compiled into the app and the widget extension. `AudioRecordingIntent` makes iOS run
 /// `perform()` in the app process. The widget copy must not record: an extension is
 /// suspended as soon as `perform()` returns, which dismisses the Live Activity.
-/// `supportedModes` is background so the press does not bring JARVIS forward.
-/// `ForegroundContinuableIntent` is only the fallback when a background launch cannot
-/// start the Live Activity ("Target is not foreground").
-struct SetJarvisSessionIntent: AudioRecordingIntent, SetValueIntent, ForegroundContinuableIntent {
+/// `openAppWhenRun` stays false so the press does not bring JARVIS forward.
+struct SetJarvisSessionIntent: AudioRecordingIntent, SetValueIntent {
     static var title: LocalizedStringResource { "JARVIS" }
     static var description: IntentDescription {
         IntentDescription("Starts or ends a JARVIS session in the Dynamic Island.")
     }
     static var openAppWhenRun: Bool = false
     static var isDiscoverable: Bool = false
-    /// Run in the background so the Action Button does not open the app.
-    /// `requestToContinueInForeground` is the only path that brings it forward.
-    static var supportedModes: IntentModes { [.background] }
 
     @Parameter(title: "Session Active")
     var value: Bool
@@ -39,10 +34,15 @@ struct SetJarvisSessionIntent: AudioRecordingIntent, SetValueIntent, ForegroundC
         #endif
         return .result()
     }
+}
 
-    #if !WIDGET_EXTENSION
+#if !WIDGET_EXTENSION
+/// Unavailable in app extensions. The widget target defines WIDGET_EXTENSION, so only the app conforms.
+extension SetJarvisSessionIntent: ForegroundContinuableIntent {}
+
+extension SetJarvisSessionIntent {
     @MainActor
-    private func runInApp() async throws {
+    fileprivate func runInApp() async throws {
         controlLog.info("perform in app, value=\(self.value ? "on" : "off", privacy: .public)")
         if !value {
             await AssistantEngine.shared.endSession(reason: "control-off")
@@ -57,5 +57,5 @@ struct SetJarvisSessionIntent: AudioRecordingIntent, SetValueIntent, ForegroundC
             }
         }
     }
-    #endif
 }
+#endif
