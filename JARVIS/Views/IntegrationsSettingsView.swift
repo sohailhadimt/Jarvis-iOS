@@ -97,6 +97,7 @@ struct IntegrationsSettingsView: View {
             }
         }
         .navigationTitle("Integrations")
+        .toolbar(.visible, for: .navigationBar)
         .onAppear {
             agentKey = KeychainStore.get(.agentWebhook) ?? ""
             grokKey = KeychainStore.get(.grokBotWebhook) ?? ""

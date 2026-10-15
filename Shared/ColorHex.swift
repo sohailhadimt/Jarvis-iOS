@@ -2,11 +2,11 @@ import SwiftUI
 import UIKit
 
 enum Theme {
-    static let defaultPrimaryHex = "00D8FFFF"   // cyan-blue glow
-    static let defaultAccentHex = "D4AF37FF"    // gold
+    static let defaultPrimaryHex = "5FE6FFFF"   // light cyan, the orb and HUD glow
+    static let defaultAccentHex = "36D6F5FF"    // slightly deeper cyan accent
     static var background: LinearGradient {
         LinearGradient(
-        colors: [Color(red: 0.02, green: 0.04, blue: 0.12), .black],
+        colors: [Color(red: 0.01, green: 0.03, blue: 0.05), .black],
         startPoint: .top, endPoint: .bottom)
     }
 }

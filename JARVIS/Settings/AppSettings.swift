@@ -119,8 +119,27 @@ final class AppSettings {
         agentWebhookURL = d.string(forKey: "agentWebhookURL") ?? ""
         agentWebhookName = d.string(forKey: "agentWebhookName") ?? "your agent"
         grokBotWebhookURL = d.string(forKey: "grokBotWebhookURL") ?? ""
-        primaryHex = d.string(forKey: SharedConfig.Key.primaryHex) ?? Theme.defaultPrimaryHex
-        accentHex = d.string(forKey: SharedConfig.Key.accentHex) ?? Theme.defaultAccentHex
+        let resolvedPrimary = Self.replacingFactoryDefault(d.string(forKey: SharedConfig.Key.primaryHex),
+                                                          previous: ["00D8FFFF", "00D8FF"],
+                                                          fallback: Theme.defaultPrimaryHex)
+        let resolvedAccent = Self.replacingFactoryDefault(d.string(forKey: SharedConfig.Key.accentHex),
+                                                         previous: ["D4AF37FF", "D4AF37"],
+                                                         fallback: Theme.defaultAccentHex)
+        primaryHex = resolvedPrimary
+        accentHex = resolvedAccent
+        // didSet does not run during init, so write a migrated factory colour through explicitly.
+        if d.string(forKey: SharedConfig.Key.primaryHex) != resolvedPrimary {
+            persistColour(resolvedPrimary, key: SharedConfig.Key.primaryHex)
+        }
+        if d.string(forKey: SharedConfig.Key.accentHex) != resolvedAccent {
+            persistColour(resolvedAccent, key: SharedConfig.Key.accentHex)
+        }
+    }
+
+    /// Keeps a colour the user actually picked, and moves the old factory cyan/gold onto the new defaults.
+    private static func replacingFactoryDefault(_ stored: String?, previous: [String], fallback: String) -> String {
+        guard let stored else { return fallback }
+        return previous.contains(stored.uppercased()) ? fallback : stored
     }
 
     private func persistColour(_ hex: String, key: String) {

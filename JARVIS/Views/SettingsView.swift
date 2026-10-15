@@ -31,5 +31,6 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
+        .toolbar(.visible, for: .navigationBar)
     }
 }

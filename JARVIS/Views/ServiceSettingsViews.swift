@@ -70,6 +70,7 @@ struct APIKeysSettingsView: View {
             }
         }
         .navigationTitle("API Keys")
+        .toolbar(.visible, for: .navigationBar)
         .onAppear {
             openAIKey = KeychainStore.get(.openAI) ?? ""
             elevenKey = KeychainStore.get(.elevenLabs) ?? ""
@@ -132,6 +133,7 @@ struct VoicesSettingsView: View {
             }
         }
         .navigationTitle("Voices")
+        .toolbar(.visible, for: .navigationBar)
         .refreshable { await load() }
         .task { await load() }
     }
@@ -170,12 +172,13 @@ struct AppearanceSettingsView: View {
                 ColorPicker("Accent", selection: Binding(
                     get: { settings.accentColor },
                     set: { settings.accentHex = $0.hexString }))
-                Button("Reset to navy, cyan & gold") { settings.resetColours() }
+                Button("Reset to cyan") { settings.resetColours() }
             }
             Section {
                 Toggle("Auto StandBy view when charging in landscape", isOn: $settings.autoStandBy)
             }
         }
         .navigationTitle("Appearance")
+        .toolbar(.visible, for: .navigationBar)
     }
 }

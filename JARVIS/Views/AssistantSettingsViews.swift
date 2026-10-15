@@ -25,6 +25,7 @@ struct PersonalitySettingsView: View {
             }
         }
         .navigationTitle("Personality")
+        .toolbar(.visible, for: .navigationBar)
     }
 }
 
@@ -41,6 +42,7 @@ struct InstructionsSettingsView: View {
             }
         }
         .navigationTitle("Instructions")
+        .toolbar(.visible, for: .navigationBar)
     }
 }
 
@@ -82,6 +84,7 @@ struct MemorySettingsView: View {
             }
         }
         .navigationTitle("Memory")
+        .toolbar(.visible, for: .navigationBar)
         .toolbar { EditButton() }
     }
 }
@@ -96,6 +99,7 @@ struct MemoryFactEditor: View {
             LabeledContent("Added", value: fact.createdAt.formatted(date: .abbreviated, time: .shortened))
         }
         .navigationTitle("Edit fact")
+        .toolbar(.visible, for: .navigationBar)
         .onDisappear { try? context.save() }
     }
 }

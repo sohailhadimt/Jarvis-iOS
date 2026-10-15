@@ -100,6 +100,32 @@ final class AssistantEngine {
         }
     }
 
+    /// Typed request from the Tasks screen. Same turn pipeline as a finished utterance.
+    func ask(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        Task {
+            let session = AVAudioSession.sharedInstance()
+            do {
+                try session.setCategory(.playAndRecord, mode: .default,
+                                        options: [.defaultToSpeaker, .allowBluetoothA2DP, .duckOthers])
+                try session.setActive(true)
+                audioConfigured = true
+            } catch {
+                // A text turn can still run; speech falls back if the session won't start.
+            }
+            interrupt()
+            listener.stop()
+            manualTurn = false
+            transcript = trimmed
+            phase = .thinking
+            level = 0
+            errorMessage = nil
+            pushActivity()
+            turnTask = Task { await respond(to: trimmed) }
+        }
+    }
+
     func testVoice() async {
         guard await prepareAudio() else { return }
         interrupt()
@@ -386,7 +412,8 @@ final class AssistantEngine {
 
     private func ingestLevel(_ value: Double) {
         guard phase == .listening || phase == .speaking else { return }
-        level = level * 0.6 + value * 0.4
+        // RMS from the mic tap (listening) or the player mixer tap (speaking), smoothed.
+        level = level * 0.45 + value * 0.55
     }
 
     private var activityState: JarvisActivityAttributes.ContentState {
