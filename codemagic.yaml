@@ -19,6 +19,11 @@ workflows:
         script: brew install xcodegen
       - name: Generate Xcode project
         script: xcodegen generate
+      - name: Install Metal toolchain
+        script: |
+          # Xcode 26 does not include the Metal compiler until this component is downloaded.
+          xcodebuild -downloadComponent MetalToolchain || true
+          xcrun -f metal || xcodebuild -showComponent MetalToolchain
       - name: Set up keychain to be used for code signing using Codemagic CLI 'keychain' command
         script: keychain initialize
       - name: Fetch signing files
