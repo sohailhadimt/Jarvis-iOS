@@ -280,7 +280,7 @@ final class AssistantEngine {
         audioConfigured = false
         refreshWake()
         Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(260))
+            try? await Task.sleep(for: .milliseconds(160))
             VoiceSession.shared.exiting = false
         }
     }

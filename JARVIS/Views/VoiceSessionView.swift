@@ -248,11 +248,8 @@ struct FullScreenVoiceView: View {
             let orbY = geo.size.height * 0.56
             ZStack {
                 Color.black
-                SkyCloudOrbView(level: engine.level, state: engine.voiceState)
+                SkyCloudOrbView(level: engine.level, state: engine.voiceState, closing: voice.exiting)
                     .frame(width: diameter, height: diameter)
-                    .scaleEffect(voice.exiting ? 0.2 : 1)
-                    .opacity(voice.exiting ? 0 : 1)
-                    .animation(.easeIn(duration: 0.25), value: voice.exiting)
                     .matchedGeometryEffect(id: "voice-orb", in: orbSpace)
                     .position(x: geo.size.width / 2, y: orbY)
                     .onTapGesture { voice.showTranscript.toggle() }

@@ -1,49 +1,81 @@
 import simd
 import SwiftUI
 
-/// Hard-edged sky circle. The cloud field is the stitchable Metal shader `skyClouds`.
+/// Hard-edged sky circle. `boost` speeds the shader clock and the swirl.
 struct SkyCloudOrbView: View {
     var level: Double
     var state: VoiceState
+    var closing: Bool = false
+
+    @State private var meter = LevelSmooth()
+    @State private var closeScale: CGFloat = 1
+    @State private var closeOpacity: Double = 1
 
     var body: some View {
-        let motion = Self.motion(state: state, level: level)
-        GeometryReader { geo in
-            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
-                let time = Float(timeline.date.timeIntervalSinceReferenceDate)
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+            let date = timeline.date
+            let time = date.timeIntervalSinceReferenceDate
+            let smoothed = meter.push(min(1, max(0, level)), at: date)
+            let boost = Self.boost(state: state, level: smoothed)
+            let bob = sin(time * 2 * .pi / 3) * 10
+            let breathe = 1 + 0.025 * (1 + sin(time * 2 * .pi / 4))
+            GeometryReader { geo in
                 Rectangle()
-                    .fill(Color(red: 0.294, green: 0.659, blue: 0.933))
+                    .fill(Color(red: 0.0, green: 0.35, blue: 0.9))
                     .colorEffect(
                         ShaderLibrary.default.skyClouds(
-                            .float(time),
-                            .float(motion.speed),
-                            .float(motion.swell),
-                            .float(Float(min(1, max(0, level)))),
+                            .float(Float(time)),
+                            .float(boost),
                             .float2(SIMD2(Float(geo.size.width), Float(geo.size.height)))
                         )
                     )
             }
+            .clipShape(Circle())
+            .scaleEffect(breathe)
+            .offset(y: bob)
         }
-        .clipShape(Circle())
-        .scaleEffect(motion.scale)
+        .scaleEffect(closing ? closeScale : 1)
+        .opacity(closing ? closeOpacity : 1)
+        .onChange(of: closing) { _, isClosing in
+            guard isClosing else { return }
+            withAnimation(.easeIn(duration: 0.14)) {
+                closeScale = 0.05
+                closeOpacity = 0
+            }
+        }
         .accessibilityLabel("Voice orb")
     }
 
-    private static func motion(state: VoiceState, level: Double) -> (speed: Float, swell: Float, scale: CGFloat) {
-        let loud = min(1, max(0, level))
+    /// Speaking maps the smoothed voice level onto 0...2. Listening only nudges it.
+    private static func boost(state: VoiceState, level: Double) -> Float {
         switch state {
         case .aiSpeaking:
-            return (Float(0.42 + loud * 0.7), Float(0.28 + loud * 0.72), 1 + 0.05 * loud)
+            return Float(level * 2)
         case .userSpeaking:
-            return (Float(0.16 + loud * 0.14), Float(loud * 0.18), 1 + 0.02 * loud)
+            return Float(level * 0.45)
         case .listening:
-            return (Float(0.14 + loud * 0.08), Float(loud * 0.08), 1 + 0.012 * loud)
+            return Float(level * 0.22)
         case .thinking:
-            return (Float(0.22), Float(0.12), 1.015)
+            return 0.12
         case .connecting:
-            return (Float(0.18), Float(0.05), 1)
+            return 0.06
         case .muted, .off, .ended, .error:
-            return (Float(0.055), Float(0), 1)
+            return 0
         }
+    }
+}
+
+/// Attack 0.05s, release 0.25s, so the boost follows the voice instead of the raw samples.
+private final class LevelSmooth {
+    var value = 0.0
+    var last: Date?
+
+    func push(_ target: Double, at date: Date) -> Double {
+        let dt = last.map { date.timeIntervalSince($0) } ?? 0
+        last = date
+        let tau = target > value ? 0.05 : 0.25
+        let step = min(1, dt / max(tau, 0.0001))
+        value += (target - value) * step
+        return value
     }
 }

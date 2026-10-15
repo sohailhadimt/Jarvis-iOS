@@ -1,43 +1,42 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// ChatGPT full-screen voice orb. A circular blue sky with a scrolling, warping cloud field.
-// SwiftUI clips the result to a hard circle; this shader does not draw a glow or a ring.
+// Original sky orb. t = time * 2, sped up by `boost`. No rim, no glow.
 
-float hash21(float2 p) {
-    p = fract(p * float2(123.34, 345.45));
-    p += dot(p, p + 34.345);
-    return fract(p.x * p.y);
+float hash21(float2 cell) {
+    float x = cell.x * 13.571 + cell.y * 79.013;
+    float s = sin(x);
+    return fract(s * s * 97.137 + x * 0.017);
 }
 
-float vnoise(float2 p) {
-    float2 i = floor(p);
+float valueNoise(float2 p) {
+    float2 cell = floor(p);
     float2 f = fract(p);
     float2 u = f * f * (3.0 - 2.0 * f);
-    float a = hash21(i);
-    float b = hash21(i + float2(1.0, 0.0));
-    float c = hash21(i + float2(0.0, 1.0));
-    float d = hash21(i + float2(1.0, 1.0));
+    float a = hash21(cell);
+    float b = hash21(cell + float2(1.0, 0.0));
+    float c = hash21(cell + float2(0.0, 1.0));
+    float d = hash21(cell + float2(1.0, 1.0));
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
 float fbm(float2 p) {
-    float value = 0.0;
-    float amplitude = 0.5;
+    float sum = 0.0;
+    float weight = 0.52;
+    float2 turn = float2(2.4, 6.1);
     for (int octave = 0; octave < 5; octave++) {
-        value += amplitude * vnoise(p);
-        p = p * 2.03 + float2(1.7, 9.2);
-        amplitude *= 0.5;
+        sum += weight * valueNoise(p);
+        p = p * 2.05 + turn;
+        turn = float2(turn.y, -turn.x) * 0.86;
+        weight *= 0.5;
     }
-    return value;
+    return sum;
 }
 
 [[ stitchable ]] half4 skyClouds(float2 position,
                                   half4 color,
                                   float time,
-                                  float speed,
-                                  float swell,
-                                  float level,
+                                  float boost,
                                   float2 size) {
     float2 safe = max(size, float2(1.0));
     float2 uv = position / safe;
@@ -46,42 +45,40 @@ float fbm(float2 p) {
         return half4(0.0h);
     }
 
-    float3 skyTopA = float3(0.29412, 0.65882, 0.93333); // #4BA8EE
-    float3 skyTopB = float3(0.35686, 0.70588, 0.94118); // #5BB4F0
-    float3 skyLow = float3(0.74902, 0.89020, 0.98039);  // #BFE3FA
-    float3 cloudWhite = float3(0.94902, 0.97255, 1.0);  // #F2F8FF
-    float3 cloudPale = float3(0.86667, 0.93333, 1.0);   // #DDEEFF
+    float pace = 1.0 + boost;
+    float t = time * 2.0 * pace;
+    float swirl = 0.28 + boost * 0.22;
 
-    float cycle = 0.5 + 0.5 * sin(time * 0.62);
-    cycle = saturate(cycle + swell);
+    float2 warpScroll = float2(0.16 * t, 0.24 * t);
+    float2 low = uv * 1.15 + warpScroll;
+    float2 warp = float2(fbm(low), fbm(low + float2(3.7, 8.1)));
+    float2 p = uv + (warp - 0.5) * swirl;
 
-    float2 drift = float2(time * speed * 0.24, time * speed * 0.08);
-    float2 p = uv * 1.45 + drift + float2(0.0, -cycle * 0.42);
+    float2 forth = float2(0.07 * t, 0.05 * t);
+    float2 back = float2(-0.09 * t, -0.06 * t);
+    float broad = fbm(p * 2.15 + forth);
+    float tight = fbm(p * 3.55 + back);
+    float clouds = broad * 0.58 + tight * 0.42;
 
-    float2 warp1 = float2(fbm(p + float2(0.0, time * speed * 0.05)),
-                          fbm(p + float2(5.2, 1.3)));
-    float2 warp2 = float2(fbm(p + 1.9 * warp1 + float2(1.7, 9.2)),
-                          fbm(p + 1.9 * warp1 + float2(8.3, 2.8) + level * 0.15));
-    float field = fbm(p + 2.6 * warp2);
-    float detail = fbm(uv * 6.4 + drift * 1.3);
-    float wisps = fbm(uv * 12.0 - drift);
+    float2 wispDrift = float2(0.24 * t, -0.18 * t);
+    float wispField = fbm(p * 4.8 + wispDrift);
+    float wisps = smoothstep(0.74, 0.92, wispField);
 
-    float lowerBand = smoothstep(0.30, 0.58, uv.y) * (1.0 - smoothstep(0.80, 0.98, uv.y));
-    float topRight = smoothstep(0.62, 0.0, length(uv - float2(0.84, 0.14)));
+    float shaped = clouds * 0.72 + smoothstep(0.2, 0.95, uv.y) * 0.28 + wisps * 0.22;
+    float edge = smoothstep(0.34, 0.52, shaped) * (1.0 - smoothstep(0.52, 0.74, shaped));
+    float detail = fbm(p * 13.0 + float2(0.04 * t, -0.03 * t));
+    shaped += (detail - 0.5) * edge * 0.42;
+    shaped = saturate(shaped);
 
-    float threshold = mix(0.64, 0.26, cycle);
-    threshold -= lowerBand * mix(0.24, 0.02, cycle);
-    threshold += topRight * mix(0.0, 0.38, cycle);
+    float3 deepBlue = float3(0.0, 0.35, 0.9);
+    float3 skyBlue = float3(0.1, 0.65, 1.0);
+    float3 cloudWhite = float3(0.95, 0.97, 1.0);
+    float3 warmWhite = float3(1.0, 0.965, 0.93);
 
-    float density = smoothstep(threshold - 0.18, threshold + 0.22, field + detail * 0.14);
-    float feather = smoothstep(0.05, 0.55, field + wisps * 0.22);
-    density = saturate(density * mix(0.72, 1.0, feather));
-
-    float shade = smoothstep(0.25, 0.92, field);
-    float3 cloud = mix(cloudPale, cloudWhite, shade);
-    float3 sky = mix(mix(skyTopA, skyTopB, saturate(uv.x)), skyLow, smoothstep(0.08, 0.95, uv.y));
-    sky = mix(sky, skyTopA, smoothstep(0.42, 0.0, uv.y) * 0.45);
-
-    float3 rgb = mix(sky, cloud, density);
+    float3 sky = mix(deepBlue, skyBlue, smoothstep(0.0, 1.0, uv.y));
+    float cover = smoothstep(0.36, 0.74, shaped);
+    float3 rgb = mix(sky, cloudWhite, cover);
+    float hottest = smoothstep(0.78, 0.98, shaped);
+    rgb = mix(rgb, warmWhite, hottest * 0.4);
     return half4(half3(rgb), 1.0h);
 }

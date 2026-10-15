@@ -50,7 +50,7 @@ struct HomeView: View {
         Task {
             if engine.isSessionActive {
                 await engine.endSession(reason: "close-chat")
-                try? await Task.sleep(for: .milliseconds(260))
+                try? await Task.sleep(for: .milliseconds(160))
             }
             voice.chatPresented = false
         }
