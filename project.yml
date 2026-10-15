@@ -1,0 +1,102 @@
+name: JARVIS
+options:
+  bundleIdPrefix: com.sohail
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  xcodeVersion: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    DEVELOPMENT_TEAM: ""          # set your Team in Xcode (Signing & Capabilities) or put your Team ID here
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+    TARGETED_DEVICE_FAMILY: "1"
+targets:
+  JARVIS:
+    type: application
+    platform: iOS
+    scheme: {}            # shared scheme so CI (Codemagic) can build it
+    sources:
+      - path: JARVIS
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.sohail.jarvis
+        PRODUCT_NAME: JARVIS
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_KEY_CFBundleDisplayName: JARVIS
+    info:
+      path: JARVIS/Info.plist
+      properties:
+        CFBundleDisplayName: JARVIS
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes:
+          - audio
+        NSMicrophoneUsageDescription: "JARVIS listens to your voice so it can answer your questions."
+        NSSpeechRecognitionUsageDescription: "JARVIS converts your speech to text on your iPhone so it can understand you."
+        NSContactsUsageDescription: "JARVIS looks up contacts when you ask it to call, FaceTime or message someone."
+        NSCalendarsFullAccessUsageDescription: "JARVIS reads and edits your calendar events when you ask it to."
+        NSRemindersFullAccessUsageDescription: "JARVIS reads, creates and completes reminders when you ask it to."
+        NSAppleMusicUsageDescription: "JARVIS plays music from your library when you ask it to."
+        LSApplicationQueriesSchemes:
+          - instagram
+          - tiktok
+          - snssdk1233
+          - snapchat
+          - whatsapp
+          - youtube
+          - spotify
+          - twitter
+          - comgooglemaps
+          - maps
+          - music
+          - shortcuts
+          - facetime
+          - facetime-audio
+          - message
+          - tel
+        NSSupportsLiveActivities: true
+        NSSupportsLiveActivitiesFrequentUpdates: true
+        CFBundleURLTypes:
+          - CFBundleURLName: com.sohail.jarvis
+            CFBundleURLSchemes: [jarvis]
+    entitlements:
+      path: JARVIS/JARVIS.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.sohail.jarvis
+    dependencies:
+      - target: JARVISWidgets
+        embed: true
+  JARVISWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: JARVISWidgets
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.sohail.jarvis.widgets
+        PRODUCT_NAME: JARVISWidgets
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WIDGET_EXTENSION"
+        SKIP_INSTALL: YES
+    info:
+      path: JARVISWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: JARVIS Widgets
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: JARVISWidgets/JARVISWidgets.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.sohail.jarvis

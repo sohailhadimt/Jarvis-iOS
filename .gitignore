@@ -1,0 +1,21 @@
+# Xcode / XcodeGen (project is generated from project.yml)
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+build/
+*.ipa
+*.dSYM.zip
+*.dSYM
+# Swift Package Manager
+.build/
+.swiftpm/
+# Signing secrets
+*.p8
+*.p12
+*.mobileprovision
+*.cer
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
