@@ -89,6 +89,8 @@ final class AppSettings {
     var stability: Double { didSet { d.set(stability, forKey: "stability") } }
     var similarity: Double { didSet { d.set(similarity, forKey: "similarity") } }
     var autoStandBy: Bool { didSet { d.set(autoStandBy, forKey: "autoStandBy") } }
+    /// Listens for "Jarvis" only while the app is open and on screen.
+    var wakeWordEnabled: Bool { didSet { d.set(wakeWordEnabled, forKey: "wakeWordEnabled") } }
     var routing: TaskRouting { didSet { d.set(routing.rawValue, forKey: "routing") } }
     var searchModel: String { didSet { d.set(searchModel, forKey: "searchModel") } }
     var shortcuts: [RegisteredShortcut] {
@@ -131,6 +133,7 @@ final class AppSettings {
         stability = d.object(forKey: "stability") as? Double ?? 0.5
         similarity = d.object(forKey: "similarity") as? Double ?? 0.75
         autoStandBy = d.object(forKey: "autoStandBy") as? Bool ?? true
+        wakeWordEnabled = d.object(forKey: "wakeWordEnabled") as? Bool ?? true
         routing = TaskRouting(rawValue: d.string(forKey: "routing") ?? "") ?? .split
         searchModel = d.string(forKey: "searchModel") ?? "gpt-4.1-mini"
         shortcuts = (d.data(forKey: "shortcuts")).flatMap { try? JSONDecoder().decode([RegisteredShortcut].self, from: $0) } ?? []

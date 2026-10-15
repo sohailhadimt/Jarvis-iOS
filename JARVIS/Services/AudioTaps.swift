@@ -64,6 +64,7 @@ enum AudioTaps {
     }
 
     nonisolated static func rms(_ buffer: AVAudioPCMBuffer) -> Float {
+        SpectrumMeter.shared.push(buffer)
         guard let data = buffer.floatChannelData?[0] else { return 0 }
         let n = Int(buffer.frameLength)
         guard n > 0 else { return 0 }

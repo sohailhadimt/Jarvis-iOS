@@ -139,4 +139,92 @@ enum LLMClient {
             throw LLMError.http(-1, error.localizedDescription, provider: endpoint.providerName)
         }
     }
+
+    /// Chat Completions SSE. Yields content deltas. Callers fall back to `complete` when this throws
+    /// before any text arrives.
+    static func streamDeltas(messages: [ChatMessage], endpoint: LLMEndpoint) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    var request = URLRequest(url: endpoint.url)
+                    request.httpMethod = "POST"
+                    request.timeoutInterval = 60
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    if let key = endpoint.apiKey, !key.isEmpty {
+                        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+                    }
+                    request.httpBody = try JSONEncoder().encode(StreamRequest(
+                        model: endpoint.model, messages: messages, temperature: 0.7, stream: true))
+                    let bytes: URLSession.AsyncBytes
+                    let response: URLResponse
+                    do {
+                        (bytes, response) = try await URLSession.shared.bytes(for: request)
+                    } catch {
+                        throw LLMError.http(-1, error.localizedDescription, provider: endpoint.providerName)
+                    }
+                    let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    guard (200..<300).contains(status) else {
+                        var body = Data()
+                        for try await byte in bytes {
+                            body.append(byte)
+                            if body.count > 2_000 { break }
+                        }
+                        throw LLMError.http(status, String(data: body, encoding: .utf8) ?? "", provider: endpoint.providerName)
+                    }
+                    var line = Data()
+                    for try await byte in bytes {
+                        try Task.checkCancellation()
+                        if byte == 10 {
+                            if let delta = Self.delta(from: line) { continuation.yield(delta) }
+                            line.removeAll(keepingCapacity: true)
+                        } else if byte != 13 {
+                            line.append(byte)
+                        }
+                    }
+                    if let delta = Self.delta(from: line) { continuation.yield(delta) }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private struct StreamRequest: Encodable {
+        let model: String
+        let messages: [ChatMessage]
+        let temperature: Double
+        let stream: Bool
+    }
+
+    private struct StreamChunk: Decodable {
+        struct Choice: Decodable {
+            struct Delta: Decodable { let content: String? }
+            let delta: Delta?
+            let message: Delta?
+        }
+        let choices: [Choice]?
+    }
+
+    private static func delta(from line: Data) -> String? {
+        guard let text = String(data: line, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else { return nil }
+        let payload: String
+        if text.hasPrefix("data:") {
+            payload = String(text.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+        } else {
+            payload = text
+        }
+        if payload == "[DONE]" || payload.isEmpty { return nil }
+        guard payload.hasPrefix("{"),
+              let data = payload.data(using: .utf8),
+              let chunk = try? JSONDecoder().decode(StreamChunk.self, from: data),
+              let choice = chunk.choices?.first else { return nil }
+        let content = choice.delta?.content ?? choice.message?.content
+        guard let content, !content.isEmpty else { return nil }
+        return content
+    }
 }

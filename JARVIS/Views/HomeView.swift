@@ -5,353 +5,176 @@ struct HomeView: View {
     @Environment(AppSettings.self) private var settings
     var openStandBy: () -> Void
 
-    @State private var pttPressed = false
-    @State private var showReply = false
-    @State private var replyDate: Date?
+    @State private var showSheet = false
+    @State private var showCaption = false
+    @State private var ignoreTapUntil = Date.distantPast
+    @State private var errorCaption: String?
+    @State private var errorTick = 0
 
-    private var tint: Color { settings.primaryColor }
+    private var cyan: Color { Color(red: 0, green: 0.898, blue: 0.949) }
 
     var body: some View {
-        NavigationStack {
-            GeometryReader { geo in
-                let compact = geo.size.height < 700
-                ZStack {
-                    Color.black.ignoresSafeArea()
-                    RadialGradient(colors: [tint.opacity(0.16), .clear],
-                                   center: .center, startRadius: 10, endRadius: 280)
-                        .frame(width: 560, height: 560)
-                        .position(x: geo.size.width / 2, y: geo.size.height * 0.36)
-                        .allowsHitTesting(false)
-
-                    Group {
-                        if compact {
-                            ScrollView {
-                                column(orbHeight: 260)
-                                    .padding(.horizontal, 16)
-                                    .padding(.bottom, 12)
-                            }
-                        } else {
-                            column(orbHeight: max(230, geo.size.height * 0.40))
-                                .padding(.horizontal, 16)
-                                .padding(.bottom, 6)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                        }
-                    }
-                    .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
-                }
+        GeometryReader { geo in
+            let side = geo.size.width * 0.60
+            let top = geo.safeAreaInsets.top
+            let bottom = geo.safeAreaInsets.bottom
+            let midY = top + (geo.size.height - top - bottom) * 0.5
+            ZStack {
+                Color.black
+                orb
+                    .frame(width: side, height: side)
+                    .overlay(alignment: .bottom) { captions.offset(y: 48) }
+                    .position(x: geo.size.width / 2, y: midY)
+                swipeCatcher(height: max(44, bottom + 18), screen: geo.size)
             }
-            .toolbar(.hidden, for: .navigationBar)
-            .toolbarBackground(.hidden, for: .navigationBar)
-            .tint(tint)
-            .sheet(isPresented: $showReply) {
-                NavigationStack {
-                    ReplyDetailView()
-                        .navigationTitle("JARVIS")
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar {
-                            ToolbarItem(placement: .confirmationAction) {
-                                Button("Done") { showReply = false }
-                            }
-                        }
-                }
-                .presentationDetents([.medium, .large])
-                .preferredColorScheme(.dark)
-            }
-            .onChange(of: engine.reply) { _, newValue in
-                if !newValue.isEmpty { replyDate = Date() }
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
+        .ignoresSafeArea()
+        .sheet(isPresented: $showSheet) { menuSheet }
+        .onChange(of: engine.errorMessage) { _, newValue in
+            guard let newValue, !newValue.isEmpty else { return }
+            errorCaption = newValue
+            errorTick += 1
+            let token = errorTick
+            Task {
+                try? await Task.sleep(for: .seconds(3.5))
+                if errorTick == token { errorCaption = nil }
             }
         }
     }
 
-    private func column(orbHeight: CGFloat) -> some View {
-        VStack(spacing: 12) {
-            topBar
-            orbBlock
-                .frame(height: orbHeight)
-            statusCard
-            replyCard
-            if let summary = engine.pendingSummary {
-                ConfirmBar(summary: summary,
-                           onConfirm: { engine.confirmPendingAction() },
-                           onCancel: { engine.cancelPendingAction() })
+    private var orb: some View {
+        OrbView(level: engine.level, phase: engine.phase,
+                primary: settings.primaryColor, accent: settings.accentColor,
+                sessionActive: engine.isSessionActive,
+                executing: engine.phase == .thinking && engine.statusLine != nil,
+                hasError: errorCaption != nil,
+                reply: engine.reply)
+            .contentShape(Circle())
+            .onTapGesture {
+                if Date() < ignoreTapUntil { return }
+                Task { await engine.toggleSession() }
             }
-            if let error = engine.errorMessage {
-                Text(error)
-                    .font(.system(size: 12, weight: .light))
-                    .foregroundStyle(.orange)
+            .onLongPressGesture(minimumDuration: 0.45) {
+                showCaption.toggle()
+                ignoreTapUntil = Date().addingTimeInterval(0.45)
+            }
+            .accessibilityAddTraits(.isButton)
+            .accessibilityHint(engine.isSessionActive ? "Stops the session" : "Starts a session")
+            .accessibilityAction(named: "Transcript") { showCaption.toggle() }
+    }
+
+    private var captions: some View {
+        VStack(spacing: 8) {
+            if showCaption, !captionText.isEmpty {
+                Text(captionText)
+                    .font(.system(size: 13, weight: .light))
+                    .foregroundStyle(cyan.opacity(0.72))
                     .multilineTextAlignment(.center)
-                    .frame(maxWidth: .infinity)
+                    .lineLimit(2)
             }
-            tiles
-        }
-    }
-
-    // MARK: Top bar
-
-    private var topBar: some View {
-        HStack(alignment: .center) {
-            Button(action: openStandBy) {
-                GridMark(tint: tint)
-                    .frame(width: 40, height: 40)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("StandBy view")
-
-            Spacer(minLength: 0)
-
-            VStack(spacing: 3) {
-                Text("JARVIS")
-                    .font(.system(size: 26, weight: .thin))
-                    .tracking(8)
-                    .foregroundStyle(tint)
-                    .shadow(color: tint.opacity(0.7), radius: 8)
-                Text("YOUR INTELLIGENT ASSISTANT")
-                    .font(.system(size: 8, weight: .medium))
-                    .tracking(2.2)
-                    .foregroundStyle(.white.opacity(0.55))
-            }
-
-            Spacer(minLength: 0)
-
-            NavigationLink {
-                SettingsView()
-            } label: {
-                Image(systemName: "person")
-                    .font(.system(size: 16, weight: .light))
-                    .foregroundStyle(tint)
-                    .frame(width: 40, height: 40)
-                    .overlay(Circle().stroke(tint.opacity(0.75), lineWidth: 1))
-                    .shadow(color: tint.opacity(0.45), radius: 6)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Profile and settings")
-        }
-    }
-
-    // MARK: Orb
-
-    private var orbBlock: some View {
-        ZStack {
-            OrbView(level: engine.level, phase: engine.phase,
-                    primary: tint, accent: settings.accentColor)
-            OrbReticle(color: tint)
-            VStack {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 7) {
-                        phaseLabel("LISTENING", active: engine.phase == .listening)
-                        phaseLabel("THINKING", active: engine.phase == .thinking)
-                        phaseLabel("RESPONDING", active: engine.phase == .speaking)
-                    }
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 4) {
-                        HStack(spacing: 6) {
-                            Circle()
-                                .fill(tint)
-                                .frame(width: 6, height: 6)
-                                .shadow(color: tint, radius: 4)
-                            Text("AI ONLINE")
-                                .font(.system(size: 9, weight: .semibold))
-                                .tracking(1.5)
-                                .foregroundStyle(tint)
-                        }
-                        Text("LLM · VISION · TOOLS")
-                            .font(.system(size: 7, weight: .medium))
-                            .tracking(0.8)
-                            .foregroundStyle(tint.opacity(0.4))
-                        Text("SECURE")
-                            .font(.system(size: 7, weight: .medium))
-                            .tracking(1.2)
-                            .foregroundStyle(tint.opacity(0.4))
-                    }
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 2)
-            .padding(.top, 6)
-            .allowsHitTesting(false)
-        }
-    }
-
-    private func phaseLabel(_ title: String, active: Bool) -> some View {
-        Text(title)
-            .font(.system(size: 9, weight: active ? .semibold : .regular))
-            .tracking(1.7)
-            .foregroundStyle(tint.opacity(active ? 1 : 0.28))
-            .shadow(color: active ? tint.opacity(0.8) : .clear, radius: 6)
-    }
-
-    // MARK: Cards
-
-    private var statusTitle: String {
-        switch engine.phase {
-        case .listening: "Listening..."
-        case .thinking: "Thinking..."
-        case .speaking: "Responding..."
-        case .idle: engine.isSessionActive ? "Listening..." : "Standing by"
-        }
-    }
-
-    private var statusSubtitle: String {
-        if engine.phase == .listening, !engine.transcript.isEmpty { return engine.transcript }
-        if let status = engine.statusLine, engine.phase == .thinking { return status }
-        return "Speak naturally, I'm here."
-    }
-
-    private var statusCard: some View {
-        HStack(spacing: 12) {
-            LevelWaveform(level: engine.level, tint: tint, active: engine.phase == .listening || engine.phase == .speaking)
-                .frame(width: 28, height: 22)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(statusTitle)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(.white)
-                Text(statusSubtitle)
+            if let errorCaption {
+                Text(errorCaption)
                     .font(.system(size: 12, weight: .light))
-                    .foregroundStyle(.white.opacity(0.55))
-                    .lineLimit(1)
+                    .foregroundStyle(.white.opacity(0.45))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
             }
-            Spacer(minLength: 8)
-            micButton
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .glassPanel(tint: tint, radius: 24)
+        .frame(maxWidth: 320)
+        .padding(.horizontal, 28)
+        .allowsHitTesting(false)
     }
 
-    private var micButton: some View {
-        Circle()
-            .fill(tint.opacity(pttPressed ? 0.28 : 0.06))
-            .overlay(Circle().stroke(tint, lineWidth: 1.4))
-            .shadow(color: tint.opacity(pttPressed ? 0.95 : 0.55), radius: pttPressed ? 14 : 8)
-            .overlay(Image(systemName: "mic").font(.system(size: 20, weight: .light)).foregroundStyle(tint))
-            .frame(width: 58, height: 58)
-            .scaleEffect(pttPressed ? 1.06 : 1)
-            .animation(.spring(duration: 0.25), value: pttPressed)
+    private var captionText: String {
+        if !engine.reply.isEmpty { return engine.reply }
+        return engine.transcript
+    }
+
+    private func swipeCatcher(height: CGFloat, screen: CGSize) -> some View {
+        Color.black.opacity(0.001)
+            .frame(width: screen.width, height: height)
+            .position(x: screen.width / 2, y: screen.height - height / 2)
             .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in
-                        if !pttPressed {
-                            pttPressed = true
-                            engine.pushToTalkBegan()
+                DragGesture(minimumDistance: 16)
+                    .onEnded { value in
+                        if value.translation.height < -28, abs(value.translation.width) < 90 {
+                            showSheet = true
                         }
-                    }
-                    .onEnded { _ in
-                        pttPressed = false
-                        engine.pushToTalkEnded()
                     }
             )
-            .accessibilityLabel("Hold to talk")
-            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel("More")
+            .accessibilityHint("Swipe up for conversation, tasks, memory and settings")
+            .accessibilityAction { showSheet = true }
     }
 
-    private var replyHeadline: String {
-        if !engine.transcript.isEmpty { return engine.transcript }
-        return "Here's what I found for you..."
-    }
-
-    private var replyBody: String {
-        if !engine.reply.isEmpty { return engine.reply }
-        return "I can help you with research, analysis, creative ideas, automation and more."
-    }
-
-    private var replyCard: some View {
-        Button {
-            showReply = true
-        } label: {
-            HStack(alignment: .top, spacing: 12) {
-                StaticOrb(phase: engine.phase, primary: tint, accent: settings.accentColor)
-                    .frame(width: 36, height: 36)
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("JARVIS")
-                            .font(.system(size: 11, weight: .semibold))
-                            .tracking(1.4)
-                            .foregroundStyle(tint)
-                        Spacer()
-                        Text(stamp)
-                            .font(.system(size: 11, weight: .light))
-                            .foregroundStyle(.white.opacity(0.4))
+    private var menuSheet: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 0) {
+                    sheetLink("Conversation", systemImage: "text.bubble") { ReplyDetailView() }
+                    sheetLink("Tasks", systemImage: "checklist") { TasksView() }
+                    sheetLink("Approvals", systemImage: "checkmark.circle") { ApprovalsView() }
+                    sheetLink("Memory", systemImage: "brain") { MemorySettingsView() }
+                    sheetLink("Settings", systemImage: "gearshape") { SettingsView() }
+                    sheetLink("Integrations", systemImage: "square.grid.3x3") { IntegrationsSettingsView() }
+                    sheetLink("Voices", systemImage: "speaker.wave.3") { VoicesSettingsView() }
+                    sheetLink("Vision", systemImage: "eye") { VisionPlaceholderView() }
+                    Button {
+                        showSheet = false
+                        openStandBy()
+                    } label: {
+                        menuRow("StandBy", systemImage: "moon.stars")
                     }
-                    Text(replyHeadline)
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Text(replyBody)
-                        .font(.system(size: 12, weight: .light))
-                        .foregroundStyle(.white.opacity(0.62))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    if !engine.citations.isEmpty {
-                        Text(engine.citations.prefix(2).map(\.title).joined(separator: " · "))
-                            .font(.system(size: 10, weight: .light))
-                            .foregroundStyle(settings.accentColor.opacity(0.9))
-                            .lineLimit(1)
-                    }
+                    .buttonStyle(.plain)
                 }
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .light))
-                    .foregroundStyle(tint.opacity(0.7))
-                    .padding(.top, 18)
+                .padding(.top, 8)
             }
-            .padding(14)
-            .glassPanel(tint: tint, radius: 22)
+            .background(Color.black)
+            .navigationTitle("JARVIS")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { showSheet = false }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(Color.black)
+        .preferredColorScheme(.dark)
+        .tint(cyan)
+    }
+
+    private func sheetLink<Destination: View>(_ title: String, systemImage: String,
+                                              @ViewBuilder destination: () -> Destination) -> some View {
+        NavigationLink {
+            destination()
+        } label: {
+            menuRow(title, systemImage: systemImage)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Latest JARVIS reply")
     }
 
-    private var stamp: String {
-        guard let replyDate else { return "Just now" }
-        let seconds = Date().timeIntervalSince(replyDate)
-        if seconds < 45 { return "Just now" }
-        if seconds < 3600 { return "\(max(1, Int(seconds / 60)))m ago" }
-        return replyDate.formatted(date: .omitted, time: .shortened)
-    }
-
-    // MARK: Tiles
-
-    private var tiles: some View {
-        HStack(spacing: 8) {
-            Button {
-                Task { await engine.toggleSession() }
-            } label: {
-                HudTile(systemImage: "mic", title: "Talk",
-                        subtitle: engine.isSessionActive ? "End session" : "Voice chat",
-                        tint: tint, active: engine.isSessionActive)
-            }
-            .buttonStyle(.plain)
-
-            NavigationLink {
-                TasksView()
-            } label: {
-                HudTile(systemImage: "checklist", title: "Tasks", subtitle: "Plan & organize", tint: tint)
-            }
-            .buttonStyle(.plain)
-
-            NavigationLink {
-                VisionPlaceholderView()
-            } label: {
-                HudTile(systemImage: "eye", title: "Vision", subtitle: "See & analyze", tint: tint)
-            }
-            .buttonStyle(.plain)
-
-            NavigationLink {
-                IntegrationsSettingsView()
-            } label: {
-                HudTile(systemImage: "bolt", title: "Automation", subtitle: "Make it happen", tint: tint)
-            }
-            .buttonStyle(.plain)
-
-            NavigationLink {
-                SettingsView()
-            } label: {
-                HudTile(systemImage: "gearshape", title: "Settings", subtitle: "Customize", tint: tint)
-            }
-            .buttonStyle(.plain)
+    private func menuRow(_ title: String, systemImage: String) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: systemImage)
+                .frame(width: 24)
+            Text(title)
+                .font(.system(size: 17, weight: .light))
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .light))
+                .foregroundStyle(cyan.opacity(0.45))
+        }
+        .foregroundStyle(cyan)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 16)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(cyan.opacity(0.22)).frame(height: 0.5).padding(.leading, 22)
         }
     }
+
 }
 
 // MARK: - Pieces
@@ -453,6 +276,32 @@ extension View {
 }
 
 /// Confirm-before-acting bar for calls, messages, deletes and agent tasks.
+struct ApprovalsView: View {
+    @Environment(AssistantEngine.self) private var engine
+
+    private var cyan: Color { Color(red: 0, green: 0.898, blue: 0.949) }
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            if let summary = engine.pendingSummary {
+                ConfirmBar(summary: summary,
+                           onConfirm: { engine.confirmPendingAction() },
+                           onCancel: { engine.cancelPendingAction() })
+                    .padding(24)
+            } else {
+                Text("Nothing is waiting for approval.")
+                    .font(.system(size: 15, weight: .light))
+                    .foregroundStyle(cyan.opacity(0.8))
+                    .multilineTextAlignment(.center)
+                    .padding(24)
+            }
+        }
+        .navigationTitle("Approvals")
+        .toolbar(.visible, for: .navigationBar)
+    }
+}
+
 struct ConfirmBar: View {
     @Environment(AppSettings.self) private var settings
     let summary: String

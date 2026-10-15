@@ -13,11 +13,12 @@ struct OrbPalette: Sendable {
     var partG: Double
     var partB: Double
 
-    /// Teal wireframe, steel-blue tiles (#2E6E9E), particle teal (#3FD8E0).
+    /// Simplified Canvas orb for widgets and the Dynamic Island.
+    /// main #00BFCB, highlight #00E5F2, dim ring #0B3948.
     static let reference = OrbPalette(
-        lineR: 0.50, lineG: 0.91, lineB: 0.95,
-        segR: 0.180, segG: 0.431, segB: 0.620,
-        partR: 0.247, partG: 0.847, partB: 0.878
+        lineR: 0.00, lineG: 0.749, lineB: 0.796,
+        segR: 0.043, segG: 0.224, segB: 0.282,
+        partR: 0.00, partG: 0.898, partB: 0.949
     )
 
     func tinted(with primary: (Double, Double, Double)) -> OrbPalette {
@@ -41,7 +42,8 @@ enum OrbRenderer {
         let w = size.width
         let h = size.height
         guard w > 2, h > 2 else { return }
-        let unit = min(w, h)
+        let breath = 1 + 0.015 * sin(time * (2 * Double.pi / 5))
+        let unit = min(w, h) * breath
         let cx = w / 2
         let cy = h / 2
         let tiny = unit < 32
@@ -53,7 +55,7 @@ enum OrbRenderer {
                       amp: amp, glow: glow, energy: energy, flow: flow, palette: palette,
                       detailed: detailed && !tiny)
         drawSegments(ctx: &ctx, cx: cx, cy: cy, unit: unit, time: time,
-                     energy: energy, level: level, palette: palette, count: tiny ? 28 : 52)
+                     energy: energy, level: level, palette: palette, count: tiny ? 24 : 60)
         drawSphere(ctx: &ctx, cx: cx, cy: cy, unit: unit, time: time, palette: palette, sphere: sphere)
     }
 
@@ -170,7 +172,7 @@ enum OrbRenderer {
             let translation = CGAffineTransform(translationX: mx, y: my)
             let rotation = CGAffineTransform(rotationAngle: CGFloat(angle + .pi / 2))
             tile = tile.applying(translation.concatenating(rotation))
-            let alpha = (0.55 + shade * 0.4) * (0.78 + lit * 0.4)
+            let alpha = (0.28 + shade * 0.35) * (0.65 + lit * 0.45)
             ctx.fill(tile, with: .color(Color(.sRGB, red: cr, green: cg, blue: cb, opacity: min(1, alpha))))
         }
     }

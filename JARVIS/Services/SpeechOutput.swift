@@ -5,6 +5,7 @@ import Foundation
 @MainActor
 final class SpeechOutput: NSObject {
     var onLevel: ((Double) -> Void)?
+    var onBargeIn: (() -> Void)?
 
     private let synth = AVSpeechSynthesizer()
     private var synthContinuation: CheckedContinuation<Void, Never>?
@@ -13,6 +14,9 @@ final class SpeechOutput: NSObject {
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
     private var playbackSignal: OnceSignal?
+    private var mixerTapInstalled = false
+    private var inputTapInstalled = false
+    private var bargeFrames = 0
     private let pcmFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                           sampleRate: ElevenLabsClient.pcmSampleRate,
                                           channels: 1, interleaved: false)!
@@ -25,37 +29,26 @@ final class SpeechOutput: NSObject {
     // MARK: ElevenLabs (streaming)
 
     func speakElevenLabs(text: String, voiceID: String, apiKey: String,
-                         stability: Double, similarity: Double) async throws {
+                         stability: Double, similarity: Double, monitorMicrophone: Bool) async throws {
         stop()
         let bytes = try await ElevenLabsClient.streamSpeech(
             text: text, voiceID: voiceID, apiKey: apiKey, stability: stability, similarity: similarity)
         try Task.checkCancellation()
 
-        let engine = AVAudioEngine()
-        let player = AVAudioPlayerNode()
-        engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: pcmFormat)
-        let levelHandler: @Sendable (Float) -> Void = { [weak self] rms in
-            let value = AudioTaps.normalized(rms)
-            Task { @MainActor in self?.onLevel?(value) }
-        }
-        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil,
-                                        block: AudioTaps.levelTap(levelHandler))
-        try engine.start()
-        player.play()
-        self.engine = engine
-        self.player = player
+        let player = try openEngine(monitorMicrophone: monitorMicrophone)
         defer { stopEngine() }
 
-        let chunkBytes = 4_800 * 2 // 0.2 s of 16-bit audio
+        var primed = false
         var pending = Data()
-        pending.reserveCapacity(chunkBytes)
+        pending.reserveCapacity(4_800 * 2)
         for try await byte in bytes {
             pending.append(byte)
-            if pending.count >= chunkBytes {
+            let needed = primed ? 4_800 * 2 : 2_400 * 2
+            if pending.count >= needed {
                 try Task.checkCancellation()
                 if let buffer = makeBuffer(pending) { player.scheduleBuffer(buffer, completionHandler: nil) }
                 pending.removeAll(keepingCapacity: true)
+                primed = true
             }
         }
         try Task.checkCancellation()
@@ -83,14 +76,89 @@ final class SpeechOutput: NSObject {
         return buffer
     }
 
+    /// Playback engine. Voice processing and a mic tap are attached only when the listener
+    /// engine is not already holding the microphone.
+    private func openEngine(monitorMicrophone: Bool) throws -> AVAudioPlayerNode {
+        let engine = AVAudioEngine()
+        var monitoring = false
+        if monitorMicrophone {
+            do {
+                try engine.inputNode.setVoiceProcessingEnabled(true)
+                monitoring = true
+            } catch {
+                monitoring = false
+            }
+        }
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: pcmFormat)
+        let levelHandler: @Sendable (Float) -> Void = { [weak self] rms in
+            let value = AudioTaps.normalized(rms)
+            Task { @MainActor in self?.onLevel?(value) }
+        }
+        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil,
+                                        block: AudioTaps.levelTap(levelHandler))
+        mixerTapInstalled = true
+        if monitoring {
+            let bargeHandler: @Sendable (Float) -> Void = { [weak self] rms in
+                let value = AudioTaps.normalized(rms)
+                Task { @MainActor in self?.noteBarge(value) }
+            }
+            let format = engine.inputNode.outputFormat(forBus: 0)
+            if format.sampleRate > 0, format.channelCount > 0 {
+                engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: format,
+                                            block: AudioTaps.levelTap(bargeHandler))
+                inputTapInstalled = true
+            }
+        }
+        do {
+            try engine.start()
+        } catch {
+            engine.mainMixerNode.removeTap(onBus: 0)
+            if inputTapInstalled { engine.inputNode.removeTap(onBus: 0) }
+            mixerTapInstalled = false
+            inputTapInstalled = false
+            if monitorMicrophone {
+                return try openEngine(monitorMicrophone: false)
+            }
+            throw error
+        }
+        player.play()
+        self.engine = engine
+        self.player = player
+        bargeFrames = 0
+        return player
+    }
+
+    private func noteBarge(_ value: Double) {
+        guard player != nil else { return }
+        if value > 0.36 {
+            bargeFrames += 1
+            if bargeFrames >= 4 {
+                bargeFrames = 0
+                onBargeIn?()
+            }
+        } else if value < 0.18 {
+            bargeFrames = 0
+        }
+    }
+
     private func stopEngine() {
         playbackSignal?.fire()
         playbackSignal = nil
         player?.stop()
-        engine?.mainMixerNode.removeTap(onBus: 0)
+        if mixerTapInstalled {
+            engine?.mainMixerNode.removeTap(onBus: 0)
+            mixerTapInstalled = false
+        }
+        if inputTapInstalled {
+            engine?.inputNode.removeTap(onBus: 0)
+            inputTapInstalled = false
+        }
         engine?.stop()
         player = nil
         engine = nil
+        bargeFrames = 0
         onLevel?(0)
     }
 

@@ -23,6 +23,11 @@ targets:
     scheme: {}            # shared scheme so CI (Codemagic) can build it
     sources:
       - path: JARVIS
+        includes:
+          - "**/*.swift"
+          - "**/*.metal"
+          - "Assets.xcassets"
+          - "Assets.xcassets/**"
       - path: Shared
     settings:
       base:

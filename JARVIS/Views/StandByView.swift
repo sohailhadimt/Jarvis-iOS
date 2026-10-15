@@ -18,9 +18,11 @@ struct StandByView: View {
                 .allowsHitTesting(false)
 
             OrbView(level: engine.level, phase: engine.phase,
-                    primary: tint, accent: settings.accentColor)
+                    primary: tint, accent: settings.accentColor,
+                    sessionActive: engine.isSessionActive,
+                    executing: engine.phase == .thinking && engine.statusLine != nil,
+                    reply: engine.reply)
                 .padding(8)
-                .overlay(OrbReticle(color: tint).opacity(0.55))
                 .contentShape(Rectangle())
                 .onTapGesture { engine.tapToTalk() }
         }
