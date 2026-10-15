@@ -1,3 +1,4 @@
+import AudioToolbox
 import AVFoundation
 import Foundation
 import Speech
@@ -28,6 +29,26 @@ enum AudioTaps {
         }
     }
 
+    /// Final-only callback for transcribing a recorded file. Built here so it is not main-actor isolated.
+    nonisolated static func finalRecognitionHandler(_ handler: @escaping @Sendable (String?, (any Error)?) -> Void)
+        -> @Sendable (SFSpeechRecognitionResult?, (any Error)?) -> Void {
+        return { result, error in
+            if let result, result.isFinal {
+                handler(result.bestTranscription.formattedString, nil)
+            } else if let error {
+                handler(nil, error)
+            }
+        }
+    }
+
+    nonisolated static func fileTap(writer: PCMFileWriter, level: @escaping @Sendable (Float) -> Void)
+        -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
+        return { buffer, _ in
+            writer.append(buffer)
+            level(rms(buffer))
+        }
+    }
+
     nonisolated static func playbackFinished(_ signal: OnceSignal)
         -> @Sendable (AVAudioPlayerNodeCompletionCallbackType) -> Void {
         return { _ in signal.fire() }
@@ -52,6 +73,90 @@ enum AudioTaps {
         await withCheckedContinuation { cont in
             SFSpeechRecognizer.requestAuthorization { cont.resume(returning: $0) }
         }
+    }
+}
+
+/// Writes mic buffers as 16-bit mono 16 kHz WAV. The tap thread is the only caller of `append`.
+final class PCMFileWriter: @unchecked Sendable {
+    let url: URL
+    private let converter: AVAudioConverter
+    private let dest: AVAudioFormat
+    private var file: AVAudioFile?
+    private let lock = NSLock()
+    private var framesWritten = 0
+    private var writeFailed = false
+
+    init(source: AVAudioFormat, url: URL) throws {
+        guard let dest = AVAudioFormat(commonFormat: .pcmFormatInt16,
+                                       sampleRate: 16_000,
+                                       channels: 1,
+                                       interleaved: true),
+              let converter = AVAudioConverter(from: source, to: dest) else {
+            throw ListenerError.noInput
+        }
+        let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatLinearPCM),
+            AVSampleRateKey: 16_000.0,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        let file = try AVAudioFile(forWriting: url, settings: settings,
+                                   commonFormat: .pcmFormatInt16, interleaved: true)
+        self.url = url
+        self.dest = dest
+        self.converter = converter
+        self.file = file
+    }
+
+    func append(_ buffer: AVAudioPCMBuffer) {
+        guard buffer.frameLength > 0 else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard !writeFailed, let file else { return }
+        let ratio = dest.sampleRate / buffer.format.sampleRate
+        let capacity = AVAudioFrameCount((Double(buffer.frameLength) * ratio).rounded(.up)) + 256
+        guard capacity > 0, let output = AVAudioPCMBuffer(pcmFormat: dest, frameCapacity: max(capacity, 256)) else {
+            writeFailed = true
+            return
+        }
+        var error: NSError?
+        var consumed = false
+        let status = converter.convert(to: output, error: &error) { _, outStatus in
+            if consumed {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            consumed = true
+            outStatus.pointee = .haveData
+            return buffer
+        }
+        guard error == nil, status != .error else {
+            writeFailed = true
+            return
+        }
+        guard output.frameLength > 0 else { return }
+        do {
+            try file.write(from: output)
+            framesWritten += Int(output.frameLength)
+        } catch {
+            writeFailed = true
+        }
+    }
+
+    func snapshot() -> (frames: Int, failed: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (framesWritten, writeFailed)
+    }
+
+    /// Finishes the WAV header before the caller reads the file.
+    func close() {
+        lock.lock()
+        file = nil
+        lock.unlock()
     }
 }
 

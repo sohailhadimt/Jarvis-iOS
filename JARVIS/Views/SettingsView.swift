@@ -22,8 +22,8 @@ struct SettingsView: View {
                 Text("""
                 1. Open the iPhone Settings app > Action Button.
                 2. Swipe to "Shortcut", tap "Choose a Shortcut".
-                3. Pick JARVIS > "Toggle JARVIS".
-                Press once to start a hands-free session (Live Activity appears), press again to end it.
+                3. Pick JARVIS > "Talk to JARVIS".
+                That opens JARVIS and starts listening. "Toggle JARVIS" starts or ends a session from the Lock Screen.
                 """)
                 .font(.footnote)
             } header: {

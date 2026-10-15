@@ -3,12 +3,14 @@ import Observation
 import SwiftUI
 import WidgetKit
 
-enum LLMProvider: String, CaseIterable, Identifiable {
-    case openAI, custom
+enum LLMProvider: String, CaseIterable, Identifiable, Sendable {
+    case openAI, gemini, groq, custom
     var id: String { rawValue }
     var title: String {
         switch self {
         case .openAI: "OpenAI"
+        case .gemini: "Gemini"
+        case .groq: "Groq"
         case .custom: "Custom agent endpoint"
         }
     }
@@ -61,6 +63,14 @@ enum PersonalityPreset: String, CaseIterable, Identifiable {
 final class AppSettings {
     static let shared = AppSettings()
     static let modelSuggestions = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
+    static let defaultGeminiModel = "gemini-2.5-flash"
+    static let defaultGroqModel = "llama-3.3-70b-versatile"
+    static let geminiModelSuggestions = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
+    static let groqModelSuggestions = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+
+    private static let openAIURL = URL(string: "https://api.openai.com/v1/chat/completions")!
+    private static let geminiURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")!
+    private static let groqURL = URL(string: "https://api.groq.com/openai/v1/chat/completions")!
 
     @ObservationIgnored private let d = UserDefaults.standard
 
@@ -69,6 +79,8 @@ final class AppSettings {
     var autoRemember: Bool { didSet { d.set(autoRemember, forKey: "autoRemember") } }
     var provider: LLMProvider { didSet { d.set(provider.rawValue, forKey: "provider") } }
     var openAIModel: String { didSet { d.set(openAIModel, forKey: "openAIModel") } }
+    var geminiModel: String { didSet { d.set(geminiModel, forKey: "geminiModel") } }
+    var groqModel: String { didSet { d.set(groqModel, forKey: "groqModel") } }
     var customBaseURL: String { didSet { d.set(customBaseURL, forKey: "customBaseURL") } }
     var customModel: String { didSet { d.set(customModel, forKey: "customModel") } }
     var voiceID: String { didSet { d.set(voiceID, forKey: "voiceID") } }
@@ -102,6 +114,8 @@ final class AppSettings {
         autoRemember = d.object(forKey: "autoRemember") as? Bool ?? true
         provider = LLMProvider(rawValue: d.string(forKey: "provider") ?? "") ?? .openAI
         openAIModel = d.string(forKey: "openAIModel") ?? "gpt-4o-mini"
+        geminiModel = d.string(forKey: "geminiModel") ?? Self.defaultGeminiModel
+        groqModel = d.string(forKey: "groqModel") ?? Self.defaultGroqModel
         customBaseURL = d.string(forKey: "customBaseURL") ?? ""
         customModel = d.string(forKey: "customModel") ?? ""
         voiceID = d.string(forKey: "voiceID") ?? ElevenLabsClient.defaultVoiceID
@@ -153,20 +167,70 @@ final class AppSettings {
         accentHex = Theme.defaultAccentHex
     }
 
+    /// The selected provider when its key is saved. If that key is missing, another saved provider is used.
     func resolvedEndpoint() throws -> LLMEndpoint {
+        if let endpoint = try configuredEndpoint(for: provider, strict: true) {
+            return endpoint
+        }
+        for candidate in fallbacks(after: provider) {
+            if let endpoint = try configuredEndpoint(for: candidate, strict: false) {
+                return endpoint
+            }
+        }
+        throw LLMError.missingKey(provider.title)
+    }
+
+    private func fallbacks(after selected: LLMProvider) -> [LLMProvider] {
+        switch selected {
+        case .openAI: [.gemini, .groq, .custom]
+        case .gemini: [.groq, .openAI, .custom]
+        case .groq: [.gemini, .openAI, .custom]
+        case .custom: [.gemini, .groq, .openAI]
+        }
+    }
+
+    private func configuredEndpoint(for provider: LLMProvider, strict: Bool) throws -> LLMEndpoint? {
         switch provider {
         case .openAI:
-            guard let key = KeychainStore.get(.openAI) else { throw LLMError.missingKey("OpenAI") }
-            let model = openAIModel.trimmingCharacters(in: .whitespaces)
-            return LLMEndpoint(url: URL(string: "https://api.openai.com/v1/chat/completions")!,
-                               apiKey: key, model: model.isEmpty ? "gpt-4o-mini" : model)
+            guard let key = KeychainStore.get(.openAI) else { return nil }
+            return LLMEndpoint(url: Self.openAIURL, apiKey: key,
+                               model: Self.cleaned(openAIModel, fallback: "gpt-4o-mini"),
+                               providerName: "OpenAI", kind: .openAI)
+        case .gemini:
+            guard let key = KeychainStore.get(.gemini) else { return nil }
+            return LLMEndpoint(url: Self.geminiURL, apiKey: key,
+                               model: Self.cleaned(geminiModel, fallback: Self.defaultGeminiModel),
+                               providerName: "Gemini", kind: .gemini)
+        case .groq:
+            guard let key = KeychainStore.get(.groq) else { return nil }
+            return LLMEndpoint(url: Self.groqURL, apiKey: key,
+                               model: Self.cleaned(groqModel, fallback: Self.defaultGroqModel),
+                               providerName: "Groq", kind: .groq)
         case .custom:
-            var base = customBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-            while base.hasSuffix("/") { base.removeLast() }
-            if !base.hasSuffix("/chat/completions") { base += "/chat/completions" }
-            guard let url = URL(string: base), url.scheme?.hasPrefix("http") == true else { throw LLMError.badURL }
-            return LLMEndpoint(url: url, apiKey: KeychainStore.get(.customAgent), model: customModel)
+            return try customEndpoint(strict: strict)
         }
+    }
+
+    private func customEndpoint(strict: Bool) throws -> LLMEndpoint? {
+        var base = customBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if base.isEmpty {
+            if strict { throw LLMError.badURL }
+            return nil
+        }
+        while base.hasSuffix("/") { base.removeLast() }
+        if !base.hasSuffix("/chat/completions") { base += "/chat/completions" }
+        guard let url = URL(string: base), url.scheme == "http" || url.scheme == "https" else {
+            if strict { throw LLMError.badURL }
+            return nil
+        }
+        let model = customModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return LLMEndpoint(url: url, apiKey: KeychainStore.get(.customAgent), model: model,
+                           providerName: "Custom agent", kind: .custom)
+    }
+
+    private static func cleaned(_ raw: String, fallback: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? fallback : trimmed
     }
 
     func systemPrompt(facts: [MemoryFact]) -> String {

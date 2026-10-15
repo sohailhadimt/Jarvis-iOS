@@ -5,6 +5,7 @@ import UIKit
 struct RootView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(AssistantEngine.self) private var engine
+    @Environment(\.scenePhase) private var scenePhase
     @State private var isCharging = false
     @State private var forceStandBy = false
 
@@ -24,6 +25,15 @@ struct RootView: View {
         .onAppear {
             UIDevice.current.isBatteryMonitoringEnabled = true
             refreshBattery()
+            // Referencing the provider keeps it in the binary and refreshes the Action Button list.
+            JarvisShortcuts.updateAppShortcutParameters()
+            startListeningIfRequested()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { startListeningIfRequested() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: JarvisStartListening.notification)) { _ in
+            startListeningIfRequested()
         }
         .sheet(item: Binding(get: { engine.messageDraft }, set: { engine.messageDraft = $0 })) { draft in
             MessageComposer(draft: draft) { engine.messageDraft = nil }
@@ -44,5 +54,10 @@ struct RootView: View {
     private func refreshBattery() {
         let state = UIDevice.current.batteryState
         isCharging = state == .charging || state == .full
+    }
+
+    private func startListeningIfRequested() {
+        guard JarvisStartListening.consume() else { return }
+        Task { await engine.startSession(continuous: true) }
     }
 }

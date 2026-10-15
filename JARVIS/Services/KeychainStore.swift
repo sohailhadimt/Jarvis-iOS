@@ -3,6 +3,8 @@ import Security
 
 enum KeychainKey: String, CaseIterable {
     case openAI = "openai_api_key"
+    case gemini = "gemini_api_key"
+    case groq = "groq_api_key"
     case elevenLabs = "elevenlabs_api_key"
     case customAgent = "custom_agent_bearer_key"
     case agentWebhook = "agent_webhook_bearer_key"

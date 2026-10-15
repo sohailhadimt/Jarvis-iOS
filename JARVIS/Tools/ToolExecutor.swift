@@ -178,7 +178,7 @@ final class ToolExecutor {
                                      label: "your Grok Bot", note: " The result will appear in the Bot's chat, not here.")
 
         case "web_search":
-            guard let key = KeychainStore.get(.openAI) else { throw LLMError.missingKey("OpenAI") }
+            guard let key = KeychainStore.get(.openAI) else { throw LLMError.missingKey("OpenAI web search") }
             let answer = try await ResponsesClient.answer(
                 input: [ChatMessage(role: "user", content: arg("query") ?? "")],
                 instructions: "Research the question and answer factually and concisely. Use British English.",

@@ -33,6 +33,16 @@ enum ToolChatClient {
 
     static func send(messages: [JSONValue], tools: [JSONValue], endpoint: LLMEndpoint,
                      temperature: Double = 0.5) async throws -> Reply {
+        do {
+            return try await perform(messages: messages, tools: tools, endpoint: endpoint, temperature: temperature)
+        } catch let error as LLMError where !tools.isEmpty && error.isToolFormat {
+            // One retry. Drop tools and rewrite any tool transcript so the follow-up request is plain chat.
+            return try await perform(messages: withoutToolMessages(messages), tools: [], endpoint: endpoint, temperature: temperature)
+        }
+    }
+
+    private static func perform(messages: [JSONValue], tools: [JSONValue], endpoint: LLMEndpoint,
+                                temperature: Double) async throws -> Reply {
         var body: [String: JSONValue] = [
             "model": .string(endpoint.model),
             "messages": .array(messages),
@@ -42,29 +52,74 @@ enum ToolChatClient {
             body["tools"] = .array(tools)
             body["tool_choice"] = "auto"
         }
-        let json = try await post(url: endpoint.url, key: endpoint.apiKey, body: .object(body))
-        guard let message = json["choices"]?.array?.first?["message"] else { throw LLMError.emptyReply }
+        let json = try await post(url: endpoint.url, key: endpoint.apiKey, body: .object(body), provider: endpoint.providerName)
+        guard let message = json["choices"]?.array?.first?["message"] else {
+            throw LLMError.emptyReply(provider: endpoint.providerName)
+        }
         let calls: [ToolCall] = (message["tool_calls"]?.array ?? []).compactMap { call in
-            guard let id = call["id"]?.string, let name = call["function"]?["name"]?.string else { return nil }
-            return ToolCall(id: id, name: name, arguments: call["function"]?["arguments"]?.string ?? "{}")
+            guard let name = call["function"]?["name"]?.string, !name.isEmpty else { return nil }
+            let id = call["id"]?.string ?? UUID().uuidString
+            return ToolCall(id: id, name: name, arguments: argumentsString(call["function"]?["arguments"]))
         }
         let content = message["content"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines)
         return Reply(content: content, toolCalls: calls)
     }
 
-    static func post(url: URL, key: String?, body: JSONValue) async throws -> JSONValue {
+    /// Some compatible APIs return function arguments as an object instead of a JSON string.
+    private static func argumentsString(_ value: JSONValue?) -> String {
+        switch value {
+        case .string(let text):
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "{}" : text
+        case .object, .array:
+            guard let value,
+                  let data = try? JSONEncoder().encode(value),
+                  let text = String(data: data, encoding: .utf8) else { return "{}" }
+            return text
+        default:
+            return "{}"
+        }
+    }
+
+    private static func withoutToolMessages(_ messages: [JSONValue]) -> [JSONValue] {
+        messages.compactMap { message in
+            switch message["role"]?.string {
+            case "tool":
+                let content = message["content"]?.string ?? ""
+                return .object(["role": "user", "content": .string("Tool result: \(content)")])
+            case "assistant" where message["tool_calls"] != nil:
+                let content = message["content"]?.string ?? ""
+                guard !content.isEmpty else { return nil }
+                return .object(["role": "assistant", "content": .string(content)])
+            default:
+                return message
+            }
+        }
+    }
+
+    static func post(url: URL, key: String?, body: JSONValue, provider: String = "OpenAI") async throws -> JSONValue {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 90
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let key, !key.isEmpty { request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
         request.httpBody = try JSONEncoder().encode(body)
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            throw LLMError.http(-1, error.localizedDescription, provider: provider)
+        }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else {
-            throw LLMError.http(status, String(data: data, encoding: .utf8) ?? "")
+            throw LLMError.http(status, String(data: data, encoding: .utf8) ?? "", provider: provider)
         }
-        return try JSONDecoder().decode(JSONValue.self, from: data)
+        do {
+            return try JSONDecoder().decode(JSONValue.self, from: data)
+        } catch {
+            throw LLMError.http(-1, error.localizedDescription, provider: provider)
+        }
     }
 }
 
@@ -96,7 +151,7 @@ enum ResponsesClient {
                 }
             }
         }
-        guard !text.isEmpty else { throw LLMError.emptyReply }
+        guard !text.isEmpty else { throw LLMError.emptyReply(provider: "OpenAI") }
         return Answer(text: text, citations: citations)
     }
 

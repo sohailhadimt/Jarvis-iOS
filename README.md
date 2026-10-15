@@ -1,6 +1,6 @@
 # JARVIS for iPhone
 
-A personal voice assistant: you talk, Apple's speech recognition turns it into text on your phone, OpenAI (or another compatible service) writes the reply, and ElevenLabs (or the built-in iPhone voice) speaks it. It has a glowing orb, a Live Activity / Dynamic Island, Action Button support, and a bedside "StandBy" mode.
+A personal voice assistant: you talk, Groq Whisper (or Apple's on-device speech recognition) turns it into text on your phone, Gemini, Groq or OpenAI writes the reply, and ElevenLabs (or the built-in iPhone voice) speaks it. It has a glowing orb, a Live Activity / Dynamic Island, Action Button support, and a bedside "StandBy" mode.
 
 No passwords or API keys are stored in this code. You type them into the app, and it keeps them in the iPhone Keychain.
 
@@ -14,7 +14,9 @@ No passwords or API keys are stored in this code. You type them into the app, an
 | **Homebrew** (https://brew.sh) | Free | Used to install XcodeGen. |
 | An **Apple ID** | Free | Enough to put the app on your own iPhone. |
 | iPhone on **iOS 18 or newer** | – | Action Button needs iPhone 15 Pro or later. Dynamic Island needs iPhone 14 Pro or later. |
-| OpenAI API key | Pay as you go | platform.openai.com > API keys. |
+| Gemini API key | Free | [aistudio.google.com/apikey](https://aistudio.google.com/apikey). Default model `gemini-2.5-flash`. |
+| Groq API key | Free | [console.groq.com/keys](https://console.groq.com/keys). Default model `llama-3.3-70b-versatile`. Also used for speech-to-text. |
+| OpenAI API key | Pay as you go | platform.openai.com > API keys. Optional if Gemini or Groq is saved. |
 | ElevenLabs API key | Optional | elevenlabs.io > Profile > API Keys. Without it, the iPhone's own voice is used. |
 
 **Free vs paid Apple account:** with a free Apple ID, apps you install **stop opening after 7 days**. To fix that, plug the phone in and press Run in Xcode again. The **$99/year Apple Developer Program** is only needed for TestFlight, the App Store, or apps that last a year. A free account may also refuse the **App Groups** capability (see Troubleshooting). The app still works without it. Only the StandBy widget's "last reply" text stops updating.
@@ -51,10 +53,14 @@ Tip: you can instead put your Team ID into `DEVELOPMENT_TEAM` in `project.yml` a
 ## 5. Enter your keys
 
 In the app, tap ⚙️ **Settings > API Keys & Provider**:
-- Paste your **OpenAI** key. The model defaults to `gpt-4o-mini`, and you can pick another.
+- Choose **AI Provider**: OpenAI, Gemini, Groq, or a custom endpoint.
+- **Gemini** (free): paste a key from aistudio.google.com/apikey. The model defaults to `gemini-2.5-flash`.
+- **Groq** (free): paste a key from console.groq.com/keys. The model defaults to `llama-3.3-70b-versatile`. With a Groq key saved, speech-to-text uses Groq Whisper. Without one, the iPhone's on-device speech recognition is used.
+- **OpenAI** is optional. Paste a key if you have credit. The model defaults to `gpt-4o-mini`.
+- If the provider you picked has no key, JARVIS uses another saved key (Gemini, then Groq, then OpenAI).
 - Optionally paste your **ElevenLabs** key, then go to **Voices** to pick a voice, preview it, and adjust Stability and Similarity.
-- **Custom agent endpoint** is an optional second slot for any OpenAI-compatible service: a base URL (for example `https://host/v1`), a bearer key, and a model name. To use it, set the provider picker to it.
-- Tap **Save keys to Keychain**.
+- **Custom agent endpoint** is an optional slot for any OpenAI-compatible service: a base URL (for example `https://host/v1`), a bearer key, and a model name.
+- Tap **Save keys to Keychain**. Personality, instructions and memory are sent to whichever provider answers.
 
 Other settings:
 - **Personality** has presets (J.A.R.V.I.S. butler, Concise, Friendly) and a fully editable prompt.
@@ -70,11 +76,11 @@ Other settings:
 
 ## 7. Assign the Action Button
 
-1. Run the app once so iOS learns about its shortcut.
-2. Open the iPhone **Settings > Action Button**, swipe to **Shortcut**, tap **Choose a Shortcut**, then pick **JARVIS > Toggle JARVIS**.
-3. Press once to start a session. A Live Activity appears on the Lock Screen and in the Dynamic Island, and JARVIS listens. Press again, or tap the red stop button on the Live Activity, to end it.
+1. Run the app once so iOS learns about its shortcuts.
+2. Open the iPhone **Settings > Action Button**, swipe to **Shortcut**, tap **Choose a Shortcut**, then pick **JARVIS > Talk to JARVIS**.
+3. Press the Action Button. JARVIS opens and starts listening. **Toggle JARVIS** in the same list starts or ends a session without bringing the app forward. Press the Action Button again on Toggle, or tap the red stop button on the Live Activity, to end it.
 
-You can also say "Hey Siri, Toggle JARVIS".
+You can also say "Hey Siri, Talk to JARVIS" or "Hey Siri, Toggle JARVIS".
 
 ## 8. StandBy
 
@@ -86,7 +92,7 @@ You can also say "Hey Siri, Toggle JARVIS".
 When you ask JARVIS to *do* something, the AI model chooses a "tool" and the app carries it out. You set this up in **Settings > Integrations & Task agent**.
 
 **Routing (the Task agent setting)**
-- *Questions → ChatGPT, actions → tools* (the default). A quick check decides whether you asked a question or asked for an action. Questions go to OpenAI's Responses API with web search, and the sources appear under the reply. Actions go to the tools below.
+- *Questions → ChatGPT, actions → tools* (the default). A quick check decides whether you asked a question or asked for an action. With OpenAI selected, questions go to OpenAI's Responses API with web search, and the sources appear under the reply. Gemini and Groq answer questions from their own models. Actions go to the tools below. If a provider rejects the tool format, JARVIS retries that turn once without tools.
 - *Smart*: the model decides everything itself, and web search is one of its tools.
 - *Chat only*: no tools at all.
 
@@ -144,7 +150,7 @@ Each one is only asked for the first time a feature needs it. You can change the
 ## 10. What iOS limits (please read)
 
 - **Background microphone:** iOS lets the app keep listening only while its audio session is active, meaning a session started from the app or the Action Button with the Live Activity showing. If iOS ends the session (for example a phone call, or another app taking over the audio), press the Action Button again. iOS does not allow an always-on "Hey JARVIS" wake word for third-party apps.
-- **Speech recognition** runs on-device when your iPhone supports it for English (UK). Otherwise Apple's servers are used.
+- **Speech recognition** uses Groq Whisper when a Groq API key is saved. Otherwise it runs on-device when your iPhone supports it for English (UK). If on-device recognition isn't available, Apple's servers are used.
 - **The Live Activity** updates when the state changes (listening, thinking, speaking), not 60 times a second. The animated orb is only inside the app, because widgets cannot animate continuously.
 - **Live Activities** last up to 8 hours on screen.
 

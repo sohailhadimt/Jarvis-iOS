@@ -29,7 +29,7 @@ struct IntegrationsSettingsView: View {
             } header: {
                 Text("Task agent routing")
             } footer: {
-                Text("Questions use the OpenAI Responses API with web search (sources are shown under the reply). Actions use tools: contacts, calls, messages, calendar, reminders, music, maps, apps and Shortcuts. Calls, messages, deletes and agent tasks always ask you to confirm first.")
+                Text("With OpenAI selected, questions use the OpenAI Responses API with web search (sources are shown under the reply). Gemini and Groq answer from their own models. Actions use tools: contacts, calls, messages, calendar, reminders, music, maps, apps and Shortcuts. Calls, messages, deletes and agent tasks always ask you to confirm first.")
             }
 
             Section {

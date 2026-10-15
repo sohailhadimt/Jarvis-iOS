@@ -4,6 +4,8 @@ import SwiftUI
 struct APIKeysSettingsView: View {
     @Environment(AppSettings.self) private var settings
     @State private var openAIKey = ""
+    @State private var geminiKey = ""
+    @State private var groqKey = ""
     @State private var elevenKey = ""
     @State private var customKey = ""
     @State private var savedMessage: String?
@@ -12,29 +14,43 @@ struct APIKeysSettingsView: View {
         @Bindable var settings = settings
         Form {
             Section {
-                Picker("Use", selection: $settings.provider) {
+                Picker("AI Provider", selection: $settings.provider) {
                     ForEach(LLMProvider.allCases) { Text($0.title).tag($0) }
                 }
-            } header: {
-                Text("Language model provider")
+            } footer: {
+                Text("Gemini and Groq are free. If the selected provider has no key, JARVIS uses another saved key (Gemini, then Groq, then OpenAI).")
             }
 
             Section {
                 SecureField("sk-…", text: $openAIKey)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
-                HStack {
-                    TextField("Model", text: $settings.openAIModel)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    Menu("Presets") {
-                        ForEach(AppSettings.modelSuggestions, id: \.self) { m in
-                            Button(m) { settings.openAIModel = m }
-                        }
-                    }
-                }
+                modelField($settings.openAIModel, presets: AppSettings.modelSuggestions)
             } header: {
                 Text("OpenAI")
             } footer: {
                 Text("Create a key at platform.openai.com > API keys. Default model: gpt-4o-mini.")
+            }
+
+            Section {
+                SecureField("Gemini API key", text: $geminiKey)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                modelField($settings.geminiModel, presets: AppSettings.geminiModelSuggestions)
+                Link("aistudio.google.com/apikey", destination: URL(string: "https://aistudio.google.com/apikey")!)
+            } header: {
+                Text("Gemini")
+            } footer: {
+                Text("Free key. Default model: gemini-2.5-flash. JARVIS calls Google's OpenAI-compatible chat endpoint with Authorization: Bearer.")
+            }
+
+            Section {
+                SecureField("Groq API key", text: $groqKey)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                modelField($settings.groqModel, presets: AppSettings.groqModelSuggestions)
+                Link("console.groq.com/keys", destination: URL(string: "https://console.groq.com/keys")!)
+            } header: {
+                Text("Groq")
+            } footer: {
+                Text("Free key. Default model: llama-3.3-70b-versatile. A saved Groq key also transcribes speech with Whisper. Without a Groq key, JARVIS uses on-device Apple Speech.")
             }
 
             Section {
@@ -62,6 +78,8 @@ struct APIKeysSettingsView: View {
             Section {
                 Button("Save keys to Keychain") {
                     KeychainStore.set(openAIKey, for: .openAI)
+                    KeychainStore.set(geminiKey, for: .gemini)
+                    KeychainStore.set(groqKey, for: .groq)
                     KeychainStore.set(elevenKey, for: .elevenLabs)
                     KeychainStore.set(customKey, for: .customAgent)
                     savedMessage = "Saved securely in the Keychain."
@@ -73,8 +91,22 @@ struct APIKeysSettingsView: View {
         .toolbar(.visible, for: .navigationBar)
         .onAppear {
             openAIKey = KeychainStore.get(.openAI) ?? ""
+            geminiKey = KeychainStore.get(.gemini) ?? ""
+            groqKey = KeychainStore.get(.groq) ?? ""
             elevenKey = KeychainStore.get(.elevenLabs) ?? ""
             customKey = KeychainStore.get(.customAgent) ?? ""
+        }
+    }
+
+    private func modelField(_ text: Binding<String>, presets: [String]) -> some View {
+        HStack {
+            TextField("Model", text: text)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+            Menu("Presets") {
+                ForEach(presets, id: \.self) { model in
+                    Button(model) { text.wrappedValue = model }
+                }
+            }
         }
     }
 }

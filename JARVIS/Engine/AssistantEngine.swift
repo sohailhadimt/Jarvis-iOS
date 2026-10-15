@@ -31,6 +31,13 @@ final class AssistantEngine {
     @ObservationIgnored private var pushToTalkHeld = false
     @ObservationIgnored private var manualTurn = false
     @ObservationIgnored private var audioConfigured = false
+    @ObservationIgnored private var captureFile = false
+    @ObservationIgnored private var heardVoice = false
+    @ObservationIgnored private var loudFrames = 0
+    /// After a Groq transcription auth failure, later listens in this session use on-device speech.
+    @ObservationIgnored private var groqTranscriptionBroken = false
+    /// WAV capture failed, so this session stays on live on-device speech.
+    @ObservationIgnored private var fileCaptureBroken = false
 
     /// Seconds of silence that end an utterance in hands-free mode.
     private let silenceTimeout: Duration = .milliseconds(1400)
@@ -51,6 +58,8 @@ final class AssistantEngine {
 
     func startSession(continuous: Bool) async {
         guard await prepareAudio() else { return }
+        groqTranscriptionBroken = false
+        fileCaptureBroken = false
         isSessionActive = true
         isContinuous = continuous
         LiveActivityManager.shared.start(state: activityState)
@@ -74,6 +83,7 @@ final class AssistantEngine {
 
     func pushToTalkBegan() {
         pushToTalkHeld = true
+        fileCaptureBroken = false
         Task {
             guard await prepareAudio(), pushToTalkHeld else { return }
             interrupt()
@@ -170,14 +180,31 @@ final class AssistantEngine {
     private func beginListening(manual: Bool) {
         manualTurn = manual
         transcript = ""
+        heardVoice = false
+        loudFrames = 0
+        captureFile = false
         do {
-            try listener.start()
+            if shouldCaptureForGroq() {
+                do {
+                    try listener.startFileCapture()
+                    captureFile = true
+                } catch {
+                    fileCaptureBroken = true
+                    try listener.start()
+                }
+            } else {
+                try listener.start()
+            }
             phase = .listening
         } catch {
             errorMessage = error.localizedDescription
             phase = .idle
         }
         pushActivity()
+    }
+
+    private func shouldCaptureForGroq() -> Bool {
+        !fileCaptureBroken && !groqTranscriptionBroken && KeychainStore.get(.groq) != nil
     }
 
     private func handleTranscript(_ text: String, isFinal: Bool) {
@@ -209,13 +236,78 @@ final class AssistantEngine {
     }
 
     private func finishUtterance() {
+        guard phase == .listening else { return }
         silenceTask?.cancel()
-        let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         phase = .thinking
-        listener.stop()
         level = 0
+        pushActivity()
+        if captureFile {
+            captureFile = false
+            let url = listener.stopFileCapture()
+            if url == nil, let failure = listener.lastCaptureFailure {
+                fileCaptureBroken = true
+                errorMessage = failure
+            }
+            guard let url else { afterTurn(); return }
+            turnTask = Task { await transcribeAndRespond(file: url) }
+            return
+        }
+        let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        listener.stop()
         guard !text.isEmpty else { afterTurn(); return }
         turnTask = Task { await respond(to: text) }
+    }
+
+    private func transcribeAndRespond(file url: URL) async {
+        defer { try? FileManager.default.removeItem(at: url) }
+        let text: String
+        do {
+            text = try await transcribeCapturedFile(url)
+        } catch {
+            if Task.isCancelled { return }
+            errorMessage = error.localizedDescription
+            reply = "⚠︎ \(error.localizedDescription)"
+            afterTurn()
+            return
+        }
+        guard !Task.isCancelled else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        transcript = trimmed
+        guard !trimmed.isEmpty else { afterTurn(); return }
+        await respond(to: trimmed)
+    }
+
+    /// Groq Whisper when a Groq key exists. Otherwise, and if Groq fails, on-device Apple Speech.
+    private func transcribeCapturedFile(_ url: URL) async throws -> String {
+        if let key = KeychainStore.get(.groq), !groqTranscriptionBroken {
+            do {
+                statusLine = "Transcribing with Groq…"
+                pushActivity()
+                return try await GroqTranscription.transcribe(fileURL: url, apiKey: key)
+            } catch {
+                if Task.isCancelled { throw error }
+                if Self.isGroqAuthFailure(error) {
+                    groqTranscriptionBroken = true
+                    errorMessage = error.localizedDescription
+                }
+                statusLine = "Using on-device speech…"
+                pushActivity()
+                do {
+                    return try await AppleFileTranscriber.transcribe(url)
+                } catch let apple {
+                    if Task.isCancelled { throw apple }
+                    throw SpeechTranscriptionError(groq: error.localizedDescription, apple: apple.localizedDescription)
+                }
+            }
+        }
+        statusLine = "Using on-device speech…"
+        pushActivity()
+        return try await AppleFileTranscriber.transcribe(url)
+    }
+
+    private static func isGroqAuthFailure(_ error: any Error) -> Bool {
+        guard let llm = error as? LLMError, case .http(let code, _, provider: _) = llm else { return false }
+        return code == 401 || code == 403
     }
 
     private func afterTurn() {
@@ -249,6 +341,9 @@ final class AssistantEngine {
 
         do {
             let endpoint = try settings.resolvedEndpoint()
+            if endpoint.kind != settings.provider {
+                statusLine = "Using \(endpoint.providerName) because no \(settings.provider.title) key is saved."
+            }
             let system = settings.systemPrompt(facts: JarvisStore.allFacts())
             let history = Array(conversation.suffix(16))
             let raw: String
@@ -306,11 +401,11 @@ final class AssistantEngine {
         return (reply.content ?? "").uppercased().contains("ACTION") ? .action : .question
     }
 
-    /// Knowledge path: OpenAI Responses API + web_search (citations), or plain chat for custom endpoints.
+    /// Knowledge path: OpenAI Responses API with web search, or plain chat for Gemini, Groq and custom endpoints.
     private func answerQuestion(system: String, history: [ChatMessage], user: ChatMessage,
                                 endpoint: LLMEndpoint) async throws -> String {
         let settings = AppSettings.shared
-        if settings.provider == .openAI, let key = KeychainStore.get(.openAI) {
+        if endpoint.kind == .openAI, let key = endpoint.apiKey {
             statusLine = "Searching the web…"
             let answer = try await ResponsesClient.answer(
                 input: history + [user],
@@ -414,6 +509,26 @@ final class AssistantEngine {
         guard phase == .listening || phase == .speaking else { return }
         // RMS from the mic tap (listening) or the player mixer tap (speaking), smoothed.
         level = level * 0.45 + value * 0.55
+        noteCaptureLevel()
+    }
+
+    /// Groq Whisper is request/response, so silence is detected from the mic level instead of partial transcripts.
+    private func noteCaptureLevel() {
+        guard captureFile, phase == .listening, !manualTurn else { return }
+        if level > 0.2 {
+            loudFrames += 1
+            if loudFrames >= 3 {
+                heardVoice = true
+                silenceTask?.cancel()
+                silenceTask = Task { [weak self, silenceTimeout] in
+                    try? await Task.sleep(for: silenceTimeout)
+                    guard !Task.isCancelled else { return }
+                    self?.finishUtterance()
+                }
+            }
+        } else if !heardVoice {
+            loudFrames = 0
+        }
     }
 
     private var activityState: JarvisActivityAttributes.ContentState {
