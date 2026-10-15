@@ -7,9 +7,6 @@ workflows:
       # Name of the App Store Connect API key you add in Codemagic (Teams > Integrations).
       app_store_connect: CODEMAGIC_ASC_KEY
     environment:
-      ios_signing:
-        distribution_type: app_store
-        bundle_identifier: com.sohail.jarvis
       vars:
         XCODE_PROJECT: "JARVIS.xcodeproj"
         XCODE_SCHEME: "JARVIS"
@@ -20,11 +17,32 @@ workflows:
         script: brew install xcodegen
       - name: Generate Xcode project
         script: xcodegen generate
-      - name: Fetch signing files for the widget / Live Activity extension
+      - name: Set up keychain to be used for code signing using Codemagic CLI 'keychain' command
+        script: keychain initialize
+      - name: Fetch signing files
         script: |
-          app-store-connect fetch-signing-files "com.sohail.jarvis.widgets" \
-            --type IOS_APP_STORE \
-            --create
+          # CODEMAGIC_ASC_KEY supplies APP_STORE_CONNECT_ISSUER_ID,
+          # APP_STORE_CONNECT_KEY_IDENTIFIER, and APP_STORE_CONNECT_PRIVATE_KEY.
+          if [ -z "${CERTIFICATE_PRIVATE_KEY:-}" ]; then
+            openssl genrsa -out /tmp/cert_key 2048
+            app-store-connect fetch-signing-files "com.sohail.jarvis" \
+              --type IOS_APP_STORE \
+              --create \
+              --certificate-key=@file:/tmp/cert_key
+            app-store-connect fetch-signing-files "com.sohail.jarvis.widgets" \
+              --type IOS_APP_STORE \
+              --create \
+              --certificate-key=@file:/tmp/cert_key
+          else
+            app-store-connect fetch-signing-files "com.sohail.jarvis" \
+              --type IOS_APP_STORE \
+              --create
+            app-store-connect fetch-signing-files "com.sohail.jarvis.widgets" \
+              --type IOS_APP_STORE \
+              --create
+          fi
+      - name: Set up signing certificate
+        script: keychain add-certificates
       - name: Set up code signing settings on Xcode project
         script: xcode-project use-profiles
       - name: Increment build number
