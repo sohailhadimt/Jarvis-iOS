@@ -13,7 +13,7 @@ workflows:
       vars:
         XCODE_PROJECT: "JARVIS.xcodeproj"
         XCODE_SCHEME: "JARVIS"
-        APP_STORE_APPLE_ID: 0000000000   # numeric Apple ID of the app (App Store Connect > App Information)
+        APP_STORE_APPLE_ID: 6822971465   # numeric Apple ID of the app (App Store Connect > App Information)
       xcode: latest
     scripts:
       - name: Install XcodeGen
