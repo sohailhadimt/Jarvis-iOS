@@ -1,5 +1,8 @@
 import ActivityKit
 import Foundation
+import os
+
+private let activityLog = Logger(subsystem: "com.sohail.jarvis", category: "live-activity")
 
 /// Live Activity updates run in nonisolated helpers. `Activity` is not Sendable, so a
 /// main-actor-isolated value must not be passed into `update` / `end` or into a `Task`.
@@ -9,20 +12,33 @@ final class LiveActivityManager {
     private var activityID: String?
     private var lastState: JarvisActivityAttributes.ContentState?
 
-    func start(state: JarvisActivityAttributes.ContentState) {
-        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+    /// Requests the island and returns whether one is actually running.
+    /// Call this before activating the microphone. `AudioRecordingIntent` ends the recording
+    /// if an audio session is active without a Live Activity.
+    @discardableResult
+    func start(state: JarvisActivityAttributes.ContentState) -> Bool {
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+            activityLog.error("Live Activities are disabled for JARVIS")
+            return false
+        }
         // Snapshot ids first. The dismissal task must not see the activity this call is about to request.
         let keepID = activityID
         let staleIDs = Self.activityIDs(except: keepID)
         if !staleIDs.isEmpty {
             Task { await Self.dismiss(ids: staleIDs, finalState: nil) }
         }
-        guard activityID == nil else { return }
+        if activityID != nil {
+            activityLog.info("Live Activity already running")
+            return true
+        }
         do {
             activityID = try Self.requestActivity(state: state)
             lastState = state
+            activityLog.info("Live Activity started")
+            return true
         } catch {
-            print("Live Activity failed: \(error)")
+            activityLog.error("Live Activity request failed: \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 

@@ -12,6 +12,15 @@ enum AudioTaps {
         return { buffer, _ in level(rms(buffer)) }
     }
 
+    /// Keeps the input node pulling buffers so a background recording session is not suspended.
+    nonisolated static func silentTap() -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
+        return { _, _ in }
+    }
+
+    nonisolated static func speechAuthorizationStatus() -> SFSpeechRecognizerAuthorizationStatus {
+        SFSpeechRecognizer.authorizationStatus()
+    }
+
     nonisolated static func recognitionTap(request: SFSpeechAudioBufferRecognitionRequest,
                                            level: @escaping @Sendable (Float) -> Void)
         -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {

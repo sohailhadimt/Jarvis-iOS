@@ -2,8 +2,11 @@ import ActivityKit
 import AVFoundation
 import Foundation
 import Observation
+import os
 import UIKit
 import WidgetKit
+
+private let sessionLog = Logger(subsystem: "com.sohail.jarvis", category: "session")
 
 /// The conversation loop: listen -> transcribe -> LLM -> speak -> (listen again when continuous).
 @MainActor
@@ -40,6 +43,9 @@ final class AssistantEngine {
     @ObservationIgnored private var groqTranscriptionBroken = false
     /// WAV capture failed, so this session stays on live on-device speech.
     @ObservationIgnored private var fileCaptureBroken = false
+    /// Bumped by start and end so a slow start cannot finish after the user has already toggled off.
+    @ObservationIgnored private var sessionEpoch = 0
+    @ObservationIgnored private var listenRetries = 0
 
     /// Seconds of silence that end an utterance in hands-free mode.
     private let silenceTimeout: Duration = .milliseconds(1400)
@@ -54,44 +60,102 @@ final class AssistantEngine {
 
     // MARK: Session (Action Button / Live Activity)
 
-    func toggleSession() async {
-        if isSessionActive { await endSession() } else { await startSession(continuous: true) }
+    enum SessionStart: Equatable {
+        case started, alreadyRunning, failed, needsForeground
     }
 
-    func startSession(continuous: Bool) async {
-        // A background AudioRecordingIntent is suspended unless a Live Activity is up.
-        // In the foreground the on-screen session still runs when Live Activities are off.
-        if UIApplication.shared.applicationState != .active,
-           !ActivityAuthorizationInfo().areActivitiesEnabled {
-            errorMessage = "Turn on Live Activities for JARVIS so the Action Button can listen in the Dynamic Island."
-            publishControlState()
-            return
+    /// Used when a background control launch has to finish in the foreground.
+    func waitUntilForeground() async {
+        for _ in 0..<30 {
+            if UIApplication.shared.applicationState == .active { return }
+            try? await Task.sleep(for: .milliseconds(100))
         }
-        guard await prepareAudio() else {
+        sessionLog.error("timed out waiting for the app to become active")
+    }
+
+    func toggleSession() async {
+        if isSessionActive { await endSession(reason: "in-app-toggle") } else { await startSession(continuous: true) }
+    }
+
+    /// Starts listening and returns before the caller (`perform`) returns.
+    /// The Live Activity is requested before the audio session is activated. The engine stays
+    /// on this singleton for the whole session, including the gaps between utterances.
+    @discardableResult
+    func startSession(continuous: Bool) async -> SessionStart {
+        if isSessionActive, listener.isEngineRunning {
+            sessionLog.info("startSession ignored; engine already running")
             publishControlState()
-            return
+            return .alreadyRunning
         }
-        groqTranscriptionBroken = false
-        fileCaptureBroken = false
+        sessionEpoch += 1
+        let epoch = sessionEpoch
+        let state = UIApplication.shared.applicationState
+        sessionLog.info("startSession epoch=\(epoch) appState=\(state.rawValue) continuous=\(continuous)")
+
+        // Persist ON before any reload. A control refresh that still reads off sends perform(false)
+        // and tears the session down.
         isSessionActive = true
         isContinuous = continuous
         phase = .listening
-        // Request the island before the microphone tap. iOS only keeps the background
-        // recording alive while that Live Activity exists.
-        LiveActivityManager.shared.start(state: activityState)
-        if UIApplication.shared.applicationState != .active,
-           !LiveActivityManager.shared.isRunning {
-            await endSession()
-            errorMessage = "JARVIS couldn't show the Dynamic Island, so the background session was stopped."
-            return
-        }
+        listener.holdEngine = true
         publishControlState()
+
+        let activityOK = LiveActivityManager.shared.start(state: activityState)
+        let inBackground = UIApplication.shared.applicationState != .active
+        if !activityOK && inBackground {
+            // Activating the mic with no Live Activity makes AudioRecordingIntent kill the process.
+            sessionLog.error("Live Activity missing in background; not activating the microphone")
+            errorMessage = "Turn on Live Activities for JARVIS so the Action Button can listen in the Dynamic Island."
+            await endSession(reason: "live-activity-unavailable")
+            return .needsForeground
+        }
+        guard epoch == sessionEpoch else {
+            sessionLog.info("startSession superseded before audio")
+            return .failed
+        }
+
+        // Permissions already granted: activate the session and start the engine with no await,
+        // so both are running before perform() can return.
+        if !activateAudioIfAuthorized() {
+            if inBackground {
+                sessionLog.error("audio session was not activated in the background")
+                return .needsForeground
+            }
+            guard await activateAudio() else {
+                sessionLog.error("activateAudio failed: \(self.errorMessage ?? "", privacy: .public)")
+                guard epoch == sessionEpoch else { return .failed }
+                await endSession(reason: "audio-failed")
+                return .failed
+            }
+            guard epoch == sessionEpoch else { return .failed }
+        }
+
+        if !LiveActivityManager.shared.isRunning {
+            _ = LiveActivityManager.shared.start(state: activityState)
+        }
+        groqTranscriptionBroken = false
+        fileCaptureBroken = false
+        listenRetries = 0
         interrupt()
         beginListening(manual: false)
+        if !listener.isEngineRunning {
+            try? listener.keepEngineAlive()
+        }
+        guard listener.isEngineRunning else {
+            sessionLog.error("audio engine was not running when startSession returned")
+            guard epoch == sessionEpoch else { return .failed }
+            await endSession(reason: "engine-not-running")
+            return .failed
+        }
+        sessionLog.info("session listening; engine held")
+        return .started
     }
 
-    func endSession() async {
+    func endSession(reason: String = "toggle-off") async {
+        sessionEpoch += 1
+        sessionLog.info("endSession \(reason, privacy: .public)")
         interrupt()
+        listener.holdEngine = false
         listener.stop()
         isSessionActive = false
         isContinuous = false
@@ -101,11 +165,6 @@ final class AssistantEngine {
         publishControlState()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         audioConfigured = false
-    }
-
-    /// Writes the App Group flag the control reads, then asks Control Center to redraw it.
-    func syncControlState() {
-        publishControlState()
     }
 
     // MARK: Push-to-talk / tap-to-talk
@@ -176,13 +235,43 @@ final class AssistantEngine {
 
     // MARK: Internals
 
-    private func prepareAudio() async -> Bool {
-        let speech = await AudioTaps.requestSpeechAuthorization()
-        let mic = await AVAudioApplication.requestRecordPermission()
-        guard speech == .authorized, mic else {
-            errorMessage = "JARVIS needs Microphone and Speech Recognition access. Turn them on in iPhone Settings > JARVIS."
+    /// True when the microphone is already allowed and the playAndRecord session is active.
+    /// This path does not suspend, so a control's `perform()` can start the engine before it returns.
+    private func activateAudioIfAuthorized() -> Bool {
+        guard AudioTaps.speechAuthorizationStatus() == .authorized,
+              AVAudioApplication.shared.recordPermission == .granted else {
+            errorMessage = "JARVIS needs Microphone and Speech Recognition access. Open JARVIS once and allow both."
             return false
         }
+        return activateAudioSession()
+    }
+
+    /// Permission prompts only happen in the foreground. A control launch must not `await` before the
+    /// Live Activity exists, and must not activate the session when that activity is missing.
+    private func activateAudio() async -> Bool {
+        var speech = AudioTaps.speechAuthorizationStatus()
+        var mic = AVAudioApplication.shared.recordPermission
+        if speech != .authorized || mic != .granted {
+            guard UIApplication.shared.applicationState == .active else {
+                errorMessage = "JARVIS needs Microphone and Speech Recognition access. Open JARVIS once and allow both."
+                return false
+            }
+            speech = await AudioTaps.requestSpeechAuthorization()
+            let micGranted = await AVAudioApplication.requestRecordPermission()
+            guard speech == .authorized, micGranted else {
+                errorMessage = "JARVIS needs Microphone and Speech Recognition access. Turn them on in iPhone Settings > JARVIS."
+                return false
+            }
+        }
+        return activateAudioSession()
+    }
+
+    private func prepareAudio() async -> Bool {
+        guard await activateAudio() else { return false }
+        return true
+    }
+
+    private func activateAudioSession() -> Bool {
         if !audioConfigured {
             do {
                 let session = AVAudioSession.sharedInstance()
@@ -190,8 +279,10 @@ final class AssistantEngine {
                                         options: [.defaultToSpeaker, .allowBluetoothA2DP, .duckOthers])
                 try session.setActive(true)
                 audioConfigured = true
+                sessionLog.info("AVAudioSession active playAndRecord")
             } catch {
                 errorMessage = "Audio session error: \(error.localizedDescription)"
+                sessionLog.error("AVAudioSession failed: \(error.localizedDescription, privacy: .public)")
                 return false
             }
         }
@@ -225,9 +316,27 @@ final class AssistantEngine {
                 try listener.start()
             }
             phase = .listening
+            listenRetries = 0
         } catch {
             errorMessage = error.localizedDescription
-            phase = .idle
+            sessionLog.error("beginListening failed: \(error.localizedDescription, privacy: .public)")
+            if isSessionActive {
+                try? listener.keepEngineAlive()
+                if isContinuous, listenRetries < 3 {
+                    listenRetries += 1
+                    let attempt = listenRetries
+                    sessionLog.info("retrying recognition \(attempt)")
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(500))
+                        // A successful start zeroes listenRetries, so this retry does not interrupt it.
+                        guard self.isSessionActive, self.listenRetries == attempt else { return }
+                        self.beginListening(manual: false)
+                    }
+                }
+            }
+            if !isSessionActive || !listener.isEngineRunning {
+                phase = .idle
+            }
         }
         pushActivity()
     }
@@ -240,7 +349,17 @@ final class AssistantEngine {
         guard phase == .listening else { return }
         transcript = text
         guard !manualTurn else { return }
-        if isFinal { finishUtterance(); return }
+        if isFinal {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty, isSessionActive, isContinuous, !manualTurn {
+                // The recogniser closes an empty utterance on its own. That must not end the session.
+                sessionLog.info("empty recognition result; restarting listen")
+                beginListening(manual: false)
+                return
+            }
+            finishUtterance()
+            return
+        }
         silenceTask?.cancel()
         silenceTask = Task { [weak self, silenceTimeout] in
             try? await Task.sleep(for: silenceTimeout)
@@ -255,6 +374,7 @@ final class AssistantEngine {
         // Recognition sessions can end (e.g. "no speech detected"); restart in continuous mode.
         if !transcript.isEmpty { finishUtterance(); return }
         if isSessionActive && isContinuous {
+            sessionLog.info("recognition ended; restarting listen")
             beginListening(manual: false)
         } else {
             listener.stop()
@@ -342,6 +462,7 @@ final class AssistantEngine {
     private func afterTurn() {
         level = 0
         if isSessionActive && isContinuous {
+            sessionLog.info("utterance finished; session stays listening")
             beginListening(manual: false)
         } else {
             phase = .idle
@@ -578,7 +699,11 @@ final class AssistantEngine {
     }
 
     private func publishControlState() {
-        SharedConfig.defaults.set(isSessionActive, forKey: SharedConfig.Key.sessionActive)
+        let defaults = SharedConfig.defaults
+        defaults.set(isSessionActive, forKey: SharedConfig.Key.sessionActive)
+        // The widget extension reads this key on reload. Flush before Control Center asks it to.
+        defaults.synchronize()
+        sessionLog.info("control flag \(self.isSessionActive, privacy: .public)")
         ControlCenter.shared.reloadControls(ofKind: SharedConfig.controlKind)
     }
 }
