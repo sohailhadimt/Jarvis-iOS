@@ -28,16 +28,22 @@ struct HomeView: View {
             let midY = top + (geo.size.height - top - bottom - 72) * 0.5
             ZStack {
                 Color.black
-                orb
-                    .frame(width: side, height: side)
-                    .overlay(alignment: .bottom) { captions.offset(y: 48) }
-                    .position(x: geo.size.width / 2, y: midY)
-                swipeCatcher(height: 36, screen: geo.size, above: dockLift)
+                if engine.isSessionActive {
+                    VoiceSessionView()
+                } else {
+                    orb
+                        .frame(width: side, height: side)
+                        .overlay(alignment: .bottom) { captions.offset(y: 48) }
+                        .position(x: geo.size.width / 2, y: midY)
+                    swipeCatcher(height: 36, screen: geo.size, above: dockLift)
+                }
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .overlay(alignment: .bottom) {
-                homeDock
-                    .padding(.bottom, max(bottom, 8))
+                if !engine.isSessionActive {
+                    homeDock
+                        .padding(.bottom, max(bottom, 8))
+                }
             }
         }
         .ignoresSafeArea()
@@ -143,16 +149,16 @@ struct HomeView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
             }
-            .foregroundStyle(cyan)
+            .foregroundStyle(VoiceLook.mist)
             .frame(width: 62, height: 48)
             .background {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(cyan.opacity(0.1))
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(VoiceLook.blue.opacity(0.16))
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
             .overlay {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(cyan.opacity(0.55), lineWidth: 0.6)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(VoiceLook.lavender.opacity(0.35), lineWidth: 0.6)
             }
         }
         .buttonStyle(.plain)
@@ -189,7 +195,7 @@ struct HomeView: View {
                     sheetLink("Business", systemImage: "chart.bar") { CloudBusinessView() }
                     sheetLink("Settings", systemImage: "gearshape") { SettingsView() }
                     sheetLink("Integrations", systemImage: "square.grid.3x3") { IntegrationsSettingsView() }
-                    sheetLink("Voices", systemImage: "speaker.wave.3") { VoicesSettingsView() }
+                    sheetLink("Voice", systemImage: "waveform") { VoicesSettingsView() }
                     sheetLink("Vision", systemImage: "eye") { VisionPlaceholderView() }
                     Button {
                         showSheet = false
@@ -423,7 +429,11 @@ struct ReplyDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                if !engine.transcript.isEmpty {
+                if !engine.turns.isEmpty {
+                    ForEach(engine.turns) { turn in
+                        labeled(turn.role == "user" ? "You" : "JARVIS", turn.text)
+                    }
+                } else if !engine.transcript.isEmpty {
                     labeled("You", engine.transcript)
                 }
                 if let status = engine.statusLine {
@@ -431,7 +441,9 @@ struct ReplyDetailView: View {
                         .font(.caption)
                         .foregroundStyle(settings.accentColor)
                 }
-                labeled("JARVIS", engine.reply.isEmpty ? "Nothing yet." : engine.reply)
+                if engine.turns.isEmpty {
+                    labeled("JARVIS", engine.reply.isEmpty ? "Nothing yet." : engine.reply)
+                }
                 if !engine.citations.isEmpty {
                     Text("Sources")
                         .font(.caption.weight(.semibold))

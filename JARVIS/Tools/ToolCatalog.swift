@@ -121,10 +121,10 @@ enum ToolCatalog {
             tools.append(fn("list_approvals", "List stored JARVIS Cloud approvals. Defaults to pending.",
                             ["status": oneOf(["pending", "approved", "rejected"], "Optional status. Default pending")]))
             tools.append(fn("approve_approval",
-                            "Ask the user to approve one pending cloud approval. The app reads the stored summary and waits for yes. Nothing is emailed, published or paid.",
+                            "Show an approval card for one pending cloud approval. The user taps the card. Do not ask them to say yes. Nothing is emailed, published or paid.",
                             ["approval_id": str("Approval id from list_approvals")], required: ["approval_id"]))
             tools.append(fn("reject_approval",
-                            "Ask the user to reject one pending cloud approval. The app reads the stored summary and waits for yes.",
+                            "Show a card so the user can reject one pending cloud approval. The user taps the card. Do not ask them to say yes.",
                             ["approval_id": str("Approval id from list_approvals")], required: ["approval_id"]))
             tools.append(fn("search_memory", "Search stored JARVIS Cloud memory. Say nothing is stored when the result is empty.",
                             ["query": str("Substring to search. Omit to list recent memory.")]))

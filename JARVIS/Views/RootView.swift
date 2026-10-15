@@ -30,6 +30,9 @@ struct RootView: View {
             engine.setForeground(scenePhase == .active)
             CloudMonitor.shared.setVisible(scenePhase == .active)
             startListeningIfRequested()
+            if settings.startWithVoice, !engine.isSessionActive {
+                Task { await engine.startSession(continuous: true) }
+            }
         }
         .onChange(of: scenePhase) { _, phase in
             // Becoming active or background must not end a control session. The audio engine

@@ -1,4 +1,16 @@
 import ActivityKit
+
+struct VoiceTurn: Identifiable, Equatable {
+    let id: UUID
+    var role: String
+    var text: String
+
+    init(role: String, text: String) {
+        id = UUID()
+        self.role = role
+        self.text = text
+    }
+}
 import AVFoundation
 import Foundation
 import Observation
@@ -26,6 +38,8 @@ final class AssistantEngine {
     private(set) var pendingSummary: String?
     /// True for a turn that asks about cloud work while a cloud task is planning or running.
     private(set) var cloudExecuting = false
+    private(set) var turns: [VoiceTurn] = []
+    private(set) var microphoneMuted = false
     var messageDraft: MessageDraft?
 
     @ObservationIgnored private var conversation: [ChatMessage] = []
@@ -52,6 +66,10 @@ final class AssistantEngine {
     @ObservationIgnored private var appInForeground = false
     @ObservationIgnored private var wakeRestarts = 0
     @ObservationIgnored private var bargeFrames = 0
+    @ObservationIgnored private var launchedFromControl = false
+    @ObservationIgnored private var utteranceBeingSpoken = ""
+    @ObservationIgnored private var spokenSoFar = ""
+    @ObservationIgnored private var turnAssistantStored = false
     /// Smoothed mic level used only to detect the end of a Groq recording.
     @ObservationIgnored private var captureMeter = 0.0
 
@@ -87,16 +105,27 @@ final class AssistantEngine {
         if isSessionActive { await endSession(reason: "in-app-toggle") } else { await startSession(continuous: true) }
     }
 
+    func toggleMute() {
+        microphoneMuted.toggle()
+        if microphoneMuted {
+            if phase == .listening { listener.stop() }
+        } else if isSessionActive, pendingAction == nil, phase != .speaking, phase != .thinking {
+            beginListening(manual: false)
+        }
+    }
+
     /// Starts listening and returns before the caller (`perform`) returns.
     /// The Live Activity is requested before the audio session is activated. The engine stays
     /// on this singleton for the whole session, including the gaps between utterances.
     @discardableResult
-    func startSession(continuous: Bool) async -> SessionStart {
+    func startSession(continuous: Bool, fromControl: Bool = false) async -> SessionStart {
         if isSessionActive, listener.isEngineRunning {
             sessionLog.info("startSession ignored; engine already running")
             publishControlState()
             return .alreadyRunning
         }
+        launchedFromControl = fromControl
+        microphoneMuted = false
         wakeArmed = false
         sessionEpoch += 1
         let epoch = sessionEpoch
@@ -170,6 +199,8 @@ final class AssistantEngine {
         listener.stop()
         isSessionActive = false
         isContinuous = false
+        launchedFromControl = false
+        microphoneMuted = false
         phase = .idle
         level = 0
         await LiveActivityManager.shared.end(finalState: activityState)
@@ -186,6 +217,10 @@ final class AssistantEngine {
             refreshWake()
         } else {
             stopWake()
+            // A control-center session stays up. An in-app voice session stays only when background conversations are on.
+            if isSessionActive, !launchedFromControl, !AppSettings.shared.backgroundConversations {
+                Task { await self.endSession(reason: "background") }
+            }
         }
     }
 
@@ -333,6 +368,12 @@ final class AssistantEngine {
         loudFrames = 0
         captureMeter = 0
         captureFile = false
+        if microphoneMuted {
+            listener.stop()
+            phase = .listening
+            pushActivity()
+            return
+        }
         do {
             if shouldCaptureForGroq() {
                 do {
@@ -386,7 +427,7 @@ final class AssistantEngine {
             if isFinal { beginWakeRecognition() }
             return
         }
-        guard phase == .listening else { return }
+        guard phase == .listening, pendingAction == nil, !microphoneMuted else { return }
         transcript = text
         guard !manualTurn else { return }
         if isFinal {
@@ -522,14 +563,13 @@ final class AssistantEngine {
         statusLine = nil
         pushActivity()
 
-        // A pending action waits for "yes"/"no".
-        if pendingAction != nil {
-            switch ConfirmationWords.classify(text) {
-            case .yes: await runPendingAction(); return
-            case .no: cancelPendingAction(); await say("Very well, cancelled."); afterTurn(); return
-            case .other: cancelPendingAction()
-            }
-        }
+        // Approval is a card. Spoken words do not approve or dismiss it.
+        if pendingAction != nil { return }
+
+        spokenSoFar = ""
+        utteranceBeingSpoken = ""
+        turnAssistantStored = false
+        let recordedUser = recordUser(text)
 
         if wantsCloudTool(text) && CloudMonitor.shared.hasRunningWork {
             cloudExecuting = true
@@ -550,7 +590,8 @@ final class AssistantEngine {
                 statusLine = "Using \(endpoint.providerName) because no \(settings.provider.title) key is saved."
             }
             let system = settings.systemPrompt(facts: JarvisStore.allFacts())
-            let history = Array(conversation.suffix(16))
+            let prior = recordedUser ? Array(conversation.dropLast()) : conversation
+            let history = Array(prior.suffix(16))
             let raw: String
             var alreadySpoken = false
             let cloudTools = JarvisCloud.isConfigured && wantsCloudTool(text)
@@ -581,6 +622,12 @@ final class AssistantEngine {
                 }
             }
             guard !Task.isCancelled else { return }
+            if pendingAction != nil {
+                phase = .idle
+                level = 0
+                pushActivity()
+                return
+            }
             if citations.isEmpty { citations = tools.lastCitations }
             let parsed = MemoryParser.extract(from: raw)
             if settings.autoRemember {
@@ -588,9 +635,7 @@ final class AssistantEngine {
                 await rememberOnCloud(parsed.facts)
             }
             let shown = parsed.cleaned.isEmpty ? "Noted, sir." : parsed.cleaned
-            conversation.append(userMessage)
-            conversation.append(ChatMessage(role: "assistant", content: shown))
-            reply = shown
+            recordAssistant(shown)
             saveForWidget(transcript: text, reply: shown)
             if !alreadySpoken {
                 await say(ResponsesClient.spokenText(shown))
@@ -665,7 +710,7 @@ final class AssistantEngine {
                     pendingAction = action
                     pendingSummary = action.summary
                     statusLine = nil
-                    return action.summary + " Say yes to go ahead, or no to cancel."
+                    return ""
                 }
             }
         }
@@ -687,6 +732,9 @@ final class AssistantEngine {
     func cancelPendingAction() {
         pendingAction = nil
         pendingSummary = nil
+        if isSessionActive, phase != .speaking, phase != .thinking {
+            beginListening(manual: false)
+        }
     }
 
     private func runPendingAction() async {
@@ -695,8 +743,7 @@ final class AssistantEngine {
         phase = .thinking
         pushActivity()
         let result = await action.perform()
-        reply = result
-        conversation.append(ChatMessage(role: "assistant", content: result))
+        recordAssistant(result)
         await say(result)
         guard !Task.isCancelled else { return }
         afterTurn()
@@ -708,14 +755,20 @@ final class AssistantEngine {
 
     private func say(_ text: String) async {
         guard !Task.isCancelled else { return }
+        utteranceBeingSpoken = text
+        output.preparePlayback()
         phase = .speaking
         pushActivity()
         await speak(text)
+        if !Task.isCancelled {
+            spokenSoFar = Self.joinSpoken(spokenSoFar, text)
+            utteranceBeingSpoken = ""
+        }
     }
 
     private func speak(_ text: String) async {
-        let monitor = !listener.isEngineRunning
-        if listener.isEngineRunning {
+        let monitor = !listener.isEngineRunning && !microphoneMuted
+        if listener.isEngineRunning, !microphoneMuted {
             listener.setBargeMonitor(true)
         }
         defer { listener.setBargeMonitor(false) }
@@ -755,6 +808,7 @@ final class AssistantEngine {
     private func bargeIn() {
         guard phase == .speaking else { return }
         sessionLog.info("barge-in")
+        commitSpokenFragment()
         let keepListening = isSessionActive || isContinuous
         interrupt()
         if keepListening {
@@ -764,6 +818,57 @@ final class AssistantEngine {
             level = 0
             pushActivity()
         }
+    }
+
+    @discardableResult
+    private func recordUser(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        conversation.append(ChatMessage(role: "user", content: trimmed))
+        turns.append(VoiceTurn(role: "user", text: trimmed))
+        return true
+    }
+
+    private func recordAssistant(_ text: String) {
+        conversation.append(ChatMessage(role: "assistant", content: text))
+        turns.append(VoiceTurn(role: "assistant", text: text))
+        reply = text
+        turnAssistantStored = true
+    }
+
+    /// Barge-in keeps the words that were actually heard and drops the rest of the reply.
+    private func commitSpokenFragment() {
+        let kept = Self.joinSpoken(spokenSoFar, Self.spokenPrefix(utteranceBeingSpoken, fraction: output.playbackFraction))
+        if turnAssistantStored, conversation.last?.role == "assistant" {
+            conversation.removeLast()
+            if turns.last?.role == "assistant" { turns.removeLast() }
+            turnAssistantStored = false
+        }
+        if kept.isEmpty {
+            reply = ""
+        } else {
+            recordAssistant(kept)
+        }
+        spokenSoFar = ""
+        utteranceBeingSpoken = ""
+    }
+
+    private static func joinSpoken(_ earlier: String, _ later: String) -> String {
+        let first = earlier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let second = later.trimmingCharacters(in: .whitespacesAndNewlines)
+        if first.isEmpty { return second }
+        if second.isEmpty { return first }
+        if first.hasSuffix(second) { return first }
+        return first + " " + second
+    }
+
+    private static func spokenPrefix(_ text: String, fraction: Double) -> String {
+        let words = text.split(separator: " ").map(String.init)
+        guard !words.isEmpty else { return "" }
+        if fraction >= 0.98 { return text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let count = Int((Double(words.count) * fraction).rounded(.down))
+        guard count > 0 else { return "" }
+        return words.prefix(count).joined(separator: " ")
     }
 
     /// Morning and "what's been happening" are read from the stored briefing, then spoken as facts then recommendations.
@@ -778,9 +883,7 @@ final class AssistantEngine {
             errorMessage = spoken
         }
         guard !Task.isCancelled else { return }
-        conversation.append(ChatMessage(role: "user", content: userText))
-        conversation.append(ChatMessage(role: "assistant", content: spoken))
-        reply = spoken
+        recordAssistant(spoken)
         saveForWidget(transcript: userText, reply: spoken)
         await say(spoken)
         guard !Task.isCancelled else { return }

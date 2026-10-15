@@ -17,6 +17,8 @@ final class SpeechOutput: NSObject {
     private var mixerTapInstalled = false
     private var inputTapInstalled = false
     private var bargeFrames = 0
+    private var playbackAnchor: Date?
+    private var scheduledFrames = 0
     private let pcmFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                           sampleRate: ElevenLabsClient.pcmSampleRate,
                                           channels: 1, interleaved: false)!
@@ -28,9 +30,22 @@ final class SpeechOutput: NSObject {
 
     // MARK: ElevenLabs (streaming)
 
+    /// Fraction of the current utterance that has been heard. Read this before `stop()`.
+    var playbackFraction: Double {
+        guard scheduledFrames > 0, let playbackAnchor else { return 0 }
+        let played = Date().timeIntervalSince(playbackAnchor) * pcmFormat.sampleRate
+        return min(1, max(0, played / Double(scheduledFrames)))
+    }
+
+    func preparePlayback() {
+        playbackAnchor = nil
+        scheduledFrames = 0
+    }
+
     func speakElevenLabs(text: String, voiceID: String, apiKey: String,
                          stability: Double, similarity: Double, monitorMicrophone: Bool) async throws {
         stop()
+        preparePlayback()
         let bytes = try await ElevenLabsClient.streamSpeech(
             text: text, voiceID: voiceID, apiKey: apiKey, stability: stability, similarity: similarity)
         try Task.checkCancellation()
@@ -46,18 +61,28 @@ final class SpeechOutput: NSObject {
             let needed = primed ? 4_800 * 2 : 2_400 * 2
             if pending.count >= needed {
                 try Task.checkCancellation()
-                if let buffer = makeBuffer(pending) { player.scheduleBuffer(buffer, completionHandler: nil) }
+                if let buffer = makeBuffer(pending) {
+                    track(buffer)
+                    player.scheduleBuffer(buffer, completionHandler: nil)
+                }
                 pending.removeAll(keepingCapacity: true)
                 primed = true
             }
         }
         try Task.checkCancellation()
 
-        let tail = makeBuffer(pending) ?? makeBuffer(Data(count: 480))! // 10 ms silence as an end marker
         let signal = OnceSignal()
         playbackSignal = signal
-        player.scheduleBuffer(tail, completionCallbackType: .dataPlayedBack,
-                              completionHandler: AudioTaps.playbackFinished(signal))
+        if let tail = makeBuffer(pending) {
+            track(tail)
+            player.scheduleBuffer(tail, completionCallbackType: .dataPlayedBack,
+                                  completionHandler: AudioTaps.playbackFinished(signal))
+        } else if let marker = makeBuffer(Data(count: 480)) {
+            player.scheduleBuffer(marker, completionCallbackType: .dataPlayedBack,
+                                  completionHandler: AudioTaps.playbackFinished(signal))
+        } else {
+            signal.fire()
+        }
         await signal.wait()
     }
 
@@ -74,6 +99,11 @@ final class SpeechOutput: NSObject {
             }
         }
         return buffer
+    }
+
+    private func track(_ buffer: AVAudioPCMBuffer) {
+        if playbackAnchor == nil { playbackAnchor = Date() }
+        scheduledFrames += Int(buffer.frameLength)
     }
 
     /// Playback engine. Voice processing and a mic tap are attached only when the listener
@@ -166,6 +196,10 @@ final class SpeechOutput: NSObject {
 
     func speakSystem(_ text: String) async {
         stop()
+        preparePlayback()
+        let seconds = max(0.35, Double(text.count) / 13.5)
+        playbackAnchor = Date()
+        scheduledFrames = max(1, Int(seconds * pcmFormat.sampleRate))
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "en-GB")
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate

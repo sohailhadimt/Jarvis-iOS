@@ -264,6 +264,15 @@ struct VoicesSettingsView: View {
     var body: some View {
         @Bindable var settings = settings
         Form {
+            Section {
+                Toggle("Separate full-screen mode", isOn: $settings.voiceSeparateMode)
+                Toggle("Start with voice", isOn: $settings.startWithVoice)
+                Toggle("Background conversations", isOn: $settings.backgroundConversations)
+            } header: {
+                Text("Voice mode")
+            } footer: {
+                Text("In-chat voice is the default: the transcript stays on screen with the cloud orb, mute and end. Separate mode is a full-screen orb. Start with voice begins a session when JARVIS opens. Background conversations keep an in-app session listening after you leave the app. The Action Button session is unaffected.")
+            }
             Section("Selected: \(settings.voiceName)") {
                 VStack(alignment: .leading) {
                     Text("Stability \(settings.stability, format: .number.precision(.fractionLength(2)))")
@@ -306,7 +315,7 @@ struct VoicesSettingsView: View {
                 }
             }
         }
-        .navigationTitle("Voices")
+        .navigationTitle("Voice")
         .toolbar(.visible, for: .navigationBar)
         .refreshable { await load() }
         .task { await load() }

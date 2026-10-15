@@ -15,7 +15,7 @@ struct SettingsView: View {
                 NavigationLink { MemorySettingsView() } label: { Label("Memory", systemImage: "brain") }
             }
             Section("Voice & services") {
-                NavigationLink { VoicesSettingsView() } label: { Label("Voices", systemImage: "speaker.wave.3") }
+                NavigationLink { VoicesSettingsView() } label: { Label("Voice", systemImage: "waveform") }
                 NavigationLink { IntegrationsSettingsView() } label: { Label("Integrations & Task agent", systemImage: "square.grid.3x3") }
                 NavigationLink { APIKeysSettingsView() } label: { Label("API Keys & Provider", systemImage: "key") }
                 NavigationLink { CloudSettingsView() } label: { Label("JARVIS Cloud", systemImage: "cloud") }
@@ -31,6 +31,9 @@ struct SettingsView: View {
                 engine.setForeground(scenePhase == .active)
             }
             Section("Look") {
+                Picker("Orb style", selection: $settings.orbStyle) {
+                    ForEach(OrbStyle.allCases) { Text($0.title).tag($0) }
+                }
                 NavigationLink { AppearanceSettingsView() } label: { Label("Appearance", systemImage: "paintpalette") }
             }
             Section {

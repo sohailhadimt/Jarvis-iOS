@@ -13,12 +13,21 @@ struct OrbView: View {
     var reply: String = ""
 
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(AppSettings.self) private var settings
 
     var body: some View {
-        MetalOrbView(level: level, phase: phase, sessionActive: sessionActive,
-                     executing: executing, hasError: hasError, reply: reply,
-                     paused: scenePhase != .active)
-            .accessibilityLabel("JARVIS is \(phase.label.lowercased())")
+        Group {
+            if settings.orbStyle == .classic {
+                MetalOrbView(level: level, phase: phase, sessionActive: sessionActive,
+                             executing: executing, hasError: hasError, reply: reply,
+                             paused: scenePhase != .active)
+            } else {
+                CloudOrbView(level: level, phase: phase, sessionActive: sessionActive,
+                             executing: executing, hasError: hasError,
+                             paused: scenePhase != .active)
+            }
+        }
+        .accessibilityLabel("JARVIS is \(phase.label.lowercased())")
     }
 }
 

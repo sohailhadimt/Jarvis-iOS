@@ -16,6 +16,17 @@ enum LLMProvider: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum OrbStyle: String, CaseIterable, Identifiable, Sendable {
+    case chatGPT, classic
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .chatGPT: "ChatGPT"
+        case .classic: "JARVIS classic"
+        }
+    }
+}
+
 enum TaskRouting: String, CaseIterable, Identifiable {
     case split, auto, chatOnly
     var id: String { rawValue }
@@ -91,6 +102,13 @@ final class AppSettings {
     var autoStandBy: Bool { didSet { d.set(autoStandBy, forKey: "autoStandBy") } }
     /// Listens for "Jarvis" only while the app is open and on screen.
     var wakeWordEnabled: Bool { didSet { d.set(wakeWordEnabled, forKey: "wakeWordEnabled") } }
+    /// ChatGPT cloud is the default. JARVIS classic keeps the Metal geodesic orb.
+    var orbStyle: OrbStyle { didSet { d.set(orbStyle.rawValue, forKey: "orbStyle") } }
+    /// Off uses the in-chat voice layout. On uses a separate full-screen orb.
+    var voiceSeparateMode: Bool { didSet { d.set(voiceSeparateMode, forKey: "voiceSeparateMode") } }
+    var startWithVoice: Bool { didSet { d.set(startWithVoice, forKey: "startWithVoice") } }
+    /// When on, an in-app voice session keeps listening after the app leaves the screen.
+    var backgroundConversations: Bool { didSet { d.set(backgroundConversations, forKey: "backgroundConversations") } }
     var routing: TaskRouting { didSet { d.set(routing.rawValue, forKey: "routing") } }
     var searchModel: String { didSet { d.set(searchModel, forKey: "searchModel") } }
     var shortcuts: [RegisteredShortcut] {
@@ -145,6 +163,10 @@ final class AppSettings {
         similarity = d.object(forKey: "similarity") as? Double ?? 0.75
         autoStandBy = d.object(forKey: "autoStandBy") as? Bool ?? true
         wakeWordEnabled = d.object(forKey: "wakeWordEnabled") as? Bool ?? true
+        orbStyle = OrbStyle(rawValue: d.string(forKey: "orbStyle") ?? "") ?? .chatGPT
+        voiceSeparateMode = d.object(forKey: "voiceSeparateMode") as? Bool ?? false
+        startWithVoice = d.object(forKey: "startWithVoice") as? Bool ?? false
+        backgroundConversations = d.object(forKey: "backgroundConversations") as? Bool ?? false
         routing = TaskRouting(rawValue: d.string(forKey: "routing") ?? "") ?? .split
         searchModel = d.string(forKey: "searchModel") ?? "gpt-4.1-mini"
         shortcuts = (d.data(forKey: "shortcuts")).flatMap { try? JSONDecoder().decode([RegisteredShortcut].self, from: $0) } ?? []
@@ -278,7 +300,7 @@ final class AppSettings {
             JARVIS Cloud is connected. Use the cloud tools for tasks, the briefing, approvals, cloud memory and the sales pipeline.
             Never invent tasks, numbers, companies, findings or approvals. If a tool result is empty, say nothing is stored.
             Speak a briefing as two parts: facts first, then recommendations. A recommendation is not an extra fact. Use only the tool result.
-            Approving or rejecting waits for the user to say yes. Call approve_approval or reject_approval and let the app ask. Nothing is emailed, published or paid.
+            Approving or rejecting shows a card in the app. Call approve_approval or reject_approval and stop. The user taps the card. Do not ask them to say yes. Nothing is emailed, published or paid.
             create_cloud_task schedule is an optional 5-field UTC cron. Omit it to run once.
             """)
             if CloudMonitor.shared.lastRefresh != nil {

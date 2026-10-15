@@ -48,12 +48,12 @@ extension SetJarvisSessionIntent {
             await AssistantEngine.shared.endSession(reason: "control-off")
             return
         }
-        let outcome = await AssistantEngine.shared.startSession(continuous: true)
+        let outcome = await AssistantEngine.shared.startSession(continuous: true, fromControl: true)
         if outcome == .needsForeground {
             controlLog.error("Live Activity or audio session unavailable in background; continuing in foreground")
             _ = try await requestToContinueInForeground(nil) {
                 await AssistantEngine.shared.waitUntilForeground()
-                _ = await AssistantEngine.shared.startSession(continuous: true)
+                _ = await AssistantEngine.shared.startSession(continuous: true, fromControl: true)
             }
         }
     }
