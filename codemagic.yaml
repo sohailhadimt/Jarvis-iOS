@@ -44,8 +44,35 @@ workflows:
         script: xcode-project use-profiles
       - name: Increment build number
         script: |
+          # A build still processing is invisible to get-latest-testflight-build-number,
+          # so "latest + 1" can repeat a number App Store Connect already has (409).
+          # $BUILD_NUMBER is Codemagic's own counter and only increases. Never go below
+          # the latest TestFlight build + 1, in case that store number is already higher.
+          cd "$CM_BUILD_DIR"
           LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" || echo 0)
-          agvtool new-version -all $(($LATEST + 1))
+          LATEST=$(printf '%s' "$LATEST" | tr -dc '0-9')
+          if [ -z "$LATEST" ]; then
+            LATEST=0
+          fi
+          FLOOR=$((LATEST + 1))
+          COUNTER=${BUILD_NUMBER:-0}
+          if [ "$COUNTER" -gt "$FLOOR" ]; then
+            NEXT=$COUNTER
+          else
+            NEXT=$FLOOR
+          fi
+          echo "CFBundleVersion $NEXT (BUILD_NUMBER=$COUNTER, TestFlight latest=$LATEST, floor=$FLOOR)"
+          agvtool new-version -all "$NEXT"
+          # agvtool updates every target build setting. Write the same literal into both
+          # plists so the app and the widget extension cannot ship different CFBundleVersions.
+          for PLIST in JARVIS/Info.plist JARVISWidgets/Info.plist; do
+            if /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST" >/dev/null 2>&1; then
+              /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NEXT" "$PLIST"
+            else
+              /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $NEXT" "$PLIST"
+            fi
+            echo "$PLIST CFBundleVersion=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST")"
+          done
       - name: Build ipa for distribution
         script: |
           xcode-project build-ipa \

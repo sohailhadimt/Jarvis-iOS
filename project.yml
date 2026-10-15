@@ -13,6 +13,7 @@ settings:
     CODE_SIGN_STYLE: Automatic
     MARKETING_VERSION: "1.0"
     CURRENT_PROJECT_VERSION: "1"
+    VERSIONING_SYSTEM: apple-generic   # lets `agvtool new-version -all` set every target together
     IPHONEOS_DEPLOYMENT_TARGET: "18.0"
     TARGETED_DEVICE_FAMILY: "1"
 targets:
@@ -36,6 +37,7 @@ targets:
       path: JARVIS/Info.plist
       properties:
         CFBundleDisplayName: JARVIS
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
@@ -101,6 +103,7 @@ targets:
       path: JARVISWidgets/Info.plist
       properties:
         CFBundleDisplayName: JARVIS Widgets
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     entitlements:
