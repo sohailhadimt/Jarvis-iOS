@@ -187,9 +187,81 @@ final class ToolExecutor {
             let sources = answer.citations.prefix(5).map { "- \($0.title): \($0.url)" }.joined(separator: "\n")
             return .result(answer.text + (sources.isEmpty ? "" : "\nSources:\n" + sources))
 
+        case "create_cloud_task":
+            guard let goal = arg("goal") else { throw ToolFailure("What should the cloud task do?") }
+            let task = try await JarvisCloudAPI.client().createTask(goal: goal, schedule: arg("schedule"))
+            await CloudMonitor.shared.refresh()
+            return .result("Created \(task.id). Status \(task.status). Goal: \(task.goal)")
+
+        case "get_briefing":
+            let briefing = try await JarvisCloudAPI.client().briefing()
+            return .result(CloudSpeech.briefing(briefing))
+
+        case "list_tasks":
+            let tasks = try await JarvisCloudAPI.client().tasks(status: arg("status"))
+            return .result(CloudSpeech.tasks(tasks))
+
+        case "get_task":
+            guard let id = arg("task_id") else { throw ToolFailure("Which task?") }
+            let detail = try await JarvisCloudAPI.client().task(id: id)
+            return .result(CloudSpeech.taskDetail(detail))
+
+        case "list_approvals":
+            let approvals = try await JarvisCloudAPI.client().approvals(status: arg("status") ?? "pending")
+            return .result(CloudSpeech.approvals(approvals))
+
+        case "approve_approval", "reject_approval":
+            return try await cloudDecision(approve: name == "approve_approval", id: arg("approval_id"))
+
+        case "search_memory":
+            let rows = try await JarvisCloudAPI.client().memory(query: arg("query"))
+            return .result(CloudSpeech.memory(rows))
+
+        case "save_memory":
+            guard let content = arg("content") else { throw ToolFailure("What should I remember?") }
+            let saved = try await JarvisCloudAPI.client().createMemory(
+                content: content, key: arg("key"), tags: stringList(a, "tags"), sourceURLs: [])
+            await CloudMonitor.shared.refresh()
+            return .result("Stored memory \(saved.id): \(saved.content)")
+
+        case "pipeline_summary":
+            let rows = try await JarvisCloudAPI.client().pipeline()
+            return .result(CloudSpeech.pipeline(rows))
+
         default:
             return .result("ERROR: unknown tool \(name)")
         }
+    }
+
+    private func stringList(_ a: JSONValue, _ key: String) -> [String] {
+        if let values = a[key]?.array {
+            return values.compactMap(\.string).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        }
+        guard let raw = a[key]?.string else { return [] }
+        return raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    }
+
+    /// Approve and reject always wait for a spoken yes. The summary comes from the pending row, not the model.
+    private func cloudDecision(approve: Bool, id: String?) async throws -> ToolOutcome {
+        guard let id else { throw ToolFailure("Which approval?") }
+        let client = try JarvisCloudAPI.client()
+        let pending = try await client.approvals(status: "pending")
+        guard let found = pending.first(where: { $0.id == id }) else {
+            return .result("That approval is not in the pending list. Nothing was changed.")
+        }
+        let summary = approve
+            ? "Approve this? \(found.summary) Nothing will be emailed, published or paid."
+            : "Reject this? \(found.summary)"
+        return .confirm(PendingAction(summary: summary) {
+            do {
+                let decision = try await client.decide(id: id, approve: approve, reason: nil)
+                await CloudMonitor.shared.refresh()
+                let sent = decision.externalActionTaken ? "An external action was recorded." : "Nothing was sent."
+                return "\(approve ? "Approved" : "Rejected"). \(found.summary) \(sent)"
+            } catch {
+                return "ERROR: \(error.localizedDescription)"
+            }
+        })
     }
 
     private func webhookAction(task: String?, urlString: String, key: KeychainKey, label: String, note: String) throws -> ToolOutcome {

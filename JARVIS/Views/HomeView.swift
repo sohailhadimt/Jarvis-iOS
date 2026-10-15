@@ -47,7 +47,7 @@ struct HomeView: View {
         OrbView(level: engine.level, phase: engine.phase,
                 primary: settings.primaryColor, accent: settings.accentColor,
                 sessionActive: engine.isSessionActive,
-                executing: engine.phase == .thinking && engine.statusLine != nil,
+                executing: engine.cloudExecuting || (engine.phase == .thinking && engine.statusLine != nil),
                 hasError: errorCaption != nil,
                 reply: engine.reply)
             .contentShape(Circle())
@@ -113,9 +113,12 @@ struct HomeView: View {
             ScrollView {
                 VStack(spacing: 0) {
                     sheetLink("Conversation", systemImage: "text.bubble") { ReplyDetailView() }
-                    sheetLink("Tasks", systemImage: "checklist") { TasksView() }
-                    sheetLink("Approvals", systemImage: "checkmark.circle") { ApprovalsView() }
-                    sheetLink("Memory", systemImage: "brain") { MemorySettingsView() }
+                    sheetLink("Briefing", systemImage: "sun.horizon") { CloudBriefingView() }
+                    sheetLink("Tasks", systemImage: "checklist") { CloudTasksView() }
+                    sheetLink("Approvals", systemImage: "checkmark.circle") { CloudApprovalsView() }
+                    sheetLink("Memory", systemImage: "brain") { CloudMemoryGate() }
+                    sheetLink("Activity", systemImage: "list.bullet.rectangle") { CloudActivityView() }
+                    sheetLink("Business", systemImage: "chart.bar") { CloudBusinessView() }
                     sheetLink("Settings", systemImage: "gearshape") { SettingsView() }
                     sheetLink("Integrations", systemImage: "square.grid.3x3") { IntegrationsSettingsView() }
                     sheetLink("Voices", systemImage: "speaker.wave.3") { VoicesSettingsView() }

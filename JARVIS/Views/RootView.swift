@@ -28,12 +28,14 @@ struct RootView: View {
             // Referencing the provider keeps it in the binary and refreshes the Action Button list.
             JarvisShortcuts.updateAppShortcutParameters()
             engine.setForeground(scenePhase == .active)
+            CloudMonitor.shared.setVisible(scenePhase == .active)
             startListeningIfRequested()
         }
         .onChange(of: scenePhase) { _, phase in
             // Becoming active or background must not end a control session. The audio engine
             // and Live Activity are what keep listening alive after the Action Button returns.
             engine.setForeground(phase == .active)
+            CloudMonitor.shared.setVisible(phase == .active)
             if phase == .active { startListeningIfRequested() }
         }
         .onReceive(NotificationCenter.default.publisher(for: JarvisStartListening.notification)) { _ in

@@ -17,6 +17,7 @@ struct SettingsView: View {
                 NavigationLink { VoicesSettingsView() } label: { Label("Voices", systemImage: "speaker.wave.3") }
                 NavigationLink { IntegrationsSettingsView() } label: { Label("Integrations & Task agent", systemImage: "square.grid.3x3") }
                 NavigationLink { APIKeysSettingsView() } label: { Label("API Keys & Provider", systemImage: "key") }
+                NavigationLink { CloudSettingsView() } label: { Label("JARVIS Cloud", systemImage: "cloud") }
             }
             Section {
                 Toggle("Wake word", isOn: $settings.wakeWordEnabled)

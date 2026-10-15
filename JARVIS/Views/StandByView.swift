@@ -20,7 +20,7 @@ struct StandByView: View {
             OrbView(level: engine.level, phase: engine.phase,
                     primary: tint, accent: settings.accentColor,
                     sessionActive: engine.isSessionActive,
-                    executing: engine.phase == .thinking && engine.statusLine != nil,
+                    executing: engine.cloudExecuting || (engine.phase == .thinking && engine.statusLine != nil),
                     reply: engine.reply)
                 .padding(8)
                 .contentShape(Rectangle())

@@ -103,6 +103,7 @@ final class AppSettings {
     var agentWebhookURL: String { didSet { d.set(agentWebhookURL, forKey: "agentWebhookURL") } }
     var agentWebhookName: String { didSet { d.set(agentWebhookName, forKey: "agentWebhookName") } }
     var grokBotWebhookURL: String { didSet { d.set(grokBotWebhookURL, forKey: "grokBotWebhookURL") } }
+    var cloudBaseURL: String { didSet { d.set(cloudBaseURL, forKey: "cloudBaseURL") } }
     var primaryHex: String { didSet { persistColour(primaryHex, key: SharedConfig.Key.primaryHex) } }
     var accentHex: String { didSet { persistColour(accentHex, key: SharedConfig.Key.accentHex) } }
 
@@ -144,6 +145,7 @@ final class AppSettings {
         agentWebhookURL = d.string(forKey: "agentWebhookURL") ?? ""
         agentWebhookName = d.string(forKey: "agentWebhookName") ?? "your agent"
         grokBotWebhookURL = d.string(forKey: "grokBotWebhookURL") ?? ""
+        cloudBaseURL = d.string(forKey: "cloudBaseURL") ?? ""
         let resolvedPrimary = Self.replacingFactoryDefault(d.string(forKey: SharedConfig.Key.primaryHex),
                                                           previous: ["00D8FFFF", "00D8FF"],
                                                           fallback: Theme.defaultPrimaryHex)
@@ -261,6 +263,23 @@ final class AppSettings {
         - Look up IDs with the list tools before updating or deleting.
         - Use local times in ISO 8601 without an offset (e.g. 2026-10-15T14:30).
         """)
+        if JarvisCloud.isConfigured {
+            parts.append("""
+            JARVIS Cloud is connected. Use the cloud tools for tasks, the briefing, approvals, cloud memory and the sales pipeline.
+            Never invent tasks, numbers, companies, findings or approvals. If a tool result is empty, say nothing is stored.
+            Speak a briefing as two parts: facts first, then recommendations. A recommendation is not an extra fact. Use only the tool result.
+            Approving or rejecting waits for the user to say yes. Call approve_approval or reject_approval and let the app ask. Nothing is emailed, published or paid.
+            create_cloud_task schedule is an optional 5-field UTC cron. Omit it to run once.
+            """)
+            if CloudMonitor.shared.lastRefresh != nil {
+                let lines = CloudMonitor.shared.memory.prefix(12).map { "- \($0.content)" }
+                if !lines.isEmpty {
+                    parts.append("Cloud memory already stored:\n" + lines.joined(separator: "\n"))
+                }
+            }
+        } else {
+            parts.append("JARVIS Cloud is not configured. If the user asks about cloud tasks, the briefing, the pipeline or cloud memory, say the backend URL and app token are not set in Settings, JARVIS Cloud. Do not invent that data.")
+        }
         let date = Date.now.formatted(date: .complete, time: .shortened)
         parts.append("Current date and time (UK): \(date).")
         return parts.joined(separator: "\n\n")

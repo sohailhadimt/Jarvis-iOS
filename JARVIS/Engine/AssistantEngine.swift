@@ -24,6 +24,8 @@ final class AssistantEngine {
     private(set) var citations: [Citation] = []
     private(set) var statusLine: String?
     private(set) var pendingSummary: String?
+    /// True for a turn that asks about cloud work while a cloud task is planning or running.
+    private(set) var cloudExecuting = false
     var messageDraft: MessageDraft?
 
     @ObservationIgnored private var conversation: [ChatMessage] = []
@@ -321,6 +323,7 @@ final class AssistantEngine {
         turnTask?.cancel()
         turnTask = nil
         output.stop()
+        cloudExecuting = false
     }
 
     private func beginListening(manual: Bool) {
@@ -503,6 +506,7 @@ final class AssistantEngine {
 
     private func afterTurn() {
         level = 0
+        cloudExecuting = false
         if isSessionActive && isContinuous {
             sessionLog.info("utterance finished; session stays listening")
             beginListening(manual: false)
@@ -527,6 +531,14 @@ final class AssistantEngine {
             }
         }
 
+        if wantsCloudTool(text) && CloudMonitor.shared.hasRunningWork {
+            cloudExecuting = true
+        }
+        if isBriefingRequest(text) {
+            await deliverBriefing(userText: text)
+            return
+        }
+
         let settings = AppSettings.shared
         let userMessage = ChatMessage(role: "user", content: text)
         tools.resetTurn()
@@ -541,32 +553,40 @@ final class AssistantEngine {
             let history = Array(conversation.suffix(16))
             let raw: String
             var alreadySpoken = false
+            let cloudTools = JarvisCloud.isConfigured && wantsCloudTool(text)
             switch settings.routing {
             case .chatOnly:
-                let streamed = try await streamedChat(system: system, history: history, user: userMessage, endpoint: endpoint)
-                raw = streamed.text
-                alreadySpoken = streamed.spoken
+                if cloudTools {
+                    raw = try await runAgent(system: system, history: history, user: userMessage, endpoint: endpoint,
+                                             includeWebSearch: false)
+                } else {
+                    let streamed = try await streamedChat(system: system, history: history, user: userMessage, endpoint: endpoint)
+                    raw = streamed.text
+                    alreadySpoken = streamed.spoken
+                }
             case .auto:
                 raw = try await runAgent(system: system, history: history, user: userMessage, endpoint: endpoint,
                                          includeWebSearch: KeychainStore.get(.openAI) != nil)
             case .split:
-                if try await classify(text, endpoint: endpoint) == .question {
-                    if endpoint.kind == .openAI {
-                        raw = try await answerQuestion(system: system, history: history, user: userMessage, endpoint: endpoint)
-                    } else {
-                        let streamed = try await streamedChat(system: system, history: history, user: userMessage, endpoint: endpoint)
-                        raw = streamed.text
-                        alreadySpoken = streamed.spoken
-                    }
-                } else {
+                let classified = try await classify(text, endpoint: endpoint)
+                if cloudTools || classified != .question {
                     raw = try await runAgent(system: system, history: history, user: userMessage, endpoint: endpoint,
                                              includeWebSearch: false)
+                } else if endpoint.kind == .openAI {
+                    raw = try await answerQuestion(system: system, history: history, user: userMessage, endpoint: endpoint)
+                } else {
+                    let streamed = try await streamedChat(system: system, history: history, user: userMessage, endpoint: endpoint)
+                    raw = streamed.text
+                    alreadySpoken = streamed.spoken
                 }
             }
             guard !Task.isCancelled else { return }
             if citations.isEmpty { citations = tools.lastCitations }
             let parsed = MemoryParser.extract(from: raw)
-            if settings.autoRemember { JarvisStore.add(parsed.facts) }
+            if settings.autoRemember {
+                JarvisStore.add(parsed.facts)
+                await rememberOnCloud(parsed.facts)
+            }
             let shown = parsed.cleaned.isEmpty ? "Noted, sir." : parsed.cleaned
             conversation.append(userMessage)
             conversation.append(ChatMessage(role: "assistant", content: shown))
@@ -743,6 +763,63 @@ final class AssistantEngine {
             phase = .idle
             level = 0
             pushActivity()
+        }
+    }
+
+    /// Morning and "what's been happening" are read from the stored briefing, then spoken as facts then recommendations.
+    private func deliverBriefing(userText: String) async {
+        let spoken: String
+        do {
+            let briefing = try await JarvisCloudAPI.client().briefing()
+            spoken = CloudSpeech.briefing(briefing)
+            await CloudMonitor.shared.refresh()
+        } catch {
+            spoken = error.localizedDescription
+            errorMessage = spoken
+        }
+        guard !Task.isCancelled else { return }
+        conversation.append(ChatMessage(role: "user", content: userText))
+        conversation.append(ChatMessage(role: "assistant", content: spoken))
+        reply = spoken
+        saveForWidget(transcript: userText, reply: spoken)
+        await say(spoken)
+        guard !Task.isCancelled else { return }
+        afterTurn()
+    }
+
+    private func isBriefingRequest(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let phrases = [
+            "what's been happening", "whats been happening", "what has been happening",
+            "what have you been doing", "what's happening", "whats happening", "briefing",
+        ]
+        if phrases.contains(where: { lower.contains($0) }) { return true }
+        let stripped = lower.replacingOccurrences(of: "jarvis", with: " ")
+        let words = stripped.split { !$0.isLetter }.map(String.init).joined(separator: " ")
+        return words == "morning" || words == "good morning"
+    }
+
+    private func wantsCloudTool(_ text: String) -> Bool {
+        if isBriefingRequest(text) { return true }
+        let lower = text.lowercased()
+        let needles = [
+            "cloud task", "create a task", "new task", "my tasks", "list tasks",
+            "approval", "pipeline", "briefing", "mrr", "lead",
+        ]
+        return needles.contains { lower.contains($0) }
+    }
+
+    /// Local REMEMBER lines stay on the phone. When the cloud is configured, the same facts are stored there too.
+    private func rememberOnCloud(_ facts: [String]) async {
+        guard JarvisCloud.isConfigured, !facts.isEmpty else { return }
+        do {
+            let client = try JarvisCloudAPI.client()
+            for fact in facts {
+                _ = try await client.createMemory(content: fact, key: nil, tags: ["preference"], sourceURLs: [])
+            }
+            await CloudMonitor.shared.refresh()
+        } catch {
+            // A failed cloud write must not replace the spoken reply.
         }
     }
 

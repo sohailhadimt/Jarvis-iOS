@@ -9,6 +9,7 @@ enum KeychainKey: String, CaseIterable {
     case customAgent = "custom_agent_bearer_key"
     case agentWebhook = "agent_webhook_bearer_key"
     case grokBotWebhook = "grok_bot_routine_webhook_key"
+    case jarvisCloud = "jarvis_cloud_app_token"
 }
 
 /// Minimal Keychain wrapper. Secrets never live in code or UserDefaults.

@@ -105,6 +105,37 @@ enum ToolCatalog {
             tools.append(fn("web_search", "Search the web for current facts, news, prices, weather, sport, opening times etc.",
                             ["query": str("The question to research")], required: ["query"]))
         }
+        if JarvisCloud.isConfigured {
+            let taskStatus = ["planning", "running", "awaiting_approval", "completed", "failed"]
+            tools.append(fn("create_cloud_task",
+                            "Create a task on JARVIS Cloud. It is planned on the backend. Nothing is emailed, published or paid.",
+                            ["goal": str("What the cloud should do"),
+                             "schedule": str("Optional 5-field UTC cron. Omit to run once.")],
+                            required: ["goal"]))
+            tools.append(fn("get_briefing",
+                            "Read the stored JARVIS Cloud briefing. The result separates facts from recommendations. Speak facts first, then recommendations. Add nothing that is not in the result."))
+            tools.append(fn("list_tasks", "List stored JARVIS Cloud tasks.",
+                            ["status": oneOf(taskStatus, "Optional status filter")]))
+            tools.append(fn("get_task", "Read one stored JARVIS Cloud task, including subtasks, progress, findings and drafts.",
+                            ["task_id": str("Task id from list_tasks")], required: ["task_id"]))
+            tools.append(fn("list_approvals", "List stored JARVIS Cloud approvals. Defaults to pending.",
+                            ["status": oneOf(["pending", "approved", "rejected"], "Optional status. Default pending")]))
+            tools.append(fn("approve_approval",
+                            "Ask the user to approve one pending cloud approval. The app reads the stored summary and waits for yes. Nothing is emailed, published or paid.",
+                            ["approval_id": str("Approval id from list_approvals")], required: ["approval_id"]))
+            tools.append(fn("reject_approval",
+                            "Ask the user to reject one pending cloud approval. The app reads the stored summary and waits for yes.",
+                            ["approval_id": str("Approval id from list_approvals")], required: ["approval_id"]))
+            tools.append(fn("search_memory", "Search stored JARVIS Cloud memory. Say nothing is stored when the result is empty.",
+                            ["query": str("Substring to search. Omit to list recent memory.")]))
+            tools.append(fn("save_memory", "Store one fact in JARVIS Cloud memory.",
+                            ["content": str("Fact to store"),
+                             "key": str("Optional key"),
+                             "tags": str("Optional comma-separated tags")],
+                            required: ["content"]))
+            tools.append(fn("pipeline_summary",
+                            "Summarise the stored sales pipeline. Null monthly revenue is unknown and is not zero."))
+        }
         return tools
     }
 }
