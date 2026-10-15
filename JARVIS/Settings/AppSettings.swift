@@ -11,7 +11,7 @@ enum LLMProvider: String, CaseIterable, Identifiable, Sendable {
         case .openAI: "OpenAI"
         case .gemini: "Gemini"
         case .groq: "Groq"
-        case .custom: "Custom agent endpoint"
+        case .custom: "Custom"
         }
     }
 }
@@ -21,7 +21,7 @@ enum TaskRouting: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .split: "Questions → ChatGPT, actions → tools"
+        case .split: "Questions → chat, actions → tools"
         case .auto: "Smart: model picks tools for everything"
         case .chatOnly: "Chat only (no tools)"
         }
@@ -116,7 +116,17 @@ final class AppSettings {
         instructions = d.string(forKey: "instructions")
             ?? "Your replies are spoken aloud, so keep them short and conversational. Never use markdown, lists or emojis."
         autoRemember = d.object(forKey: "autoRemember") as? Bool ?? true
-        provider = LLMProvider(rawValue: d.string(forKey: "provider") ?? "") ?? .openAI
+        let storedProvider = d.string(forKey: "provider")
+        var resolvedProvider = LLMProvider(rawValue: storedProvider ?? "") ?? .gemini
+        // Fresh installs have no provider. An old default of OpenAI with no saved key moves to Gemini.
+        if resolvedProvider == .openAI, KeychainStore.get(.openAI) == nil {
+            resolvedProvider = .gemini
+        }
+        provider = resolvedProvider
+        // didSet does not run during init, so persist the migration explicitly.
+        if storedProvider != resolvedProvider.rawValue {
+            d.set(resolvedProvider.rawValue, forKey: "provider")
+        }
         openAIModel = d.string(forKey: "openAIModel") ?? "gpt-4o-mini"
         let storedGemini = d.string(forKey: "geminiModel")
         if storedGemini?.trimmingCharacters(in: .whitespacesAndNewlines) == Self.retiredGeminiModel {

@@ -8,6 +8,7 @@ struct SettingsView: View {
     var body: some View {
         @Bindable var settings = settings
         Form {
+            AIProviderSection()
             Section("Assistant") {
                 NavigationLink { PersonalitySettingsView() } label: { Label("Personality", systemImage: "person.wave.2") }
                 NavigationLink { InstructionsSettingsView() } label: { Label("Instructions", systemImage: "text.alignleft") }

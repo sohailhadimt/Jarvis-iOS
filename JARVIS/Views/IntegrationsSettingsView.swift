@@ -11,14 +11,18 @@ struct IntegrationsSettingsView: View {
     var body: some View {
         @Bindable var settings = settings
         Form {
+            AIProviderSection()
             Section {
                 Picker("Routing", selection: $settings.routing) {
                     ForEach(TaskRouting.allCases) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.inline)
                 .labelsHidden()
+                Text("OpenAI web search model")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 HStack {
-                    TextField("Search model", text: $settings.searchModel)
+                    TextField("OpenAI web search model", text: $settings.searchModel)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                     Menu("Presets") {
                         ForEach(["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini", "gpt-4o"], id: \.self) { m in
@@ -29,7 +33,7 @@ struct IntegrationsSettingsView: View {
             } header: {
                 Text("Task agent routing")
             } footer: {
-                Text("With OpenAI selected, questions use the OpenAI Responses API with web search (sources are shown under the reply). Gemini and Groq answer from their own models. Actions use tools: contacts, calls, messages, calendar, reminders, music, maps, apps and Shortcuts. Calls, messages, deletes and agent tasks always ask you to confirm first.")
+                Text("Questions are answered by the AI Provider above. Gemini uses gemini-3.8-flash unless you change it. Groq uses llama-3.3-70b-versatile. OpenAI can also search the web with the search model in this section, and sources are shown under the reply. Actions use tools: contacts, calls, messages, calendar, reminders, music, maps, apps and Shortcuts. Calls, messages, deletes and agent tasks always ask you to confirm first.")
             }
 
             Section {

@@ -1,11 +1,17 @@
 import SwiftUI
 
+private enum HomePanel: String, Identifiable {
+    case chat, tasks, approvals, business, memory, activity, settings
+    var id: String { rawValue }
+}
+
 struct HomeView: View {
     @Environment(AssistantEngine.self) private var engine
     @Environment(AppSettings.self) private var settings
     var openStandBy: () -> Void
 
     @State private var showSheet = false
+    @State private var panel: HomePanel?
     @State private var showCaption = false
     @State private var ignoreTapUntil = Date.distantPast
     @State private var errorCaption: String?
@@ -18,19 +24,37 @@ struct HomeView: View {
             let side = geo.size.width * 0.60
             let top = geo.safeAreaInsets.top
             let bottom = geo.safeAreaInsets.bottom
-            let midY = top + (geo.size.height - top - bottom) * 0.5
+            let dockLift = max(bottom, 8) + 72
+            let midY = top + (geo.size.height - top - bottom - 72) * 0.5
             ZStack {
                 Color.black
                 orb
                     .frame(width: side, height: side)
                     .overlay(alignment: .bottom) { captions.offset(y: 48) }
                     .position(x: geo.size.width / 2, y: midY)
-                swipeCatcher(height: max(44, bottom + 18), screen: geo.size)
+                swipeCatcher(height: 36, screen: geo.size, above: dockLift)
             }
             .frame(width: geo.size.width, height: geo.size.height)
+            .overlay(alignment: .bottom) {
+                homeDock
+                    .padding(.bottom, max(bottom, 8))
+            }
         }
         .ignoresSafeArea()
         .sheet(isPresented: $showSheet) { menuSheet }
+        .sheet(item: $panel) { item in
+            NavigationStack {
+                panelDestination(item)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Close") { panel = nil }
+                        }
+                    }
+            }
+            .presentationBackground(Color.black)
+            .preferredColorScheme(.dark)
+            .tint(cyan)
+        }
         .onChange(of: engine.errorMessage) { _, newValue in
             guard let newValue, !newValue.isEmpty else { return }
             errorCaption = newValue
@@ -91,10 +115,54 @@ struct HomeView: View {
         return engine.transcript
     }
 
-    private func swipeCatcher(height: CGFloat, screen: CGSize) -> some View {
+    private var homeDock: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                dockButton("Chat", systemImage: "text.bubble") { panel = .chat }
+                dockButton("Tasks", systemImage: "checklist") { panel = .tasks }
+                dockButton("Approvals", systemImage: "checkmark.circle") { panel = .approvals }
+                dockButton("Business", systemImage: "chart.bar") { panel = .business }
+                dockButton("Memory", systemImage: "brain") { panel = .memory }
+                dockButton("Activity", systemImage: "list.bullet.rectangle") { panel = .activity }
+                dockButton("Settings", systemImage: "gearshape") { panel = .settings }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+        }
+        .frame(height: 64)
+        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+    }
+
+    private func dockButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 3) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 15, weight: .light))
+                Text(title)
+                    .font(.system(size: 9, weight: .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .foregroundStyle(cyan)
+            .frame(width: 62, height: 48)
+            .background {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(cyan.opacity(0.1))
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(cyan.opacity(0.55), lineWidth: 0.6)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+    }
+
+    private func swipeCatcher(height: CGFloat, screen: CGSize, above lift: CGFloat) -> some View {
         Color.black.opacity(0.001)
             .frame(width: screen.width, height: height)
-            .position(x: screen.width / 2, y: screen.height - height / 2)
+            .position(x: screen.width / 2, y: screen.height - lift - height / 2)
             .gesture(
                 DragGesture(minimumDistance: 16)
                     .onEnded { value in
@@ -157,6 +225,26 @@ struct HomeView: View {
             menuRow(title, systemImage: systemImage)
         }
         .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func panelDestination(_ item: HomePanel) -> some View {
+        switch item {
+        case .chat:
+            ReplyDetailView().navigationTitle("Chat")
+        case .tasks:
+            CloudTasksView()
+        case .approvals:
+            CloudApprovalsView()
+        case .business:
+            CloudBusinessView()
+        case .memory:
+            CloudMemoryGate()
+        case .activity:
+            CloudActivityView()
+        case .settings:
+            SettingsView()
+        }
     }
 
     private func menuRow(_ title: String, systemImage: String) -> some View {
