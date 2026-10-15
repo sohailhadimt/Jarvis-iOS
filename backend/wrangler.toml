@@ -1,0 +1,20 @@
+# JARVIS cloud backend. Free-tier Cloudflare Workers + D1 + Cron Triggers.
+# Replace database_id after `npx wrangler d1 create jarvis-db`.
+name = "jarvis-backend"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+
+# The work queue lives in D1 (see README). KV and Queues are not bound:
+# the Workers KV free tier allows very few writes per day, and this worker
+# must persist a step on every tick.
+
+[[d1_databases]]
+binding = "DB"
+database_name = "jarvis-db"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+ENVIRONMENT = "production"

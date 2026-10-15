@@ -1,0 +1,21 @@
+{
+  "name": "jarvis-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "JARVIS autonomous cloud backend for ASG. Cloudflare Workers, D1, and Cron Triggers on the free tier.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:migrate:local": "wrangler d1 execute jarvis-db --local --file=./schema.sql",
+    "db:migrate:remote": "wrangler d1 execute jarvis-db --remote --file=./schema.sql"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261006.1",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4",
+    "wrangler": "^4.40.0"
+  }
+}
