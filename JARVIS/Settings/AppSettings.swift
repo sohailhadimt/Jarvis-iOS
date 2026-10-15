@@ -63,9 +63,10 @@ enum PersonalityPreset: String, CaseIterable, Identifiable {
 final class AppSettings {
     static let shared = AppSettings()
     static let modelSuggestions = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
-    static let defaultGeminiModel = "gemini-2.5-flash"
+    static let defaultGeminiModel = "gemini-3.8-flash"
+    static let retiredGeminiModel = "gemini-2.5-flash"
     static let defaultGroqModel = "llama-3.3-70b-versatile"
-    static let geminiModelSuggestions = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
+    static let geminiModelSuggestions = ["gemini-3.8-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
     static let groqModelSuggestions = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
 
     private static let openAIURL = URL(string: "https://api.openai.com/v1/chat/completions")!
@@ -114,7 +115,14 @@ final class AppSettings {
         autoRemember = d.object(forKey: "autoRemember") as? Bool ?? true
         provider = LLMProvider(rawValue: d.string(forKey: "provider") ?? "") ?? .openAI
         openAIModel = d.string(forKey: "openAIModel") ?? "gpt-4o-mini"
-        geminiModel = d.string(forKey: "geminiModel") ?? Self.defaultGeminiModel
+        let storedGemini = d.string(forKey: "geminiModel")
+        if storedGemini?.trimmingCharacters(in: .whitespacesAndNewlines) == Self.retiredGeminiModel {
+            geminiModel = Self.defaultGeminiModel
+            // didSet does not run during init, so write the migrated model through explicitly.
+            d.set(Self.defaultGeminiModel, forKey: "geminiModel")
+        } else {
+            geminiModel = storedGemini ?? Self.defaultGeminiModel
+        }
         groqModel = d.string(forKey: "groqModel") ?? Self.defaultGroqModel
         customBaseURL = d.string(forKey: "customBaseURL") ?? ""
         customModel = d.string(forKey: "customModel") ?? ""

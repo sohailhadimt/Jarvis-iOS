@@ -14,7 +14,7 @@ No passwords or API keys are stored in this code. You type them into the app, an
 | **Homebrew** (https://brew.sh) | Free | Used to install XcodeGen. |
 | An **Apple ID** | Free | Enough to put the app on your own iPhone. |
 | iPhone on **iOS 18 or newer** | – | Action Button needs iPhone 15 Pro or later. Dynamic Island needs iPhone 14 Pro or later. |
-| Gemini API key | Free | [aistudio.google.com/apikey](https://aistudio.google.com/apikey). Default model `gemini-2.5-flash`. |
+| Gemini API key | Free | [aistudio.google.com/apikey](https://aistudio.google.com/apikey). Default model `gemini-3.8-flash`. |
 | Groq API key | Free | [console.groq.com/keys](https://console.groq.com/keys). Default model `llama-3.3-70b-versatile`. Also used for speech-to-text. |
 | OpenAI API key | Pay as you go | platform.openai.com > API keys. Optional if Gemini or Groq is saved. |
 | ElevenLabs API key | Optional | elevenlabs.io > Profile > API Keys. Without it, the iPhone's own voice is used. |
@@ -54,7 +54,7 @@ Tip: you can instead put your Team ID into `DEVELOPMENT_TEAM` in `project.yml` a
 
 In the app, tap ⚙️ **Settings > API Keys & Provider**:
 - Choose **AI Provider**: OpenAI, Gemini, Groq, or a custom endpoint.
-- **Gemini** (free): paste a key from aistudio.google.com/apikey. The model defaults to `gemini-2.5-flash`.
+- **Gemini** (free): paste a key from aistudio.google.com/apikey. The model defaults to `gemini-3.8-flash`.
 - **Groq** (free): paste a key from console.groq.com/keys. The model defaults to `llama-3.3-70b-versatile`. With a Groq key saved, speech-to-text uses Groq Whisper. Without one, the iPhone's on-device speech recognition is used.
 - **OpenAI** is optional. Paste a key if you have credit. The model defaults to `gpt-4o-mini`.
 - If the provider you picked has no key, JARVIS uses another saved key (Gemini, then Groq, then OpenAI).

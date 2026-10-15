@@ -39,7 +39,7 @@ struct APIKeysSettingsView: View {
             } header: {
                 Text("Gemini")
             } footer: {
-                Text("Free key. Default model: gemini-2.5-flash. JARVIS calls Google's OpenAI-compatible chat endpoint with Authorization: Bearer.")
+                Text("Free key. Default model: gemini-3.8-flash. JARVIS calls Google's OpenAI-compatible chat endpoint with Authorization: Bearer.")
             }
 
             Section {
