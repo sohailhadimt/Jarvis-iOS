@@ -17,6 +17,7 @@ enum ListenerError: LocalizedError {
 @MainActor
 final class SpeechListener {
     var onLevel: ((Double) -> Void)?
+    var onBargeLevel: ((Double) -> Void)?
     var onTranscript: ((String, Bool) -> Void)?
     var onError: ((any Error) -> Void)?
 
@@ -27,6 +28,9 @@ final class SpeechListener {
     private var writer: PCMFileWriter?
     private var generation = 0
     private var tapInstalled = false
+    private var voiceProcessingAttempted = false
+    private var bargeMonitor = false
+    private(set) var voiceProcessingEnabled = false
     private(set) var lastCaptureFailure: String?
     /// While a hands-free session is up, `stop` leaves the engine running so iOS does not suspend the process.
     var holdEngine = false
@@ -101,7 +105,24 @@ final class SpeechListener {
     }
 
     func stop() {
+        bargeMonitor = false
         _ = park()
+    }
+
+    /// While speech is playing, the held engine reports mic level so the user can interrupt.
+    func setBargeMonitor(_ enabled: Bool) {
+        guard enabled != bargeMonitor else { return }
+        bargeMonitor = enabled
+        guard holdEngine, request == nil, writer == nil else { return }
+        if enabled {
+            let handler: @Sendable (Float) -> Void = { [weak self] rms in
+                let value = AudioTaps.normalized(rms)
+                Task { @MainActor in self?.onBargeLevel?(value) }
+            }
+            try? installTap(AudioTaps.levelTap(handler), bufferSize: 1024)
+        } else {
+            try? installTap(AudioTaps.silentTap(), bufferSize: 1024)
+        }
     }
 
     /// Ends the current recogniser or WAV file. A held engine stays running on a silent tap.
@@ -135,6 +156,7 @@ final class SpeechListener {
     private func installTap(_ block: @escaping @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void,
                             bufferSize: AVAudioFrameCount) throws {
         let engine = try makeEngine()
+        enableVoiceProcessing(engine)
         removeTapIfInstalled()
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
@@ -156,10 +178,25 @@ final class SpeechListener {
         tapInstalled = false
     }
 
+    /// Echo cancellation on the long-lived capture engine. Must run before the engine starts.
+    private func enableVoiceProcessing(_ engine: AVAudioEngine) {
+        guard !voiceProcessingAttempted, !engine.isRunning else { return }
+        voiceProcessingAttempted = true
+        do {
+            try engine.inputNode.setVoiceProcessingEnabled(true)
+            voiceProcessingEnabled = true
+        } catch {
+            voiceProcessingEnabled = false
+        }
+    }
+
     private func teardownEngine() {
         removeTapIfInstalled()
         engine?.stop()
         engine = nil
+        voiceProcessingAttempted = false
+        voiceProcessingEnabled = false
+        bargeMonitor = false
     }
 
     private func discardWriter() {

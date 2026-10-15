@@ -22,6 +22,7 @@ enum ElevenLabsError: LocalizedError {
 enum ElevenLabsClient {
     static let defaultVoiceID = "JBFqnCBsd6RMkjVDRZzb" // "George" premade British voice
     static let modelID = "eleven_turbo_v2_5"
+    static let flashModelID = "eleven_flash_v2_5"
     /// Raw 16-bit little-endian mono PCM at 24 kHz, so we can play it while it streams.
     static let pcmSampleRate: Double = 24_000
 
@@ -49,6 +50,20 @@ enum ElevenLabsClient {
 
     static func streamSpeech(text: String, voiceID: String, apiKey: String,
                              stability: Double, similarity: Double) async throws -> URLSession.AsyncBytes {
+        do {
+            return try await streamSpeech(text: text, voiceID: voiceID, apiKey: apiKey,
+                                          stability: stability, similarity: similarity, model: flashModelID)
+        } catch let error as ElevenLabsError {
+            if case .http(let code, _) = error, code == 400 || code == 404 || code == 422 {
+                return try await streamSpeech(text: text, voiceID: voiceID, apiKey: apiKey,
+                                              stability: stability, similarity: similarity, model: modelID)
+            }
+            throw error
+        }
+    }
+
+    private static func streamSpeech(text: String, voiceID: String, apiKey: String,
+                                     stability: Double, similarity: Double, model: String) async throws -> URLSession.AsyncBytes {
         var comps = URLComponents(string: "https://api.elevenlabs.io/v1/text-to-speech/\(voiceID)/stream")!
         comps.queryItems = [URLQueryItem(name: "output_format", value: "pcm_24000")]
         var req = URLRequest(url: comps.url!)
@@ -56,7 +71,7 @@ enum ElevenLabsClient {
         req.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONEncoder().encode(TTSBody(
-            text: text, model_id: modelID,
+            text: text, model_id: model,
             voice_settings: .init(stability: stability, similarity_boost: similarity)))
 
         let (bytes, resp) = try await URLSession.shared.bytes(for: req)

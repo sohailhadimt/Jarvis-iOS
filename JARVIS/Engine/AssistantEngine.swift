@@ -46,6 +46,12 @@ final class AssistantEngine {
     /// Bumped by start and end so a slow start cannot finish after the user has already toggled off.
     @ObservationIgnored private var sessionEpoch = 0
     @ObservationIgnored private var listenRetries = 0
+    @ObservationIgnored private var wakeArmed = false
+    @ObservationIgnored private var appInForeground = false
+    @ObservationIgnored private var wakeRestarts = 0
+    @ObservationIgnored private var bargeFrames = 0
+    /// Smoothed mic level used only to detect the end of a Groq recording.
+    @ObservationIgnored private var captureMeter = 0.0
 
     /// Seconds of silence that end an utterance in hands-free mode.
     private let silenceTimeout: Duration = .milliseconds(1400)
@@ -55,6 +61,8 @@ final class AssistantEngine {
         listener.onTranscript = { [weak self] text, isFinal in self?.handleTranscript(text, isFinal: isFinal) }
         listener.onError = { [weak self] error in self?.handleListenerError(error) }
         output.onLevel = { [weak self] value in self?.ingestLevel(value) }
+        output.onBargeIn = { [weak self] in self?.bargeIn() }
+        listener.onBargeLevel = { [weak self] value in self?.noteBarge(value) }
         tools.onComposeMessage = { [weak self] draft in self?.messageDraft = draft }
     }
 
@@ -87,6 +95,7 @@ final class AssistantEngine {
             publishControlState()
             return .alreadyRunning
         }
+        wakeArmed = false
         sessionEpoch += 1
         let epoch = sessionEpoch
         let state = UIApplication.shared.applicationState
@@ -165,6 +174,17 @@ final class AssistantEngine {
         publishControlState()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         audioConfigured = false
+        refreshWake()
+    }
+
+    /// Foreground-only. Backgrounding stops the wake recogniser and leaves a control session alone.
+    func setForeground(_ active: Bool) {
+        appInForeground = active
+        if active {
+            refreshWake()
+        } else {
+            stopWake()
+        }
     }
 
     // MARK: Push-to-talk / tap-to-talk
@@ -212,6 +232,7 @@ final class AssistantEngine {
             } catch {
                 // A text turn can still run; speech falls back if the session won't start.
             }
+            wakeArmed = false
             interrupt()
             listener.stop()
             manualTurn = false
@@ -225,12 +246,17 @@ final class AssistantEngine {
     }
 
     func testVoice() async {
-        guard await prepareAudio() else { return }
+        stopWake()
+        guard await prepareAudio() else {
+            refreshWake()
+            return
+        }
         interrupt()
         phase = .speaking
         await speak("Good evening, sir. This is how I shall sound.")
         phase = .idle
         level = 0
+        refreshWake()
     }
 
     // MARK: Internals
@@ -302,6 +328,7 @@ final class AssistantEngine {
         transcript = ""
         heardVoice = false
         loudFrames = 0
+        captureMeter = 0
         captureFile = false
         do {
             if shouldCaptureForGroq() {
@@ -346,6 +373,16 @@ final class AssistantEngine {
     }
 
     private func handleTranscript(_ text: String, isFinal: Bool) {
+        if wakeArmed, !isSessionActive {
+            if Self.hearsWakeWord(text) {
+                wakeArmed = false
+                sessionLog.info("wake word")
+                Task { await self.startSession(continuous: true) }
+                return
+            }
+            if isFinal { beginWakeRecognition() }
+            return
+        }
         guard phase == .listening else { return }
         transcript = text
         guard !manualTurn else { return }
@@ -370,6 +407,10 @@ final class AssistantEngine {
     }
 
     private func handleListenerError(_ error: any Error) {
+        if wakeArmed, !isSessionActive {
+            beginWakeRecognition()
+            return
+        }
         guard phase == .listening else { return }
         // Recognition sessions can end (e.g. "no speech detected"); restart in continuous mode.
         if !transcript.isEmpty { finishUtterance(); return }
@@ -381,6 +422,7 @@ final class AssistantEngine {
             phase = .idle
             level = 0
             pushActivity()
+            refreshWake()
         }
     }
 
@@ -467,6 +509,7 @@ final class AssistantEngine {
         } else {
             phase = .idle
             pushActivity()
+            refreshWake()
         }
     }
 
@@ -497,16 +540,24 @@ final class AssistantEngine {
             let system = settings.systemPrompt(facts: JarvisStore.allFacts())
             let history = Array(conversation.suffix(16))
             let raw: String
+            var alreadySpoken = false
             switch settings.routing {
             case .chatOnly:
-                raw = try await LLMClient.complete(messages: [ChatMessage(role: "system", content: system)] + history + [userMessage],
-                                                   endpoint: endpoint)
+                let streamed = try await streamedChat(system: system, history: history, user: userMessage, endpoint: endpoint)
+                raw = streamed.text
+                alreadySpoken = streamed.spoken
             case .auto:
                 raw = try await runAgent(system: system, history: history, user: userMessage, endpoint: endpoint,
                                          includeWebSearch: KeychainStore.get(.openAI) != nil)
             case .split:
                 if try await classify(text, endpoint: endpoint) == .question {
-                    raw = try await answerQuestion(system: system, history: history, user: userMessage, endpoint: endpoint)
+                    if endpoint.kind == .openAI {
+                        raw = try await answerQuestion(system: system, history: history, user: userMessage, endpoint: endpoint)
+                    } else {
+                        let streamed = try await streamedChat(system: system, history: history, user: userMessage, endpoint: endpoint)
+                        raw = streamed.text
+                        alreadySpoken = streamed.spoken
+                    }
                 } else {
                     raw = try await runAgent(system: system, history: history, user: userMessage, endpoint: endpoint,
                                              includeWebSearch: false)
@@ -521,7 +572,9 @@ final class AssistantEngine {
             conversation.append(ChatMessage(role: "assistant", content: shown))
             reply = shown
             saveForWidget(transcript: text, reply: shown)
-            await say(ResponsesClient.spokenText(shown))
+            if !alreadySpoken {
+                await say(ResponsesClient.spokenText(shown))
+            }
         } catch {
             if Task.isCancelled { return }
             errorMessage = error.localizedDescription
@@ -641,11 +694,17 @@ final class AssistantEngine {
     }
 
     private func speak(_ text: String) async {
+        let monitor = !listener.isEngineRunning
+        if listener.isEngineRunning {
+            listener.setBargeMonitor(true)
+        }
+        defer { listener.setBargeMonitor(false) }
         let s = AppSettings.shared
         if let key = KeychainStore.get(.elevenLabs) {
             do {
                 try await output.speakElevenLabs(text: text, voiceID: s.voiceID, apiKey: key,
-                                                 stability: s.stability, similarity: s.similarity)
+                                                 stability: s.stability, similarity: s.similarity,
+                                                 monitorMicrophone: monitor)
                 return
             } catch {
                 if Task.isCancelled { return }
@@ -655,17 +714,170 @@ final class AssistantEngine {
         await output.speakSystem(text)
     }
 
+    private func noteBarge(_ value: Double) {
+        guard phase == .speaking else {
+            bargeFrames = 0
+            return
+        }
+        let threshold = listener.voiceProcessingEnabled ? 0.32 : 0.48
+        if value > threshold {
+            bargeFrames += 1
+            if bargeFrames >= 4 {
+                bargeFrames = 0
+                bargeIn()
+            }
+        } else if value < threshold * 0.6 {
+            bargeFrames = 0
+        }
+    }
+
+    /// Mic energy during playback: stop the voice immediately and listen.
+    private func bargeIn() {
+        guard phase == .speaking else { return }
+        sessionLog.info("barge-in")
+        let keepListening = isSessionActive || isContinuous
+        interrupt()
+        if keepListening {
+            beginListening(manual: false)
+        } else {
+            phase = .idle
+            level = 0
+            pushActivity()
+        }
+    }
+
+    private struct StreamedReply {
+        var text: String
+        var spoken: Bool
+    }
+
+    /// Speaks the first sentence while the rest of the chat completion is still streaming.
+    private func streamedChat(system: String, history: [ChatMessage], user: ChatMessage,
+                              endpoint: LLMEndpoint) async throws -> StreamedReply {
+        let messages = [ChatMessage(role: "system", content: system)] + history + [user]
+        var full = ""
+        var spokenPiece = ""
+        var speakTask: Task<Void, Never>?
+        do {
+            for try await delta in LLMClient.streamDeltas(messages: messages, endpoint: endpoint) {
+                try Task.checkCancellation()
+                full += delta
+                let cleaned = MemoryParser.extract(from: full).cleaned
+                if !cleaned.isEmpty {
+                    reply = cleaned
+                    pushActivity()
+                }
+                if speakTask == nil, let sentence = Self.firstSentence(in: cleaned) {
+                    spokenPiece = sentence
+                    let piece = ResponsesClient.spokenText(sentence)
+                    if !piece.isEmpty {
+                        speakTask = Task { await self.say(piece) }
+                    }
+                }
+            }
+        } catch {
+            speakTask?.cancel()
+            if Task.isCancelled { throw error }
+            if full.isEmpty {
+                let text = try await LLMClient.complete(messages: messages, endpoint: endpoint)
+                return StreamedReply(text: text, spoken: false)
+            }
+        }
+        if let speakTask {
+            await speakTask.value
+            guard !Task.isCancelled else { return StreamedReply(text: full, spoken: true) }
+            let cleaned = MemoryParser.extract(from: full).cleaned
+            if let range = cleaned.range(of: spokenPiece) {
+                let rest = cleaned[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+                if !rest.isEmpty {
+                    await say(ResponsesClient.spokenText(rest))
+                }
+            }
+            return StreamedReply(text: full, spoken: true)
+        }
+        return StreamedReply(text: full, spoken: false)
+    }
+
+    private static func firstSentence(in text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 12 else { return nil }
+        let chars = Array(trimmed)
+        for index in 0..<chars.count {
+            let ch = chars[index]
+            guard ch == "." || ch == "!" || ch == "?" else { continue }
+            guard index >= 11 else { continue }
+            if ch == ".", index > 0, chars[index - 1].isNumber { continue }
+            if index + 1 < chars.count, chars[index + 1].isLetter { continue }
+            return String(chars[0...index])
+        }
+        return nil
+    }
+
+    private static func hearsWakeWord(_ text: String) -> Bool {
+        text.range(of: "jarvis", options: [.caseInsensitive, .diacriticInsensitive]) != nil
+    }
+
+    private func refreshWake() {
+        let want = appInForeground && AppSettings.shared.wakeWordEnabled && !isSessionActive && phase == .idle
+        if want {
+            startWake()
+        } else if wakeArmed {
+            stopWake()
+        }
+    }
+
+    private func startWake() {
+        guard !wakeArmed, !isSessionActive, phase == .idle else { return }
+        guard AudioTaps.speechAuthorizationStatus() == .authorized,
+              AVAudioApplication.shared.recordPermission == .granted else { return }
+        guard activateAudioSession() else { return }
+        wakeArmed = true
+        wakeRestarts = 0
+        listener.holdEngine = false
+        beginWakeRecognition()
+    }
+
+    private func beginWakeRecognition() {
+        guard wakeArmed, !isSessionActive, phase == .idle else { return }
+        do {
+            try listener.start()
+            wakeRestarts = 0
+        } catch {
+            wakeRestarts += 1
+            guard wakeRestarts <= 3 else {
+                wakeArmed = false
+                return
+            }
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(600))
+                self.beginWakeRecognition()
+            }
+        }
+    }
+
+    private func stopWake() {
+        let was = wakeArmed
+        wakeArmed = false
+        guard was, !isSessionActive else { return }
+        listener.holdEngine = false
+        listener.stop()
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        audioConfigured = false
+    }
+
     private func ingestLevel(_ value: Double) {
         guard phase == .listening || phase == .speaking else { return }
-        // RMS from the mic tap (listening) or the player mixer tap (speaking), smoothed.
-        level = level * 0.45 + value * 0.55
+        // Raw RMS. The orb applies the 30 ms attack / 250 ms release.
+        // Playback metering drives `level` while speaking; the mic drives it while listening.
+        level = value
+        captureMeter = captureMeter * 0.45 + value * 0.55
         noteCaptureLevel()
     }
 
     /// Groq Whisper is request/response, so silence is detected from the mic level instead of partial transcripts.
     private func noteCaptureLevel() {
         guard captureFile, phase == .listening, !manualTurn else { return }
-        if level > 0.2 {
+        if captureMeter > 0.2 {
             loudFrames += 1
             if loudFrames >= 3 {
                 heardVoice = true

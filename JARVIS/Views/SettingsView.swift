@@ -2,8 +2,11 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(AppSettings.self) private var settings
+    @Environment(AssistantEngine.self) private var engine
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
+        @Bindable var settings = settings
         Form {
             Section("Assistant") {
                 NavigationLink { PersonalitySettingsView() } label: { Label("Personality", systemImage: "person.wave.2") }
@@ -14,6 +17,16 @@ struct SettingsView: View {
                 NavigationLink { VoicesSettingsView() } label: { Label("Voices", systemImage: "speaker.wave.3") }
                 NavigationLink { IntegrationsSettingsView() } label: { Label("Integrations & Task agent", systemImage: "square.grid.3x3") }
                 NavigationLink { APIKeysSettingsView() } label: { Label("API Keys & Provider", systemImage: "key") }
+            }
+            Section {
+                Toggle("Wake word", isOn: $settings.wakeWordEnabled)
+            } header: {
+                Text("Wake word")
+            } footer: {
+                Text("While JARVIS is open and on screen, it listens for “Jarvis” and starts a conversation. It does not listen in the background.")
+            }
+            .onChange(of: settings.wakeWordEnabled) { _, _ in
+                engine.setForeground(scenePhase == .active)
             }
             Section("Look") {
                 NavigationLink { AppearanceSettingsView() } label: { Label("Appearance", systemImage: "paintpalette") }
