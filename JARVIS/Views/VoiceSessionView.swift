@@ -253,7 +253,8 @@ struct FullScreenVoiceView: View {
             ZStack {
                 Color.black
                 SkyCloudOrbView(level: engine.level, state: engine.voiceState, closing: voice.exiting,
-                                tint: settings.orbTintColor, tintAmount: settings.orbTintAmount)
+                                tint: settings.orbTintColor, tintAmount: settings.orbTintAmount,
+                                crispEdge: true)
                     .frame(width: diameter, height: diameter)
                     .matchedGeometryEffect(id: "voice-orb", in: orbSpace)
                     .position(x: geo.size.width / 2, y: orbY)

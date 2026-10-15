@@ -1171,8 +1171,8 @@ final class AssistantEngine {
 
     private func ingestLevel(_ value: Double) {
         guard phase == .listening || phase == .speaking else { return }
-        // Raw RMS. The orb applies the 30 ms attack / 250 ms release.
-        // Playback metering drives `level` while speaking; the mic drives it while listening.
+        // Raw RMS. While the assistant speaks, the orb scales with a 30 ms attack and 120 ms release.
+        // The microphone does not move the orb. Playback metering drives `level` only during speech.
         level = value
         captureMeter = captureMeter * 0.45 + value * 0.55
         noteCaptureLevel()

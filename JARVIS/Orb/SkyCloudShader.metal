@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Original sky orb. t = time * 2, sped up by `boost`. No rim, no glow.
+// Original sky orb. Clouds morph in place at a constant speed. Audio never changes that speed.
 
 float hash21(float2 cell) {
     float x = cell.x * 13.571 + cell.y * 79.013;
@@ -33,43 +33,58 @@ float fbm(float2 p) {
     return sum;
 }
 
+float2 rotate2(float2 p, float angle) {
+    float s = sin(angle);
+    float c = cos(angle);
+    return float2(c * p.x - s * p.y, s * p.x + c * p.y);
+}
+
 [[ stitchable ]] half4 skyClouds(float2 position,
                                   half4 color,
                                   float time,
-                                  float boost,
                                   float2 size,
                                   float3 tint,
-                                  float tintAmount) {
+                                  float tintAmount,
+                                  float feather) {
     float2 safe = max(size, float2(1.0));
     float2 uv = position / safe;
     float2 centered = uv * 2.0 - 1.0;
-    if (dot(centered, centered) > 1.0) {
+    float radius = length(centered);
+    float fade = 1.0;
+    if (feather > 0.001) {
+        fade = 1.0 - smoothstep(1.0 - feather, 1.0, radius);
+    }
+    if (radius > 1.0 || fade <= 0.0) {
         return half4(0.0h);
     }
 
-    float pace = 1.0 + boost;
-    float t = time * 2.0 * pace;
-    float swirl = 0.28 + boost * 0.22;
+    // Slow, constant churn. Offsets orbit a small circle so the field morphs
+    // instead of scrolling across the disc. Nothing here reads the microphone.
+    float t = time;
+    float2 q = rotate2(centered, t * 0.16);
+    float2 q2 = rotate2(centered, -t * 0.11);
+    float orbit = t * 0.42;
+    float2 wobble = float2(cos(orbit), sin(orbit)) * 0.42;
+    float2 wobbleB = float2(cos(orbit * 0.73 + 1.7), sin(orbit * 0.73 + 1.7)) * 0.36;
 
-    float2 warpScroll = float2(0.16 * t, 0.24 * t);
-    float2 low = uv * 1.15 + warpScroll;
-    float2 warp = float2(fbm(low), fbm(low + float2(3.7, 8.1)));
-    float2 p = uv + (warp - 0.5) * swirl;
+    float2 warp1 = float2(fbm(q * 1.85 + wobble), fbm(q * 1.85 + float2(-wobble.y, wobble.x) + 4.1));
+    float2 warp2 = float2(fbm(q2 * 2.7 + wobbleB + 2.2), fbm(q2 * 2.7 - wobbleB + 7.4));
+    float2 p = q + (warp1 - 0.5) * 0.55;
+    float2 p2 = q2 + (warp2 - 0.5) * 0.40;
 
-    float2 forth = float2(0.07 * t, 0.05 * t);
-    float2 back = float2(-0.09 * t, -0.06 * t);
-    float broad = fbm(p * 2.15 + forth);
-    float tight = fbm(p * 3.55 + back);
+    float broad = fbm(p * 2.15);
+    float tight = fbm(p2 * 3.35);
     float clouds = broad * 0.58 + tight * 0.42;
 
-    float2 wispDrift = float2(0.24 * t, -0.18 * t);
-    float wispField = fbm(p * 4.8 + wispDrift);
-    float wisps = smoothstep(0.74, 0.92, wispField);
+    float2 holeOrbit = float2(cos(t * 0.23), sin(t * 0.19)) * 0.5;
+    float holes = fbm(rotate2(centered, t * 0.09) * 1.55 + holeOrbit);
+    float shaped = clouds * 0.82 - smoothstep(0.46, 0.72, holes) * 0.28;
+    shaped += smoothstep(0.15, 0.95, uv.y) * 0.08;
 
-    float shaped = clouds * 0.72 + smoothstep(0.2, 0.95, uv.y) * 0.28 + wisps * 0.22;
-    float edge = smoothstep(0.34, 0.52, shaped) * (1.0 - smoothstep(0.52, 0.74, shaped));
-    float detail = fbm(p * 13.0 + float2(0.04 * t, -0.03 * t));
-    shaped += (detail - 0.5) * edge * 0.42;
+    float edge = smoothstep(0.34, 0.50, shaped) * (1.0 - smoothstep(0.50, 0.72, shaped));
+    float2 detailOrbit = float2(cos(t * 0.31), sin(t * 0.27)) * 0.25;
+    float detail = fbm(p * 12.0 + detailOrbit);
+    shaped += (detail - 0.5) * edge * 0.35;
     shaped = saturate(shaped);
 
     float3 deepBlue = float3(0.0, 0.35, 0.9);
@@ -88,5 +103,5 @@ float fbm(float2 p) {
     if (amount < 0.05) {
         rgb = mix(rgb, warmWhite, hottest * 0.4);
     }
-    return half4(half3(rgb), 1.0h);
+    return half4(half3(rgb), half(fade));
 }

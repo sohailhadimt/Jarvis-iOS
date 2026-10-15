@@ -361,7 +361,7 @@ struct AppearanceSettingsView: View {
         @Bindable var settings = settings
         Form {
             Section {
-                SkyCloudOrbView(level: 0.2, state: .listening, tint: settings.orbTintColor, tintAmount: settings.orbTintAmount)
+                SkyCloudOrbView(level: 0.2, state: .listening, tint: settings.orbTintColor, tintAmount: settings.orbTintAmount, crispEdge: true)
                     .frame(width: 180, height: 180)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
