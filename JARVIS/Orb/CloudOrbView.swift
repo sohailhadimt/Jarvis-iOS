@@ -171,7 +171,7 @@ struct VoiceOrbView: View {
         case .listening, .off, .ended, .error: return 0.3
         case .userSpeaking: return 0.6
         case .thinking: return 1.5
-        case .aiSpeaking: return 1
+        case .aiSpeaking: return 1.0
         case .muted: return 0.2
         case .connecting: return 0.3
         }
