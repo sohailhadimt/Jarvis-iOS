@@ -229,82 +229,195 @@ struct MessageList: View {
     }
 }
 
-/// Separate mode: 220pt orb, captions, and mute / menu / captions / end.
+/// Default voice screen. Black field, sky orb, hamburger, sliders, and the ask capsule.
 struct FullScreenVoiceView: View {
     @Environment(AssistantEngine.self) private var engine
     var orbSpace: Namespace.ID
+    var onMenu: () -> Void
+    var onSettings: () -> Void
 
     @State private var voice = VoiceSession.shared
-    @Environment(\.colorScheme) private var scheme
+    @State private var draft = ""
+
+    private let chrome = Color(red: 28.0 / 255, green: 28.0 / 255, blue: 30.0 / 255)
+    private let arc = Color(red: 75.0 / 255, green: 168.0 / 255, blue: 238.0 / 255)
 
     var body: some View {
-        VStack(spacing: 16) {
-            Spacer(minLength: 0)
-            VoiceOrbSlot(side: 220)
-                .scaleEffect(voice.exiting ? 0.2 : 1)
-                .opacity(voice.exiting ? 0 : 1)
-                .animation(.easeIn(duration: 0.25), value: voice.exiting)
-                .matchedGeometryEffect(id: "voice-orb", in: orbSpace)
-                .onTapGesture { voice.showTranscript.toggle() }
-            if voice.captionsOn {
-                Text(caption)
-                    .font(.body)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: 320)
-                    .frame(minHeight: 44)
-            }
-            if voice.showTranscript {
-                transcript
-                    .frame(maxHeight: 180)
-            }
-            if let status = engine.statusLine {
-                Text(status)
-                    .font(.footnote.weight(.medium))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(.ultraThinMaterial, in: Capsule())
-            }
-            if engine.pendingSummary != nil {
-                ApprovalCard()
-                    .padding(.horizontal, 22)
-            }
-            Spacer(minLength: 0)
-            HStack(spacing: 28) {
-                round(system: engine.microphoneMuted ? "mic.slash" : "mic",
-                      fill: Color(white: 0.78), foreground: .black) { engine.toggleMute() }
-                Menu {
-                    Button("End conversation", role: .destructive) {
-                        Task { await engine.endSession(reason: "menu") }
+        GeometryReader { geo in
+            let diameter = geo.size.width * 0.53
+            let orbY = geo.size.height * 0.56
+            ZStack {
+                Color.black
+                SkyCloudOrbView(level: engine.level, state: engine.voiceState)
+                    .frame(width: diameter, height: diameter)
+                    .scaleEffect(voice.exiting ? 0.2 : 1)
+                    .opacity(voice.exiting ? 0 : 1)
+                    .animation(.easeIn(duration: 0.25), value: voice.exiting)
+                    .matchedGeometryEffect(id: "voice-orb", in: orbSpace)
+                    .position(x: geo.size.width / 2, y: orbY)
+                    .onTapGesture { voice.showTranscript.toggle() }
+                if voice.captionsOn, !caption.isEmpty {
+                    Text(caption)
+                        .font(.system(size: 16, weight: .regular))
+                        .foregroundStyle(Color(white: 0.78))
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .frame(maxWidth: 300)
+                        .position(x: geo.size.width / 2, y: orbY + diameter / 2 + 28)
+                }
+                VStack(spacing: 12) {
+                    topBar
+                    Spacer(minLength: 0)
+                        .allowsHitTesting(false)
+                    if voice.showTranscript {
+                        transcript
+                            .frame(maxHeight: 150)
                     }
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.body.weight(.semibold))
-                        .frame(width: 44, height: 44)
+                    if let status = engine.statusLine {
+                        Text(status)
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(chrome, in: Capsule())
+                    }
+                    if let error = engine.errorMessage, !error.isEmpty {
+                        Text(error)
+                            .font(.footnote)
+                            .foregroundStyle(.white.opacity(0.7))
+                            .multilineTextAlignment(.center)
+                            .lineLimit(2)
+                    }
+                    if engine.pendingSummary != nil {
+                        ApprovalCard()
+                    }
+                    bottomBar
                 }
-                round(system: "captions.bubble",
-                      fill: voice.captionsOn ? Color.primary : Color.primary.opacity(0.12),
-                      foreground: voice.captionsOn ? (scheme == .dark ? .black : .white) : .primary) {
-                    voice.captionsOn.toggle()
-                }
-                round(system: "xmark",
-                      fill: scheme == .dark ? .white : .black,
-                      foreground: scheme == .dark ? .black : .white) {
-                    Task { await engine.endSession(reason: "end-button") }
-                }
+                .padding(.top, geo.safeAreaInsets.top + 8)
+                .padding(.bottom, max(geo.safeAreaInsets.bottom, 8) + 8)
+                .padding(.horizontal, 14)
             }
-            .padding(.bottom, 12)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(scheme == .dark ? Color.black : Color.white)
+        .ignoresSafeArea()
+        .background(Color.black)
+        .onChange(of: engine.dictationText) { _, text in
+            if engine.isDictating || !text.isEmpty { draft = text }
+        }
+    }
+
+    private var topBar: some View {
+        HStack {
+            glassButton(action: onMenu) { hamburger }
+                .accessibilityLabel("Menu")
+            Spacer()
+            glassButton(action: onSettings) { sliders }
+                .accessibilityLabel("Voice settings")
+        }
+    }
+
+    private var bottomBar: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 8) {
+                Button(action: onMenu) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundStyle(.white)
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("More")
+                TextField("", text: $draft, prompt: Text("Ask JARVIS…").foregroundStyle(Color(white: 0.55)))
+                    .font(.system(size: 17))
+                    .foregroundStyle(.white)
+                    .submitLabel(.send)
+                    .onSubmit(sendDraft)
+                Button(action: startVoice) {
+                    voiceArc
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Voice")
+            }
+            .padding(.leading, 12)
+            .padding(.trailing, 14)
+            .frame(height: 60)
+            .background(chrome, in: Capsule())
+
+            solidButton(fill: chrome, foreground: .white, system: "mic.slash", action: mute)
+                .accessibilityLabel("Mute")
+            solidButton(fill: .white, foreground: .black, system: "xmark", action: end)
+                .accessibilityLabel("End")
+        }
+    }
+
+    private var hamburger: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Capsule().fill(.white).frame(width: 16, height: 1.6)
+            Capsule().fill(.white).frame(width: 10, height: 1.6)
+        }
+    }
+
+    private var sliders: some View {
+        VStack(spacing: 6) {
+            sliderLine(knob: 0.72)
+            sliderLine(knob: 0.30)
+        }
+        .frame(width: 18)
+    }
+
+    private func sliderLine(knob: CGFloat) -> some View {
+        GeometryReader { geo in
+            Capsule()
+                .fill(.white)
+                .frame(height: 1.5)
+                .position(x: geo.size.width / 2, y: geo.size.height / 2)
+            Circle()
+                .fill(.white)
+                .frame(width: 5.5, height: 5.5)
+                .position(x: geo.size.width * knob, y: geo.size.height / 2)
+        }
+        .frame(height: 6)
+    }
+
+    private var voiceArc: some View {
+        ZStack {
+            Circle()
+                .trim(from: 0.08, to: 0.42)
+                .stroke(arc, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+            Circle()
+                .trim(from: 0.58, to: 0.92)
+                .stroke(arc, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+        }
+        .rotationEffect(.degrees(-18))
+    }
+
+    private func glassButton<Label: View>(action: @escaping () -> Void, @ViewBuilder label: () -> Label) -> some View {
+        Button(action: action) {
+            label()
+                .frame(width: 56, height: 56)
+                .background {
+                    Circle().fill(.ultraThinMaterial)
+                    Circle().fill(chrome.opacity(0.78))
+                }
+                .overlay(Circle().stroke(Color.white.opacity(0.08), lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func solidButton(fill: Color, foreground: Color, system: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(foreground)
+                .frame(width: 60, height: 60)
+                .background(fill, in: Circle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var caption: String {
         let source = engine.phase == .listening || engine.phase == .idle ? engine.transcript : engine.reply
-        let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return engine.voiceState.label }
-        return String(trimmed.suffix(180))
+        return source.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var transcript: some View {
@@ -313,22 +426,36 @@ struct FullScreenVoiceView: View {
                 ForEach(engine.turns) { turn in
                     Text(turn.text)
                         .font(.callout)
+                        .foregroundStyle(.white.opacity(0.9))
                         .frame(maxWidth: .infinity, alignment: turn.role == "user" ? .trailing : .leading)
                 }
             }
-            .padding(.horizontal, 24)
         }
     }
 
-    private func round(system: String, fill: Color, foreground: Color, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: system)
-                .font(.body.weight(.semibold))
-                .foregroundStyle(foreground)
-                .frame(width: 44, height: 44)
-                .background(fill, in: Circle())
+    private func sendDraft() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        draft = ""
+        engine.ask(text)
+    }
+
+    private func startVoice() {
+        guard !engine.isSessionActive else { return }
+        Task { await engine.startSession(continuous: true) }
+    }
+
+    private func mute() {
+        if engine.isSessionActive {
+            engine.toggleMute()
+        } else {
+            startVoice()
         }
-        .buttonStyle(.plain)
+    }
+
+    private func end() {
+        guard engine.isSessionActive else { return }
+        Task { await engine.endSession(reason: "end-button") }
     }
 }
 

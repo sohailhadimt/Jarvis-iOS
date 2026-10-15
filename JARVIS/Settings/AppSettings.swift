@@ -104,7 +104,7 @@ final class AppSettings {
     var wakeWordEnabled: Bool { didSet { d.set(wakeWordEnabled, forKey: "wakeWordEnabled") } }
     /// ChatGPT cloud is the default. JARVIS classic keeps the Metal geodesic orb.
     var orbStyle: OrbStyle { didSet { d.set(orbStyle.rawValue, forKey: "orbStyle") } }
-    /// Off uses the in-chat voice layout. On uses a separate full-screen orb.
+    /// On (the default) is the full-screen sky voice screen. Off uses the in-chat composer.
     var voiceSeparateMode: Bool { didSet { d.set(voiceSeparateMode, forKey: "voiceSeparateMode") } }
     var startWithVoice: Bool { didSet { d.set(startWithVoice, forKey: "startWithVoice") } }
     /// When on, an in-app voice session keeps listening after the app leaves the screen.
@@ -170,7 +170,13 @@ final class AppSettings {
         autoStandBy = d.object(forKey: "autoStandBy") as? Bool ?? true
         wakeWordEnabled = d.object(forKey: "wakeWordEnabled") as? Bool ?? true
         orbStyle = OrbStyle(rawValue: d.string(forKey: "orbStyle") ?? "") ?? .chatGPT
-        voiceSeparateMode = d.object(forKey: "voiceSeparateMode") as? Bool ?? false
+        if d.object(forKey: "fullScreenVoiceDefault") == nil {
+            voiceSeparateMode = true
+            d.set(true, forKey: "voiceSeparateMode")
+            d.set(true, forKey: "fullScreenVoiceDefault")
+        } else {
+            voiceSeparateMode = d.object(forKey: "voiceSeparateMode") as? Bool ?? true
+        }
         startWithVoice = d.object(forKey: "startWithVoice") as? Bool ?? false
         backgroundConversations = d.object(forKey: "backgroundConversations") as? Bool ?? false
         speechLocale = d.string(forKey: "speechLocale") ?? "en-GB"

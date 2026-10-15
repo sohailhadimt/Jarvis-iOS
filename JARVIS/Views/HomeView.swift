@@ -13,47 +13,24 @@ struct HomeView: View {
     @Namespace private var voiceOrb
     @State private var voice = VoiceSession.shared
     @State private var showSheet = false
+    @State private var showVoiceSettings = false
     @State private var panel: HomePanel?
-    @State private var showCaption = false
-    @State private var ignoreTapUntil = Date.distantPast
-    @State private var errorCaption: String?
-    @State private var errorTick = 0
 
     private var cyan: Color { Color(red: 0, green: 0.898, blue: 0.949) }
 
     var body: some View {
-        GeometryReader { geo in
-            let side = geo.size.width * 0.60
-            let top = geo.safeAreaInsets.top
-            let bottom = geo.safeAreaInsets.bottom
-            let dockLift = max(bottom, 8) + 72
-            let midY = top + (geo.size.height - top - bottom - 72) * 0.5
-            ZStack {
-                Color.black
-                if settings.voiceSeparateMode && (engine.isSessionActive || voice.exiting) {
-                    FullScreenVoiceView(orbSpace: voiceOrb)
-                } else if voice.chatPresented || engine.isSessionActive {
-                    ChatView(orbSpace: voiceOrb, onPlus: { showSheet = true }, onClose: { closeChat() })
-                        .padding(.top, top)
-                        .padding(.bottom, bottom)
-                } else {
-                    orb
-                        .frame(width: side, height: side)
-                        .overlay(alignment: .bottom) { captions.offset(y: 48) }
-                        .position(x: geo.size.width / 2, y: midY)
-                    swipeCatcher(height: 36, screen: geo.size, above: dockLift)
-                }
-            }
-            .frame(width: geo.size.width, height: geo.size.height)
-            .overlay(alignment: .bottom) {
-                if !voice.chatPresented && !engine.isSessionActive {
-                    homeDock
-                        .padding(.bottom, max(bottom, 8))
-                }
+        Group {
+            if settings.voiceSeparateMode || voice.exiting {
+                FullScreenVoiceView(orbSpace: voiceOrb,
+                                    onMenu: { showSheet = true },
+                                    onSettings: { showVoiceSettings = true })
+            } else {
+                ChatView(orbSpace: voiceOrb, onPlus: { showSheet = true }, onClose: { closeChat() })
             }
         }
-        .ignoresSafeArea()
+        .background(Color.black.ignoresSafeArea())
         .sheet(isPresented: $showSheet) { menuSheet }
+        .sheet(isPresented: $showVoiceSettings) { voiceSettingsSheet }
         .sheet(item: $panel) { item in
             NavigationStack {
                 panelDestination(item)
@@ -67,59 +44,6 @@ struct HomeView: View {
             .preferredColorScheme(.dark)
             .tint(cyan)
         }
-        .onChange(of: engine.errorMessage) { _, newValue in
-            guard let newValue, !newValue.isEmpty else { return }
-            errorCaption = newValue
-            errorTick += 1
-            let token = errorTick
-            Task {
-                try? await Task.sleep(for: .seconds(3.5))
-                if errorTick == token { errorCaption = nil }
-            }
-        }
-    }
-
-    private var orb: some View {
-        OrbView(level: engine.level, phase: engine.phase,
-                primary: settings.primaryColor, accent: settings.accentColor,
-                sessionActive: engine.isSessionActive,
-                executing: engine.cloudExecuting || (engine.phase == .thinking && engine.statusLine != nil),
-                hasError: errorCaption != nil,
-                reply: engine.reply)
-            .contentShape(Circle())
-            .onTapGesture {
-                if Date() < ignoreTapUntil { return }
-                Task { await engine.toggleSession() }
-            }
-            .onLongPressGesture(minimumDuration: 0.45) {
-                showCaption.toggle()
-                ignoreTapUntil = Date().addingTimeInterval(0.45)
-            }
-            .accessibilityAddTraits(.isButton)
-            .accessibilityHint(engine.isSessionActive ? "Stops the session" : "Starts a session")
-            .accessibilityAction(named: "Transcript") { showCaption.toggle() }
-    }
-
-    private var captions: some View {
-        VStack(spacing: 8) {
-            if showCaption, !captionText.isEmpty {
-                Text(captionText)
-                    .font(.system(size: 13, weight: .light))
-                    .foregroundStyle(cyan.opacity(0.72))
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-            }
-            if let errorCaption {
-                Text(errorCaption)
-                    .font(.system(size: 12, weight: .light))
-                    .foregroundStyle(.white.opacity(0.45))
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-            }
-        }
-        .frame(maxWidth: 320)
-        .padding(.horizontal, 28)
-        .allowsHitTesting(false)
     }
 
     private func closeChat() {
@@ -132,70 +56,18 @@ struct HomeView: View {
         }
     }
 
-    private var captionText: String {
-        if !engine.reply.isEmpty { return engine.reply }
-        return engine.transcript
-    }
-
-    private var homeDock: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                dockButton("Chat", systemImage: "text.bubble") { voice.chatPresented = true }
-                dockButton("Tasks", systemImage: "checklist") { panel = .tasks }
-                dockButton("Approvals", systemImage: "checkmark.circle") { panel = .approvals }
-                dockButton("Business", systemImage: "chart.bar") { panel = .business }
-                dockButton("Memory", systemImage: "brain") { panel = .memory }
-                dockButton("Activity", systemImage: "list.bullet.rectangle") { panel = .activity }
-                dockButton("Settings", systemImage: "gearshape") { panel = .settings }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 6)
-        }
-        .frame(height: 64)
-        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-    }
-
-    private func dockButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 3) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 15, weight: .light))
-                Text(title)
-                    .font(.system(size: 9, weight: .medium))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-            }
-            .foregroundStyle(VoiceLook.mist)
-            .frame(width: 62, height: 48)
-            .background {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(VoiceLook.blue.opacity(0.16))
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(VoiceLook.lavender.opacity(0.35), lineWidth: 0.6)
-            }
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(title)
-    }
-
-    private func swipeCatcher(height: CGFloat, screen: CGSize, above lift: CGFloat) -> some View {
-        Color.black.opacity(0.001)
-            .frame(width: screen.width, height: height)
-            .position(x: screen.width / 2, y: screen.height - lift - height / 2)
-            .gesture(
-                DragGesture(minimumDistance: 16)
-                    .onEnded { value in
-                        if value.translation.height < -28, abs(value.translation.width) < 90 {
-                            showSheet = true
-                        }
+    private var voiceSettingsSheet: some View {
+        NavigationStack {
+            VoicesSettingsView()
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Close") { showVoiceSettings = false }
                     }
-            )
-            .accessibilityLabel("More")
-            .accessibilityHint("Swipe up for conversation, tasks, memory and settings")
-            .accessibilityAction { showSheet = true }
+                }
+        }
+        .presentationBackground(Color.black)
+        .preferredColorScheme(.dark)
+        .tint(cyan)
     }
 
     private var menuSheet: some View {
