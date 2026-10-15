@@ -9,7 +9,7 @@ enum JarvisPhase: String, Codable, Hashable, Sendable {
         case .idle: "Standing by"
         case .listening: "Listening"
         case .thinking: "Thinking"
-        case .speaking: "Speaking"
+        case .speaking: "Responding"
         }
     }
 

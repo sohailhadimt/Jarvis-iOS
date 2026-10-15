@@ -1,6 +1,8 @@
+import ActivityKit
 import AVFoundation
 import Foundation
 import Observation
+import UIKit
 import WidgetKit
 
 /// The conversation loop: listen -> transcribe -> LLM -> speak -> (listen again when continuous).
@@ -57,12 +59,33 @@ final class AssistantEngine {
     }
 
     func startSession(continuous: Bool) async {
-        guard await prepareAudio() else { return }
+        // A background AudioRecordingIntent is suspended unless a Live Activity is up.
+        // In the foreground the on-screen session still runs when Live Activities are off.
+        if UIApplication.shared.applicationState != .active,
+           !ActivityAuthorizationInfo().areActivitiesEnabled {
+            errorMessage = "Turn on Live Activities for JARVIS so the Action Button can listen in the Dynamic Island."
+            publishControlState()
+            return
+        }
+        guard await prepareAudio() else {
+            publishControlState()
+            return
+        }
         groqTranscriptionBroken = false
         fileCaptureBroken = false
         isSessionActive = true
         isContinuous = continuous
+        phase = .listening
+        // Request the island before the microphone tap. iOS only keeps the background
+        // recording alive while that Live Activity exists.
         LiveActivityManager.shared.start(state: activityState)
+        if UIApplication.shared.applicationState != .active,
+           !LiveActivityManager.shared.isRunning {
+            await endSession()
+            errorMessage = "JARVIS couldn't show the Dynamic Island, so the background session was stopped."
+            return
+        }
+        publishControlState()
         interrupt()
         beginListening(manual: false)
     }
@@ -75,8 +98,14 @@ final class AssistantEngine {
         phase = .idle
         level = 0
         await LiveActivityManager.shared.end(finalState: activityState)
+        publishControlState()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         audioConfigured = false
+    }
+
+    /// Writes the App Group flag the control reads, then asks Control Center to redraw it.
+    func syncControlState() {
+        publishControlState()
     }
 
     // MARK: Push-to-talk / tap-to-talk
@@ -546,6 +575,11 @@ final class AssistantEngine {
         d.set(transcript, forKey: SharedConfig.Key.lastTranscript)
         d.set(reply, forKey: SharedConfig.Key.lastReply)
         WidgetCenter.shared.reloadTimelines(ofKind: SharedConfig.standByWidgetKind)
+    }
+
+    private func publishControlState() {
+        SharedConfig.defaults.set(isSessionActive, forKey: SharedConfig.Key.sessionActive)
+        ControlCenter.shared.reloadControls(ofKind: SharedConfig.controlKind)
     }
 }
 

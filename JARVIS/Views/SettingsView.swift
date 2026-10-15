@@ -20,10 +20,13 @@ struct SettingsView: View {
             }
             Section {
                 Text("""
+                Action Button > Controls > search JARVIS.
                 1. Open the iPhone Settings app > Action Button.
-                2. Swipe to "Shortcut", tap "Choose a Shortcut".
-                3. Pick JARVIS > "Talk to JARVIS".
-                That opens JARVIS and starts listening. "Toggle JARVIS" starts or ends a session from the Lock Screen.
+                2. Swipe to Controls.
+                3. Tap the control and search JARVIS.
+                Pressing it starts JARVIS in the Dynamic Island without opening the app. Press again to end it.
+                Start a session in the app once and allow Microphone and Speech Recognition. iOS can only show those prompts while JARVIS is on screen.
+                Talk to JARVIS is still under Shortcut > Choose a Shortcut > JARVIS. That shortcut opens the app and starts listening.
                 """)
                 .font(.footnote)
             } header: {

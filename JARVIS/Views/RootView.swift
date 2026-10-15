@@ -27,10 +27,14 @@ struct RootView: View {
             refreshBattery()
             // Referencing the provider keeps it in the binary and refreshes the Action Button list.
             JarvisShortcuts.updateAppShortcutParameters()
+            if scenePhase == .active { engine.syncControlState() }
             startListeningIfRequested()
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { startListeningIfRequested() }
+            if phase == .active {
+                engine.syncControlState()
+                startListeningIfRequested()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: JarvisStartListening.notification)) { _ in
             startListeningIfRequested()

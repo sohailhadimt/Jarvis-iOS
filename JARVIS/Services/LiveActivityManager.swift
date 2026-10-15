@@ -32,6 +32,8 @@ final class LiveActivityManager {
         await Self.pushUpdate(id: activityID, state: state)
     }
 
+    var isRunning: Bool { activityID != nil }
+
     func end(finalState: JarvisActivityAttributes.ContentState) async {
         let endingID = activityID
         activityID = nil

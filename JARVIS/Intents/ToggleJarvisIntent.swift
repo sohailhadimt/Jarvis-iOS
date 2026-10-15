@@ -19,7 +19,8 @@ struct TalkToJarvisIntent: AppIntent {
     }
 }
 
-/// Assign to the Action Button when you want a session that can start without bringing the app forward.
+/// Shortcut list entry. The Action Button Controls gallery uses SetJarvisSessionIntent instead,
+/// because a control toggle has to be a SetValueIntent. This one stays for "Toggle JARVIS".
 /// AudioRecordingIntent (iOS 18+) lets the app start recording from the background,
 /// provided a Live Activity is started while the intent runs, which startSession() does.
 struct ToggleJarvisIntent: AudioRecordingIntent {

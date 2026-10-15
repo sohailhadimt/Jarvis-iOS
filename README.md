@@ -19,7 +19,7 @@ No passwords or API keys are stored in this code. You type them into the app, an
 | OpenAI API key | Pay as you go | platform.openai.com > API keys. Optional if Gemini or Groq is saved. |
 | ElevenLabs API key | Optional | elevenlabs.io > Profile > API Keys. Without it, the iPhone's own voice is used. |
 
-**Free vs paid Apple account:** with a free Apple ID, apps you install **stop opening after 7 days**. To fix that, plug the phone in and press Run in Xcode again. The **$99/year Apple Developer Program** is only needed for TestFlight, the App Store, or apps that last a year. A free account may also refuse the **App Groups** capability (see Troubleshooting). The app still works without it. Only the StandBy widget's "last reply" text stops updating.
+**Free vs paid Apple account:** with a free Apple ID, apps you install **stop opening after 7 days**. To fix that, plug the phone in and press Run in Xcode again. The **$99/year Apple Developer Program** is only needed for TestFlight, the App Store, or apps that last a year. A free account may also refuse the **App Groups** capability (see Troubleshooting). The app still works without it. The StandBy widget's "last reply" text and the Action Button control's on/off state stop updating.
 
 ## 2. Create the Xcode project
 
@@ -76,11 +76,13 @@ Other settings:
 
 ## 7. Assign the Action Button
 
-1. Run the app once so iOS learns about its shortcuts.
-2. Open the iPhone **Settings > Action Button**, swipe to **Shortcut**, tap **Choose a Shortcut**, then pick **JARVIS > Talk to JARVIS**.
-3. Press the Action Button. JARVIS opens and starts listening. **Toggle JARVIS** in the same list starts or ends a session without bringing the app forward. Press the Action Button again on Toggle, or tap the red stop button on the Live Activity, to end it.
+The control is in the Action Button's **Controls** list.
 
-You can also say "Hey Siri, Talk to JARVIS" or "Hey Siri, Toggle JARVIS".
+1. Run the app and start a session once, then allow **Microphone** and **Speech Recognition**. iOS can only show those prompts while JARVIS is on screen, so the first session has to start from the app (hold the mic, tap Converse, or use the Talk to JARVIS shortcut below).
+2. Open the iPhone **Settings > Action Button**, swipe to **Controls**, tap the control, and search **JARVIS**.
+3. Press the Action Button. JARVIS starts in the Dynamic Island (Listening, then Thinking, then Responding) and does not open the app. Press the Action Button again to end it. The red stop button on the Live Activity ends it too.
+
+**Talk to JARVIS** is still a shortcut: Settings > Action Button > Shortcut > Choose a Shortcut > JARVIS > Talk to JARVIS. That one opens the app and starts listening. You can also say "Hey Siri, Talk to JARVIS" or "Hey Siri, Toggle JARVIS".
 
 ## 8. StandBy
 
@@ -149,9 +151,10 @@ Each one is only asked for the first time a feature needs it. You can change the
 
 ## 10. What iOS limits (please read)
 
-- **Background microphone:** iOS lets the app keep listening only while its audio session is active, meaning a session started from the app or the Action Button with the Live Activity showing. If iOS ends the session (for example a phone call, or another app taking over the audio), press the Action Button again. iOS does not allow an always-on "Hey JARVIS" wake word for third-party apps.
+- **Background microphone:** iOS lets the app keep listening only while its audio session is active and a Live Activity is showing. That covers a session started from the app or from the Action Button control. If iOS ends the session (for example a phone call, or another app taking over the audio), press the Action Button again. iOS does not allow an always-on "Hey JARVIS" wake word for third-party apps.
+- **First Action Button press:** the control cannot show the microphone or speech permission prompts. Start a session in the app once and allow both. After that, the control can listen without bringing the app forward. Live Activities must also be allowed for JARVIS.
 - **Speech recognition** uses Groq Whisper when a Groq API key is saved. Otherwise it runs on-device when your iPhone supports it for English (UK). If on-device recognition isn't available, Apple's servers are used.
-- **The Live Activity** updates when the state changes (listening, thinking, speaking), not 60 times a second. The animated orb is only inside the app, because widgets cannot animate continuously.
+- **The Live Activity** updates when the state changes (Listening, Thinking, Responding), not 60 times a second. The animated orb is only inside the app, because widgets cannot animate continuously. The Dynamic Island shows a still teal orb, the status, and the latest reply.
 - **Live Activities** last up to 8 hours on screen.
 
 ### Things that would need a newer SDK, or don't exist publicly
@@ -165,7 +168,7 @@ If a future SDK adds these, they could be adopted.
 
 ## 11. Troubleshooting
 
-- **"Personal development teams do not support the App Groups capability"**: remove the App Groups capability from both targets (delete the `entitlements` blocks in `project.yml` and run `xcodegen` again). Everything still works except the StandBy widget's last-reply text.
+- **"Personal development teams do not support the App Groups capability"**: remove the App Groups capability from both targets (delete the `entitlements` blocks in `project.yml` and run `xcodegen` again). Everything still works except the StandBy widget's last-reply text and the Action Button control's on/off indicator. The control can still start and end a session.
 - **Swift 6 concurrency errors after an Xcode update**: as a quick workaround, set *Swift Language Version* to 5 in Build Settings for both targets.
 - **No voice from ElevenLabs**: check the key and your quota. The app falls back to the iPhone voice and shows the error.
 - **Web search error mentioning `web_search`**: your model may not support it. Choose `gpt-4.1-mini` or `gpt-4o` under Integrations > Search model.
@@ -176,8 +179,8 @@ If a future SDK adds these, they could be adopted.
 
 - `project.yml`: the XcodeGen spec (2 targets: the JARVIS app and the JARVISWidgets extension).
 - `JARVIS/`: app code (engine, services, settings, views, intents).
-- `JARVISWidgets/`: Live Activity, Dynamic Island, and the StandBy/Lock Screen widget.
-- `Shared/`: code compiled into both targets (Live Activity attributes, the End-session intent, colours, the static orb).
+- `JARVISWidgets/`: Live Activity, Dynamic Island, the Control Center / Action Button control, and the StandBy/Lock Screen widget.
+- `Shared/`: code compiled into both targets (Live Activity attributes, the control toggle intent, the End-session intent, colours, the static orb).
 
 ## Building without a Mac (Codemagic)
 

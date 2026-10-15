@@ -23,23 +23,35 @@ struct JarvisLiveActivity: Widget {
                 DynamicIslandExpandedRegion(.center) {
                     Label(context.state.phase.label, systemImage: context.state.phase.symbol)
                         .font(.headline)
+                        .foregroundStyle(IslandStyle.teal)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(alignment: .leading, spacing: 2) {
+                        if !context.state.reply.isEmpty {
+                            Text(context.state.reply).lineLimit(2).foregroundStyle(.white)
+                        }
                         if !context.state.transcript.isEmpty {
                             Text(context.state.transcript).lineLimit(1).foregroundStyle(.secondary)
-                        }
-                        if !context.state.reply.isEmpty {
-                            Text(context.state.reply).lineLimit(2)
                         }
                     }
                     .font(.caption)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } compactLeading: {
-                StaticOrb(phase: context.state.phase).frame(width: 20, height: 20)
+                StaticOrb(phase: context.state.phase).frame(width: 22, height: 22)
             } compactTrailing: {
-                Image(systemName: context.state.phase.symbol).foregroundStyle(.cyan)
+                VStack(alignment: .trailing, spacing: 0) {
+                    Text(context.state.phase.label)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(IslandStyle.teal)
+                        .lineLimit(1)
+                    if !context.state.reply.isEmpty {
+                        Text(context.state.reply)
+                            .font(.system(size: 8))
+                            .lineLimit(1)
+                            .foregroundStyle(.white.opacity(0.85))
+                    }
+                }
             } minimal: {
                 StaticOrb(phase: context.state.phase).frame(width: 18, height: 18)
             }
@@ -47,6 +59,10 @@ struct JarvisLiveActivity: Widget {
             .keylineTint(.cyan)
         }
     }
+}
+
+private enum IslandStyle {
+    static let teal = Color(hex: Theme.defaultAccentHex)
 }
 
 struct LockScreenActivityView: View {
@@ -57,7 +73,7 @@ struct LockScreenActivityView: View {
             StaticOrb(phase: state.phase).frame(width: 52, height: 52)
             VStack(alignment: .leading, spacing: 3) {
                 Label(state.phase.label, systemImage: state.phase.symbol)
-                    .font(.headline).foregroundStyle(.white)
+                    .font(.headline).foregroundStyle(IslandStyle.teal)
                 if !state.transcript.isEmpty {
                     Text("“\(state.transcript)”").font(.caption).lineLimit(1).foregroundStyle(.white.opacity(0.7))
                 }
