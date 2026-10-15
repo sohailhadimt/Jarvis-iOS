@@ -25,10 +25,13 @@ struct OrbPalette: Sendable {
         func mix(_ r: Double, _ g: Double, _ b: Double, _ t: Double) -> (Double, Double, Double) {
             (r + (primary.0 - r) * t, g + (primary.1 - g) * t, b + (primary.2 - b) * t)
         }
-        let scale = min(1, max(0, amount)) / 0.18
-        let line = mix(lineR, lineG, lineB, min(1, 0.18 * scale))
-        let seg = mix(segR, segG, segB, min(1, 0.05 * scale))
-        let part = mix(partR, partG, partB, min(1, 0.14 * scale))
+        let scale: Double = min(1.0, max(0.0, amount)) / 0.18
+        let lineMix: Double = min(1.0, 0.18 * scale)
+        let segMix: Double = min(1.0, 0.05 * scale)
+        let partMix: Double = min(1.0, 0.14 * scale)
+        let line = mix(lineR, lineG, lineB, lineMix)
+        let seg = mix(segR, segG, segB, segMix)
+        let part = mix(partR, partG, partB, partMix)
         return OrbPalette(lineR: line.0, lineG: line.1, lineB: line.2,
                           segR: seg.0, segG: seg.1, segB: seg.2,
                           partR: part.0, partG: part.1, partB: part.2)

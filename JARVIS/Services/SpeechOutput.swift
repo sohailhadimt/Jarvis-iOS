@@ -28,9 +28,11 @@ final class SpeechOutput: NSObject {
 
     /// Fraction of the current utterance that has been heard. Read this before `stop()`.
     var playbackFraction: Double {
-        guard scheduledFrames > 0, let playbackAnchor else { return 0 }
-        let played = Date().timeIntervalSince(playbackAnchor) * pcmFormat.sampleRate
-        return min(1, max(0, played / Double(scheduledFrames)))
+        guard scheduledFrames > 0, let playbackAnchor else { return 0.0 }
+        let played: Double = Date().timeIntervalSince(playbackAnchor) * pcmFormat.sampleRate
+        let frames: Double = Double(scheduledFrames)
+        let fraction: Double = played / frames
+        return min(1.0, max(0.0, fraction))
     }
 
     func preparePlayback() {

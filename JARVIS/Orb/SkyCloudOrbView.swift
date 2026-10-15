@@ -18,22 +18,29 @@ struct SkyCloudOrbView: View {
     @State private var closeOpacity: Double = 1
 
     var body: some View {
-        let feather: Float = (crispEdge ?? (colorScheme != .light)) ? 0 : 0.1
+        let crisp: Bool = crispEdge ?? (colorScheme != .light)
+        let feather: Float = crisp ? 0.0 : 0.1
         TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
-            let date = timeline.date
-            let time = date.timeIntervalSinceReferenceDate
-            let speaking = state == .aiSpeaking
-            let envelope = meter.push(speaking ? min(1, max(0, level)) : 0, at: date)
-            let breathe = 1 + 0.02 * sin(time * 2 * .pi / 4)
-            let pulse = 1 + 0.12 * envelope
-            let scale = envelope > 0.02 ? pulse : breathe
+            let date: Date = timeline.date
+            let t: Double = date.timeIntervalSinceReferenceDate
+            let speaking: Bool = state == .aiSpeaking
+            let clamped: Double = min(1.0, max(0.0, level))
+            let target: Double = speaking ? clamped : 0.0
+            let envelope: Double = meter.push(target, at: date)
+            let phase: Double = t * (2.0 * Double.pi / 4.0)
+            let breathe: Double = 1.0 + 0.02 * sin(phase)
+            let pulse: Double = 1.0 + 0.12 * envelope
+            let chosen: Double = envelope > 0.02 ? pulse : breathe
+            let scale: CGFloat = CGFloat(chosen)
             GeometryReader { geo in
+                let sideW: Float = Float(geo.size.width)
+                let sideH: Float = Float(geo.size.height)
                 Rectangle()
                     .fill(Color(red: 0.0, green: 0.35, blue: 0.9))
                     .colorEffect(
                         ShaderLibrary.default.skyClouds(
-                            .float(Float(time)),
-                            .float2(SIMD2(Float(geo.size.width), Float(geo.size.height))),
+                            .float(Float(t)),
+                            .float2(SIMD2(sideW, sideH)),
                             .float3(Self.rgb(tint)),
                             .float(Float(tintAmount)),
                             .float(feather)
@@ -79,10 +86,11 @@ private final class LevelSmooth {
     var last: Date?
 
     func push(_ target: Double, at date: Date) -> Double {
-        let dt = last.map { date.timeIntervalSince($0) } ?? 0
+        let dt: Double = last.map { date.timeIntervalSince($0) } ?? 0.0
         last = date
-        let tau = target > value ? 0.030 : 0.120
-        let step = min(1, dt / max(tau, 0.0001))
+        let tau: Double = target > value ? 0.030 : 0.120
+        let floor: Double = max(tau, 0.0001)
+        let step: Double = min(1.0, dt / floor)
         value += (target - value) * step
         return value
     }

@@ -222,17 +222,25 @@ struct LevelWaveform: View {
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
-            let t = timeline.date.timeIntervalSinceReferenceDate
+            let t: Double = timeline.date.timeIntervalSinceReferenceDate
             HStack(alignment: .center, spacing: 3) {
                 ForEach(0..<5, id: \.self) { i in
-                    let wobble = active ? abs(sin(t * 7 + Double(i) * 0.7)) : 0.35
-                    Capsule()
-                        .fill(tint)
-                        .frame(width: 3, height: 4 + (6 + level * 16) * (0.35 + 0.65 * wobble))
-                        .shadow(color: tint.opacity(0.8), radius: 2)
+                    waveformBar(index: i, time: t)
                 }
             }
         }
+    }
+
+    private func waveformBar(index: Int, time: Double) -> some View {
+        let phase: Double = time * 7.0 + Double(index) * 0.7
+        let wobble: Double = active ? abs(sin(phase)) : 0.35
+        let span: Double = 6.0 + level * 16.0
+        let shaped: Double = 0.35 + 0.65 * wobble
+        let height: CGFloat = CGFloat(4.0 + span * shaped)
+        return Capsule()
+            .fill(tint)
+            .frame(width: 3, height: height)
+            .shadow(color: tint.opacity(0.8), radius: 2)
     }
 }
 

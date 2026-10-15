@@ -83,8 +83,9 @@ final class AssistantEngine {
 
     /// Silence that ends a turn. Sensitivity 0.5 is about 700ms.
     private var silenceTimeout: Duration {
-        let sensitivity = min(1, max(0, AppSettings.shared.vadSensitivity))
-        return .milliseconds(Int(1100 - sensitivity * 800))
+        let sensitivity: Double = min(1.0, max(0.0, AppSettings.shared.vadSensitivity))
+        let milliseconds: Double = 1100.0 - sensitivity * 800.0
+        return .milliseconds(Int(milliseconds))
     }
 
     /// off → connecting → listening ↔ userSpeaking → thinking → aiSpeaking → listening.
@@ -897,8 +898,10 @@ final class AssistantEngine {
             bargeSince = nil
             return
         }
-        let sensitivity = min(1, max(0, AppSettings.shared.vadSensitivity))
-        let threshold = (listener.voiceProcessingEnabled ? 0.32 : 0.48) * (1.2 - sensitivity * 0.4)
+        let sensitivity: Double = min(1.0, max(0.0, AppSettings.shared.vadSensitivity))
+        let base: Double = listener.voiceProcessingEnabled ? 0.32 : 0.48
+        let span: Double = 1.2 - sensitivity * 0.4
+        let threshold: Double = base * span
         if value > threshold {
             let start = bargeSince ?? Date()
             bargeSince = start

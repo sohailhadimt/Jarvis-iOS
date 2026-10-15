@@ -243,13 +243,17 @@ struct FullScreenVoiceView: View {
     @State private var voice = VoiceSession.shared
     @State private var draft = ""
 
-    private let chrome = Color(red: 28.0 / 255, green: 28.0 / 255, blue: 30.0 / 255)
-    private let arc = Color(red: 75.0 / 255, green: 168.0 / 255, blue: 238.0 / 255)
+    private let chrome = Color(red: 28.0 / 255.0, green: 28.0 / 255.0, blue: 30.0 / 255.0)
+    private let arc = Color(red: 75.0 / 255.0, green: 168.0 / 255.0, blue: 238.0 / 255.0)
 
     var body: some View {
         GeometryReader { geo in
-            let diameter = geo.size.width * 0.53
-            let orbY = geo.size.height * 0.56
+            let diameter: CGFloat = geo.size.width * 0.53
+            let orbY: CGFloat = geo.size.height * 0.56
+            let midX: CGFloat = geo.size.width / 2.0
+            let captionY: CGFloat = orbY + diameter / 2.0 + 28.0
+            let topPad: CGFloat = geo.safeAreaInsets.top + 8.0
+            let bottomPad: CGFloat = max(geo.safeAreaInsets.bottom, 8.0) + 8.0
             ZStack {
                 Color.black
                 SkyCloudOrbView(level: engine.level, state: engine.voiceState, closing: voice.exiting,
@@ -257,7 +261,7 @@ struct FullScreenVoiceView: View {
                                 crispEdge: true)
                     .frame(width: diameter, height: diameter)
                     .matchedGeometryEffect(id: "voice-orb", in: orbSpace)
-                    .position(x: geo.size.width / 2, y: orbY)
+                    .position(x: midX, y: orbY)
                     .onTapGesture { voice.showTranscript.toggle() }
                 if voice.captionsOn, !caption.isEmpty {
                     Text(caption)
@@ -266,7 +270,7 @@ struct FullScreenVoiceView: View {
                         .multilineTextAlignment(.center)
                         .lineLimit(2)
                         .frame(maxWidth: 300)
-                        .position(x: geo.size.width / 2, y: orbY + diameter / 2 + 28)
+                        .position(x: midX, y: captionY)
                 }
                 VStack(spacing: 12) {
                     topBar
@@ -297,8 +301,8 @@ struct FullScreenVoiceView: View {
                     AgentJobStrip()
                     bottomBar
                 }
-                .padding(.top, geo.safeAreaInsets.top + 8)
-                .padding(.bottom, max(geo.safeAreaInsets.bottom, 8) + 8)
+                .padding(.top, topPad)
+                .padding(.bottom, bottomPad)
                 .padding(.horizontal, 14)
             }
         }
@@ -371,14 +375,17 @@ struct FullScreenVoiceView: View {
 
     private func sliderLine(knob: CGFloat) -> some View {
         GeometryReader { geo in
+            let midX: CGFloat = geo.size.width / 2.0
+            let midY: CGFloat = geo.size.height / 2.0
+            let knobX: CGFloat = geo.size.width * knob
             Capsule()
                 .fill(.white)
                 .frame(height: 1.5)
-                .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                .position(x: midX, y: midY)
             Circle()
                 .fill(.white)
                 .frame(width: 5.5, height: 5.5)
-                .position(x: geo.size.width * knob, y: geo.size.height / 2)
+                .position(x: knobX, y: midY)
         }
         .frame(height: 6)
     }
