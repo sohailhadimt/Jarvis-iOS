@@ -1,16 +1,5 @@
-import Observation
 import SwiftUI
 import UIKit
-
-/// How far the ask bar sits above the keyboard. The home screen does not read this,
-/// so the ring stays mounted while the bar follows the keyboard.
-@MainActor
-@Observable
-final class KeyboardLift {
-    static let shared = KeyboardLift()
-    private init() {}
-    var overlap: CGFloat = 0
-}
 
 struct HomeScreen: View {
     @Environment(\.scenePhase) private var scenePhase
@@ -98,33 +87,39 @@ struct HomeScreen: View {
     }
 
     private var keyboardReader: some View {
-        GeometryReader { proxy in
-            Color.clear
-                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
-                    guard let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
-                    let overlap = max(0, proxy.frame(in: .global).maxY - frame.minY)
-                    let duration = note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
-                    let visible = overlap > 0.5
-                    keyboardReveal?.cancel()
-                    if visible {
+        Color.clear
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
+                guard let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+                let duration = note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+                let visible = Self.keyboardCoversScreen(frame)
+                keyboardReveal?.cancel()
+                if visible {
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) { keyboardVisible = true }
+                } else if keyboardVisible {
+                    let wait = duration
+                    keyboardReveal = Task {
+                        try? await Task.sleep(for: .seconds(wait))
+                        guard !Task.isCancelled else { return }
                         var transaction = Transaction()
                         transaction.disablesAnimations = true
-                        withTransaction(transaction) { keyboardVisible = true }
-                    } else if keyboardVisible {
-                        let wait = duration
-                        keyboardReveal = Task {
-                            try? await Task.sleep(for: .seconds(wait))
-                            guard !Task.isCancelled else { return }
-                            var transaction = Transaction()
-                            transaction.disablesAnimations = true
-                            withTransaction(transaction) { keyboardVisible = false }
-                        }
-                    }
-                    withAnimation(.easeOut(duration: duration)) {
-                        KeyboardLift.shared.overlap = overlap
+                        withTransaction(transaction) { keyboardVisible = false }
                     }
                 }
-        }
+            }
+    }
+
+    /// The keyboard frame is in window coordinates. The home view shrinks with the safe area, so its own bottom edge is not a stable measure.
+    @MainActor
+    private static func keyboardCoversScreen(_ frame: CGRect) -> Bool {
+        let height = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first { $0.isKeyWindow }?
+            .bounds.height ?? 0
+        guard height > 1 else { return false }
+        return frame.minY < height - 1
     }
 }
 
@@ -236,7 +231,6 @@ private struct SessionExtras: View {
 private struct AskBar: View {
     @Environment(AssistantEngine.self) private var engine
     @State private var draft = ""
-    @State private var lift = KeyboardLift.shared
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -273,7 +267,7 @@ private struct AskBar: View {
         .background(Color(hex: "#0B1220").opacity(0.72), in: Capsule())
         .overlay(Capsule().stroke(Color(hex: "#2E8BFF").opacity(0.55), lineWidth: 0.8))
         .shadow(color: Color(hex: "#2E8BFF").opacity(0.28), radius: 8)
-        .padding(.bottom, 12 + lift.overlap)
+        .padding(.bottom, 12)
     }
 
     private func send() {
