@@ -183,7 +183,7 @@ Saying "call Sam and tell them the meeting moved" in the app looks up Sam, then 
 
 The worker places the call with the Twilio Calls API and, when Twilio requests TwiML, registers it with ElevenLabs Conversational AI (`POST /v1/convai/twilio/register-call`). ElevenLabs speaks with the agent's voice and streams audio with Twilio. The worker does not bridge the audio itself.
 
-Every outbound call starts with: "Hello, this is JARVIS, Master Hadi's personal assistant." JARVIS then states the message in the third person, for example "Master Hadi is currently busy." He does not say that Master Hadi asked him to pass it on. He listens, stays inside the brief, and the summary comes back to the iPhone.
+Every outbound call starts with: "Hello, this is JARVIS, Master Hadi's personal assistant. Master Hadi has asked me to tell you …" and then the message. JARVIS listens, stays inside the brief, and the summary comes back to the iPhone.
 
 On the ElevenLabs agent:
 
