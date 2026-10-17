@@ -1,5 +1,5 @@
 # JARVIS cloud backend. Free-tier Cloudflare Workers + D1 + Cron Triggers.
-# Replace database_id after `npx wrangler d1 create jarvis-db`.
+# database_id is jarvis-db. The deploy workflow also looks this database up by name.
 name = "jarvis-backend"
 main = "src/index.ts"
 compatibility_date = "2026-10-01"
@@ -11,7 +11,7 @@ compatibility_date = "2026-10-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "jarvis-db"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "432f8531-b090-4df4-ad1d-efe720693d86"
 
 [triggers]
 crons = ["*/5 * * * *"]

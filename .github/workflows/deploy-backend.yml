@@ -97,6 +97,31 @@ jobs:
           done
           exit 1
 
+      - name: Register workers.dev subdomain
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/subdomain"
+          current=$(curl -sS -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" "$api" || true)
+          existing=$(node -e 'let s=""; try { const j=JSON.parse(process.argv[1]); s=j.result&&j.result.subdomain||""; } catch {} if (s) process.stdout.write(s)' "$current")
+          if [ -n "$existing" ]; then
+            echo "workers.dev subdomain is already registered: ${existing}"
+            exit 0
+          fi
+          for candidate in jarvis-hadi sohailhadimt-jarvis jarvis-sohailhadimt; do
+            code=$(curl -sS -o /tmp/workers-subdomain.json -w "%{http_code}" -X PUT \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "$api" \
+              --data "{\"subdomain\":\"${candidate}\"}")
+            if [ "$code" = "200" ]; then
+              echo "Registered workers.dev subdomain: ${candidate}"
+              exit 0
+            fi
+            echo "Subdomain ${candidate} was not accepted (HTTP ${code})."
+          done
+          echo "Could not register a workers.dev subdomain. Open the Workers onboarding page in Cloudflare and choose one, then rerun this workflow."
+          exit 1
+
       - name: Deploy Worker
         run: |
           set -euo pipefail
