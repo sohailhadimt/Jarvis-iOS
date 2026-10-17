@@ -4,7 +4,7 @@ import Foundation
 @MainActor
 enum ToolCatalog {
     static let confirmTools: Set<String> = [
-        "call_contact", "call_number", "facetime", "send_imessage_or_sms", "whatsapp_message",
+        "call_contact", "call_number", "facetime", "send_imessage_or_sms", "whatsapp_message", "send_email",
         "send_task_to_agent", "send_task_to_grok_bot", "calendar_delete_event", "reminder_delete",
     ]
 
@@ -50,6 +50,9 @@ enum ToolCatalog {
             fn("whatsapp_message", "Open WhatsApp with a chat and prefilled message. The user taps Send.",
                ["contact_name": str("Contact name"), "phone_number": str("Number if no contact"),
                 "body": str("Message text")], required: ["body"]),
+            fn("send_email", "Prepare an email in Mail. The user taps Send. Nothing is sent until they do.",
+               ["contact_name": str("Contact name"), "email": str("Address if no contact"),
+                "subject": str("Subject"), "body": str("Email body")], required: ["body"]),
             fn("open_app", "Open an app by deep link.",
                ["app": oneOf(AppLauncher.apps.keys.sorted(), "App to open")], required: ["app"]),
             fn("maps_directions", "Open Apple Maps with directions.",

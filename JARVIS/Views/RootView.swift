@@ -63,6 +63,10 @@ struct RootView: View {
             MessageComposer(draft: draft) { engine.messageDraft = nil }
                 .ignoresSafeArea()
         }
+        .sheet(item: Binding(get: { engine.mailDraft }, set: { engine.mailDraft = $0 })) { draft in
+            MailComposer(draft: draft) { engine.mailDraft = nil }
+                .ignoresSafeArea()
+        }
         .onReceive(NotificationCenter.default.publisher(for: UIDevice.batteryStateDidChangeNotification)) { _ in
             refreshBattery()
         }

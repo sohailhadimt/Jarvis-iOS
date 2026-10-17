@@ -8,6 +8,13 @@ struct MessageDraft: Identifiable, Sendable {
     let body: String
 }
 
+struct MailDraft: Identifiable, Sendable {
+    let id = UUID()
+    let recipients: [String]
+    let subject: String
+    let body: String
+}
+
 /// An action that waits for the user to say "yes" (or tap Confirm).
 struct PendingAction {
     let summary: String
@@ -23,6 +30,7 @@ enum ToolOutcome {
 final class ToolExecutor {
     private let calendar = CalendarService()
     var onComposeMessage: ((MessageDraft) -> Void)?
+    var onComposeMail: ((MailDraft) -> Void)?
     private(set) var lastCitations: [Citation] = []
 
     func resetTurn() { lastCitations = [] }
@@ -52,6 +60,9 @@ final class ToolExecutor {
             let (who, number) = try await resolvePhone(name: arg("contact_name"), number: arg("phone_number"))
             let digits = AppLauncher.digits(number)
             guard !digits.isEmpty, let url = URL(string: "tel://\(digits)") else { throw ToolFailure("Invalid number.") }
+            if CarrierCallHook.enabled {
+                return .result(CarrierCallHook.place(to: digits))
+            }
             try await AppLauncher.open(url)
             return .result("Calling \(who).")
 
@@ -79,6 +90,17 @@ final class ToolExecutor {
                 guard AppLauncher.isForeground else { return "Open JARVIS on screen so I can show the message." }
                 self?.onComposeMessage?(MessageDraft(recipients: [number], body: body))
                 return "Here's the message to \(who). Tap send when you're happy."
+            })
+
+        case "send_email":
+            let (who, address) = try await resolveEmail(name: arg("contact_name"), email: arg("email"))
+            let body = arg("body") ?? ""
+            let subject = arg("subject") ?? ""
+            guard MFMailComposeViewController.canSendMail() else { throw ToolFailure("Mail isn't set up on this iPhone.") }
+            return .confirm(PendingAction(summary: "Email \(who): \"\(body)\". Shall I open it for you to send?") { [weak self] in
+                guard AppLauncher.isForeground else { return "Open JARVIS on screen so I can show the email." }
+                self?.onComposeMail?(MailDraft(recipients: [address], subject: subject, body: body))
+                return "Here's the email to \(who). Tap send when you're happy."
             })
 
         case "whatsapp_message":
@@ -277,6 +299,20 @@ final class ToolExecutor {
                 return "Sent to \(label).\(note)"
             }
         })
+    }
+
+    private func resolveEmail(name: String?, email: String?) async throws -> (String, String) {
+        if let email, email.contains("@") { return (name ?? email, email) }
+        guard let name else { throw ToolFailure("I need a contact name or an email address.") }
+        let hits = try await ContactsService.search(name).filter { !$0.emails.isEmpty }
+        guard let first = hits.first, let address = first.emails.first else {
+            throw ToolFailure("No contact named \(name) with an email address.")
+        }
+        if hits.count > 1, !hits.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            throw ToolFailure("Several contacts match \(name): \(hits.prefix(5).map(\.name).joined(separator: ", ")). Ask the user which one.")
+        }
+        let exact = hits.first { $0.name.caseInsensitiveCompare(name) == .orderedSame } ?? first
+        return (exact.name, exact.emails.first ?? address)
     }
 
     private func resolvePhone(name: String?, number: String?) async throws -> (String, String) {

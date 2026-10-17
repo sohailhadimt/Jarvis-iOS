@@ -59,6 +59,7 @@ final class AssistantEngine {
     @ObservationIgnored private var attachmentMime: String?
     @ObservationIgnored private var attachmentData: Data?
     var messageDraft: MessageDraft?
+    var mailDraft: MailDraft?
 
     @ObservationIgnored private var conversation: [ChatMessage] = []
     @ObservationIgnored private let listener = SpeechListener()
@@ -128,6 +129,7 @@ final class AssistantEngine {
         output.onBargeIn = { [weak self] in self?.bargeIn() }
         listener.onBargeLevel = { [weak self] value in self?.noteBarge(value) }
         tools.onComposeMessage = { [weak self] draft in self?.messageDraft = draft }
+        tools.onComposeMail = { [weak self] draft in self?.mailDraft = draft }
         output.bindVoiceGate(listener.gate)
         ContactDirectory.shared.warm()
         HTTPConnections.prewarm()

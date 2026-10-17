@@ -10,6 +10,7 @@ struct IndexedContact: Sendable, Identifiable {
     var id: String
     var displayName: String
     var phones: [PhoneLine]
+    var emails: [String]
     var keys: [String]
 
     var bestPhone: PhoneLine? {
@@ -68,7 +69,7 @@ final class ContactDirectory {
     }
 
     func lookup(_ query: String) -> CallLookup {
-        let ranked = rank(query)
+        let ranked = rank(query).filter { $0.contact.bestPhone != nil }
         guard let top = ranked.first, let phone = top.contact.bestPhone else { return .missing }
         if ranked.count == 1, top.score >= 80 {
             return .dial(name: top.contact.displayName, number: phone.number)
@@ -115,7 +116,7 @@ final class ContactDirectory {
     func hits(matching query: String) -> [ContactHit] {
         rank(query).map { row in
             let phones = row.contact.phones.map { (label: $0.label, number: $0.number) }
-            return ContactHit(name: row.contact.displayName, phones: phones, emails: [])
+            return ContactHit(name: row.contact.displayName, phones: phones, emails: row.contact.emails)
         }
     }
 
@@ -195,7 +196,7 @@ final class ContactDirectory {
         return await Permissions.contacts()
     }
 
-    /// Keys are only the name fields and phone numbers. Enumeration runs off the main actor.
+    /// Name, phone numbers and email addresses. Enumeration runs off the main actor.
     private nonisolated static func fetch() -> [IndexedContact] {
         let store = CNContactStore()
         let keys = [
@@ -203,6 +204,7 @@ final class ContactDirectory {
             CNContactFamilyNameKey,
             CNContactNicknameKey,
             CNContactPhoneNumbersKey,
+            CNContactEmailAddressesKey,
         ] as [CNKeyDescriptor]
         let request = CNContactFetchRequest(keysToFetch: keys)
         request.unifyResults = true
@@ -215,13 +217,18 @@ final class ContactDirectory {
                     let label = CNLabeledValue<CNPhoneNumber>.localizedString(forLabel: labeled.label ?? CNLabelPhoneNumberMain)
                     return PhoneLine(label: label, number: number)
                 }
-                guard !phones.isEmpty else { return }
+                let emails: [String] = contact.emailAddresses.compactMap { labeled in
+                    let address = (labeled.value as String).trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard address.contains("@") else { return nil }
+                    return address
+                }
+                guard !phones.isEmpty || !emails.isEmpty else { return }
                 let given = contact.givenName
                 let family = contact.familyName
                 let nickname = contact.nickname
                 let display = displayName(given: given, family: family, nickname: nickname)
                 let keys = indexKeys(given: given, family: family, nickname: nickname, display: display)
-                found.append(IndexedContact(id: contact.identifier, displayName: display, phones: phones, keys: keys))
+                found.append(IndexedContact(id: contact.identifier, displayName: display, phones: phones, emails: emails, keys: keys))
             }
         } catch {
             return found

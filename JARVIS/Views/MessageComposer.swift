@@ -36,3 +36,39 @@ struct MessageComposer: UIViewControllerRepresentable {
         }
     }
 }
+
+/// Apple's mail sheet. iOS requires the user to tap Send. JARVIS never sends the message itself.
+struct MailComposer: UIViewControllerRepresentable {
+    let draft: MailDraft
+    let onFinish: @MainActor () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onFinish: onFinish) }
+
+    func makeUIViewController(context: Context) -> MFMailComposeViewController {
+        let vc = MFMailComposeViewController()
+        vc.setToRecipients(draft.recipients)
+        vc.setSubject(draft.subject)
+        vc.setMessageBody(draft.body, isHTML: false)
+        vc.mailComposeDelegate = context.coordinator
+        return vc
+    }
+
+    func updateUIViewController(_ uiViewController: MFMailComposeViewController, context: Context) {}
+
+    final class Coordinator: NSObject, MFMailComposeViewControllerDelegate {
+        private let finishOnMain: @Sendable () -> Void
+
+        @MainActor
+        init(onFinish: @escaping @MainActor () -> Void) {
+            self.finishOnMain = { @Sendable in
+                Task { @MainActor in onFinish() }
+            }
+        }
+
+        nonisolated func mailComposeController(_ controller: MFMailComposeViewController,
+                                               didFinishWith result: MFMailComposeResult,
+                                               error: Error?) {
+            finishOnMain()
+        }
+    }
+}
