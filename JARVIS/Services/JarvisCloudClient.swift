@@ -700,6 +700,9 @@ struct CloudClient: Sendable {
             "avatar": agent.avatar,
             "color_hex": agent.colorHex,
             "memory": agent.memory,
+            "tools": agent.tools,
+            "voice_id": agent.voiceID,
+            "voice_name": agent.voiceName,
         ]
         let path = creating ? "/agents" : "/agents/\(Self.path(agent.id))"
         let envelope: PersonaEnvelope = try await sendJSON(method: "POST", path: path, body: body)
@@ -851,6 +854,26 @@ struct CloudClient: Sendable {
         }
     }
 
+    func createMission(goal: String) async throws -> CloudMission {
+        let envelope: MissionEnvelope = try await sendJSON(method: "POST", path: "/missions", body: ["goal": goal])
+        return envelope.mission
+    }
+
+    func missions() async throws -> [CloudMission] {
+        let envelope: MissionListEnvelope = try await sendNoBody(method: "GET", path: "/missions")
+        return envelope.missions
+    }
+
+    func routines() async throws -> [CloudRoutine] {
+        let envelope: RoutineListEnvelope = try await sendNoBody(method: "GET", path: "/routines")
+        return envelope.routines
+    }
+
+    func setRoutine(id: String, enabled: Bool) async throws {
+        let _: AckEnvelope = try await sendJSON(
+            method: "POST", path: "/routines/\(Self.path(id))", body: ["enabled": enabled])
+    }
+
     func postGroupLine(author: String, text: String) async throws {
         let _: AckEnvelope = try await sendJSON(method: "POST", path: "/group", body: ["author": author, "text": text])
     }
@@ -866,6 +889,9 @@ struct CloudClient: Sendable {
     private struct PersonaTaskListEnvelope: Decodable { var tasks: [CloudPersonaTask] }
     private struct GroupEnvelope: Decodable { var messages: [CloudGroupLine] }
     private struct AckEnvelope: Decodable { var ok: Bool? }
+    private struct MissionEnvelope: Decodable { var mission: CloudMission }
+    private struct MissionListEnvelope: Decodable { var missions: [CloudMission] }
+    private struct RoutineListEnvelope: Decodable { var routines: [CloudRoutine] }
 
     private static func path(_ id: String) -> String {
         id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
@@ -881,11 +907,59 @@ struct CloudPersona: Decodable, Sendable {
     var colorHex: String
     var memory: String
     var builtin: Bool
+    var tools: [String]
+    var voiceID: String
+    var voiceName: String
 
     enum CodingKeys: String, CodingKey {
-        case id, name, role, instructions, avatar, memory, builtin
+        case id, name, role, instructions, avatar, memory, builtin, tools
         case colorHex = "color_hex"
+        case voiceID = "voice_id"
+        case voiceName = "voice_name"
     }
+
+    init(id: String, name: String, role: String, instructions: String, avatar: String, colorHex: String, memory: String, builtin: Bool, tools: [String] = [], voiceID: String = "", voiceName: String = "") {
+        self.id = id
+        self.name = name
+        self.role = role
+        self.instructions = instructions
+        self.avatar = avatar
+        self.colorHex = colorHex
+        self.memory = memory
+        self.builtin = builtin
+        self.tools = tools
+        self.voiceID = voiceID
+        self.voiceName = voiceName
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        role = try c.decode(String.self, forKey: .role)
+        instructions = try c.decode(String.self, forKey: .instructions)
+        avatar = try c.decode(String.self, forKey: .avatar)
+        colorHex = try c.decode(String.self, forKey: .colorHex)
+        memory = try c.decode(String.self, forKey: .memory)
+        builtin = try c.decode(Bool.self, forKey: .builtin)
+        tools = try c.decodeIfPresent([String].self, forKey: .tools) ?? []
+        voiceID = try c.decodeIfPresent(String.self, forKey: .voiceID) ?? ""
+        voiceName = try c.decodeIfPresent(String.self, forKey: .voiceName) ?? ""
+    }
+}
+
+struct CloudMission: Decodable, Sendable {
+    var id: String
+    var goal: String
+    var status: String
+    var report: String?
+}
+
+struct CloudRoutine: Decodable, Sendable {
+    var id: String
+    var name: String
+    var cron: String
+    var enabled: Bool
 }
 
 struct CloudPersonaTask: Decodable, Sendable {
@@ -1040,9 +1114,11 @@ struct CloudGroupLine: Decodable, Sendable {
     var author: String
     var text: String
     var role: String?
+    var createdAt: String?
 
     enum CodingKeys: String, CodingKey {
         case id, author, text, role
+        case createdAt = "created_at"
     }
 }
 

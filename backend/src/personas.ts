@@ -202,7 +202,19 @@ async function claimPersona(env: Env, task: TaskRow): Promise<boolean> {
      WHERE task_id = ? AND (locked_until IS NULL OR locked_until < ?)`,
     [lockUntil, task.id, nowIso()],
   );
-  return claimed === 1;
+  if (claimed === 1) return true;
+  const existing = await dbFirst<{ task_id: string }>(
+    env,
+    "SELECT task_id FROM persona_task_state WHERE task_id = ?",
+    [task.id],
+  );
+  if (existing) return false;
+  await dbRun(
+    env,
+    "INSERT INTO persona_task_state (task_id, messages_json, step, locked_until) VALUES (?, '[]', 0, ?)",
+    [task.id, lockUntil],
+  );
+  return true;
 }
 
 async function stepPersona(env: Env, task: TaskRow): Promise<void> {

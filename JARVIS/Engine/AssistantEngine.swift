@@ -1004,13 +1004,18 @@ final class AssistantEngine {
         if await handleBriefedCall(text) { return }
 
         if let delegation = AgentStore.shared.delegation(in: text) {
-            let ack = "\(delegation.agent.name) is on that."
-            recordAssistant(ack)
-            saveForWidget(transcript: text, reply: ack)
-            await say(ResponsesClient.spokenText(ack))
             let agent = delegation.agent
             let goal = delegation.goal
-            Task { await AgentStore.shared.delegate(agent: agent, goal: goal) }
+            let ack: String
+            if agent.id == "agent_jarvis" {
+                ack = await AgentStore.shared.startMission(goal: goal)
+            } else {
+                ack = "\(agent.name) is on that."
+                Task { await AgentStore.shared.delegate(agent: agent, goal: goal) }
+            }
+            recordAssistant(ack)
+            saveForWidget(transcript: text, reply: ack)
+            await say(ResponsesClient.spokenText(ack), voiceID: agent.voiceID)
             guard !Task.isCancelled else { return }
             afterTurn()
             return
@@ -1612,20 +1617,36 @@ final class AssistantEngine {
         statusLine = status == "shortcut-done" ? "Shortcut finished." : "Shortcut didn't complete."
     }
 
-    private func say(_ text: String) async {
+    /// Speaks a finished agent result in that agent's ElevenLabs voice when a session is listening.
+    func speakAgentLine(_ text: String, voiceID: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        guard phase == .listening else {
+            postAgentUpdate(trimmed)
+            return
+        }
+        Task { @MainActor in
+            self.recordAssistant(trimmed)
+            self.saveForWidget(transcript: "Agent", reply: trimmed)
+            await self.say(trimmed, voiceID: voiceID)
+            self.afterTurn()
+        }
+    }
+
+    private func say(_ text: String, voiceID: String = "") async {
         guard !Task.isCancelled else { return }
         utteranceBeingSpoken = text
         output.preparePlayback()
         phase = .speaking
         pushActivity()
-        await speak(text)
+        await speak(text, voiceID: voiceID)
         if !Task.isCancelled {
             spokenSoFar = Self.joinSpoken(spokenSoFar, text)
             utteranceBeingSpoken = ""
         }
     }
 
-    private func speak(_ text: String) async {
+    private func speak(_ text: String, voiceID: String = "") async {
         let monitor = !listener.isEngineRunning && !microphoneMuted
         if listener.isEngineRunning, !microphoneMuted {
             listener.setBargeMonitor(true)
@@ -1636,8 +1657,9 @@ final class AssistantEngine {
             errorMessage = "Add an ElevenLabs key in Settings. ElevenLabs is the only voice."
             return
         }
+        let voice = voiceID.isEmpty ? s.voiceID : voiceID
         do {
-            try await output.speakElevenLabs(text: text, voiceID: s.voiceID, apiKey: key,
+            try await output.speakElevenLabs(text: text, voiceID: voice, apiKey: key,
                                              stability: s.stability, similarity: s.similarity,
                                              monitorMicrophone: monitor)
         } catch {
