@@ -20,7 +20,7 @@ struct HomeScreen: View {
                         GeometryReader { geo in
                             let side = geo.size.width * 0.65
                             JarvisRingHost(paused: ringPaused || scenePhase != .active)
-                                .frame(width: side, height: side + 32)
+                                .frame(width: side + 56, height: side + 56)
                                 .position(x: geo.size.width / 2, y: geo.size.height / 2)
                         }
                     }

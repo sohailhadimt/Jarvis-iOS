@@ -37,6 +37,7 @@ final class JarvisRingCanvas: UIView {
     private var frameLink: FrameLink?
     private var wantsRunning = true
     private var laidOutSize = CGSize.zero
+    private var laidOutScale: CGFloat = 0
 
     private let bloomWide = CAShapeLayer()
     private let bloomTight = CAShapeLayer()
@@ -60,6 +61,12 @@ final class JarvisRingCanvas: UIView {
         }
         bloomWide.strokeColor = Self.bloomColor
         bloomTight.strokeColor = Self.bloomColor
+        bloomWide.shadowColor = Self.bloomColor
+        bloomTight.shadowColor = Self.bloomColor
+        bloomWide.shadowOffset = .zero
+        bloomTight.shadowOffset = .zero
+        bloomWide.masksToBounds = false
+        bloomTight.masksToBounds = false
         inner.strokeColor = Self.innerColor
         rim.strokeColor = Self.rimColor
         // Bloom sits behind the dark centre. The inner ring and rim sit in front of it.
@@ -110,28 +117,57 @@ final class JarvisRingCanvas: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        guard bounds.size != laidOutSize, bounds.width > 1, bounds.height > 1 else { return }
+        let rasterScale = traitCollection.displayScale
+        let resolvedScale: CGFloat = rasterScale > 1 ? rasterScale : 2
+        guard bounds.width > 100, bounds.height > 80 else { return }
+        guard bounds.size != laidOutSize || resolvedScale != laidOutScale else { return }
         laidOutSize = bounds.size
-        let side = bounds.width
-        let ringRect = CGRect(x: 0, y: 0, width: side, height: side)
-        let path = UIBezierPath(ovalIn: ringRect.insetBy(dx: 8, dy: 8)).cgPath
-        for ring in [bloomWide, bloomTight, inner, rim] {
-            ring.frame = bounds
-            ring.path = path
-        }
+        laidOutScale = resolvedScale
+        // The view is wider than the ring so the cached blur can extend past the rim.
+        let pad: CGFloat = 28
+        let side = bounds.width - pad * 2
+        let ringRect = CGRect(x: pad, y: 4, width: side, height: side)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let oval = UIBezierPath(ovalIn: ringRect.insetBy(dx: 8, dy: 8)).cgPath
+        inner.frame = bounds
+        rim.frame = bounds
+        inner.path = UIBezierPath(ovalIn: ringRect.insetBy(dx: side * 0.11, dy: side * 0.11)).cgPath
+        rim.path = oval
+        installBloom(bloomWide, in: ringRect, lineWidth: 12, shadowRadius: 20, shadowOpacity: 0.9, strokeAlpha: 0.28, scale: resolvedScale)
+        installBloom(bloomTight, in: ringRect, lineWidth: 4.5, shadowRadius: 8, shadowOpacity: 1, strokeAlpha: 0.72, scale: resolvedScale)
         let inset = side * 0.08
         disc.frame = ringRect.insetBy(dx: inset, dy: inset)
         disc.cornerRadius = disc.bounds.width / 2
         disc.masksToBounds = true
-        inner.path = UIBezierPath(ovalIn: ringRect.insetBy(dx: side * 0.11, dy: side * 0.11)).cgPath
         let hotWidth = side * 0.22
-        hotspot.bounds = CGRect(x: 0, y: 0, width: hotWidth, height: 8)
-        hotspot.cornerRadius = 4
-        hotspot.position = CGPoint(x: side / 2, y: side - 10)
-        floorGlow.frame = CGRect(x: side * 0.06, y: side + 2, width: side * 0.88, height: 16)
+        hotspot.bounds = CGRect(x: 0, y: 0, width: hotWidth, height: 9)
+        hotspot.cornerRadius = 4.5
+        hotspot.position = CGPoint(x: ringRect.midX, y: ringRect.maxY - 10)
+        floorGlow.frame = CGRect(x: ringRect.minX + side * 0.06, y: ringRect.maxY + 2, width: side * 0.88, height: 16)
         floorGlow.cornerRadius = 8
-        floorLine.frame = CGRect(x: side * 0.18, y: side + 8, width: side * 0.64, height: 2)
+        floorLine.frame = CGRect(x: ringRect.minX + side * 0.18, y: ringRect.maxY + 8, width: side * 0.64, height: 2)
         floorLine.cornerRadius = 1
+        CATransaction.commit()
+    }
+
+    /// Fixed stroke and shadow. Rasterized once per size so a frame only fades and scales the bitmap.
+    private func installBloom(_ ring: CAShapeLayer, in ringRect: CGRect, lineWidth: CGFloat, shadowRadius: CGFloat, shadowOpacity: Float, strokeAlpha: CGFloat, scale: CGFloat) {
+        ring.frame = ringRect
+        let local = CGRect(origin: .zero, size: ringRect.size).insetBy(dx: 8, dy: 8)
+        let oval = UIBezierPath(ovalIn: local).cgPath
+        ring.path = oval
+        ring.lineWidth = lineWidth
+        ring.strokeColor = UIColor(red: 46 / 255, green: 139 / 255, blue: 1, alpha: strokeAlpha).cgColor
+        ring.fillColor = nil
+        ring.shadowColor = Self.bloomColor
+        ring.shadowRadius = shadowRadius
+        ring.shadowOpacity = shadowOpacity
+        ring.shadowOffset = .zero
+        ring.shadowPath = oval.copy(strokingWithWidth: lineWidth, lineCap: .round, lineJoin: .round, miterLimit: 10, transform: .identity)
+        ring.masksToBounds = false
+        ring.shouldRasterize = true
+        ring.rasterizationScale = scale
     }
 
     private func configure(_ gradient: CAGradientLayer, colors: [CGColor]) {
@@ -174,17 +210,14 @@ final class JarvisRingCanvas: UIView {
     }
 
     private func apply(_ pulse: Double) {
-        bloomWide.lineWidth = 16 + pulse * 18
-        bloomWide.opacity = Float(0.18 + pulse * 0.28)
-        bloomTight.lineWidth = 7 + pulse * 8
-        bloomTight.opacity = Float(0.35 + pulse * 0.4)
+        let scale = 1 + max(0, pulse - 0.18) * 0.04
+        let transform = CATransform3DMakeScale(scale, scale, 1)
+        bloomWide.transform = transform
+        bloomTight.transform = transform
+        bloomWide.opacity = Float(min(1, 0.62 + pulse * 0.38))
+        bloomTight.opacity = Float(min(1, 0.7 + pulse * 0.3))
         rim.lineWidth = 2.5 + pulse * 1.8
         hotspot.opacity = Float(0.45 + pulse * 0.5)
-        let hotHeight = 7 + pulse * 5
-        if abs(hotspot.bounds.height - hotHeight) > 0.4 {
-            hotspot.bounds.size.height = hotHeight
-            hotspot.cornerRadius = hotHeight / 2
-        }
         floorGlow.opacity = Float(0.35 + pulse * 0.45)
         floorLine.opacity = Float(0.7 + min(pulse, 0.3))
     }
