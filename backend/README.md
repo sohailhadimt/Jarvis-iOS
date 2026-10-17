@@ -2,7 +2,7 @@
 
 This is the autonomous backend for JARVIS. It runs on the **Cloudflare Workers free plan**: a Worker, one D1 database (SQLite), and a cron trigger every 5 minutes. It does not need a paid Cloudflare product, a server, or a credit card.
 
-The iOS app is separate. This folder is the only part you deploy here.
+The iOS app is separate. This folder is the only part you deploy here. Phone wake features (Siri, the Action Button, Lock Screen widgets) only open listening on the iPhone. Task steps, screening timeouts, and problem-call checks stay on this worker's cron, including while the phone is locked.
 
 ## What it does
 

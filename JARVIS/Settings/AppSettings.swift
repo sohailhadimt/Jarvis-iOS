@@ -200,6 +200,8 @@ final class AppSettings {
     var startWithVoice: Bool { didSet { d.set(startWithVoice, forKey: "startWithVoice") } }
     /// When on, an in-app voice session keeps listening after the app leaves the screen.
     var backgroundConversations: Bool { didSet { d.set(backgroundConversations, forKey: "backgroundConversations") } }
+    /// Lock Screen and Dynamic Island status. Off leaves those surfaces blank. The worker still runs tasks.
+    var liveActivityEnabled: Bool { didSet { d.set(liveActivityEnabled, forKey: "liveActivityEnabled") } }
     /// BCP-47 locale for on-device speech recognition.
     var speechLocale: String { didSet { d.set(speechLocale, forKey: "speechLocale") } }
     /// Full-screen captions start on when a voice session opens.
@@ -289,6 +291,7 @@ final class AppSettings {
         }
         startWithVoice = d.object(forKey: "startWithVoice") as? Bool ?? false
         backgroundConversations = d.object(forKey: "backgroundConversations") as? Bool ?? false
+        liveActivityEnabled = d.object(forKey: "liveActivityEnabled") as? Bool ?? true
         speechLocale = d.string(forKey: "speechLocale") ?? "en-GB"
         captionsDefault = d.object(forKey: "captionsDefault") as? Bool ?? true
         vadSensitivity = d.object(forKey: "vadSensitivity") as? Double ?? 0.5

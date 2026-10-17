@@ -87,6 +87,8 @@ final class AssistantEngine {
     @ObservationIgnored private var callWatch: Task<Void, Never>?
     @ObservationIgnored private var screenWatch: Task<Void, Never>?
     @ObservationIgnored private var inboundIDs: Set<String> = []
+    /// Call id whose Live Activity the user dismissed. A new call clears it.
+    @ObservationIgnored private var dismissedCallActivityID: String?
     @ObservationIgnored private var heardQuestions: Set<String> = []
     @ObservationIgnored private var remindedQuestions: Set<String> = []
     @ObservationIgnored private var silenceTask: Task<Void, Never>?
@@ -252,12 +254,14 @@ final class AssistantEngine {
         listener.holdEngine = true
         publishControlState()
 
-        let activityOK = LiveActivityManager.shared.start(state: activityState)
+        let activityOK = beginLiveActivity()
         let inBackground = UIApplication.shared.applicationState != .active
         if !activityOK && inBackground {
             // Activating the mic with no Live Activity makes AudioRecordingIntent kill the process.
             sessionLog.error("Live Activity missing in background; not activating the microphone")
-            errorMessage = "Turn on Live Activities for JARVIS so the Action Button can listen in the Dynamic Island."
+            if AppSettings.shared.liveActivityEnabled {
+                errorMessage = "Turn on Live Activities for JARVIS so the Action Button can listen in the Dynamic Island."
+            }
             await endSession(reason: "live-activity-unavailable")
             return .needsForeground
         }
@@ -283,7 +287,7 @@ final class AssistantEngine {
         }
 
         if !LiveActivityManager.shared.isRunning {
-            _ = LiveActivityManager.shared.start(state: activityState)
+            _ = beginLiveActivity()
         }
         groqTranscriptionBroken = false
         fileCaptureBroken = false
@@ -304,6 +308,7 @@ final class AssistantEngine {
     }
 
     func endSession(reason: String = "toggle-off") async {
+        let wasSession = isSessionActive
         sessionEpoch += 1
         sessionLog.info("endSession \(reason, privacy: .public)")
         VoiceSession.shared.exiting = true
@@ -320,7 +325,11 @@ final class AssistantEngine {
         userIsSpeaking = false
         phase = .idle
         level = 0
+        if !wasSession, let id = activeCallID() {
+            dismissedCallActivityID = id
+        }
         await LiveActivityManager.shared.end(finalState: activityState)
+        refreshCallActivity()
         publishControlState()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         audioConfigured = false
@@ -1487,6 +1496,7 @@ final class AssistantEngine {
             }
         }
         inboundCall = calls.first
+        refreshCallActivity()
     }
 
     private func announceScreen(_ name: String) async {
@@ -1535,6 +1545,7 @@ final class AssistantEngine {
         if shouldSpeak { stored.spoken = true }
         CallLogStore.update(stored)
         callLogTick += 1
+        refreshCallActivity()
         guard shouldSpeak else { return }
         let name = stored.displayName
         let summary = stored.summary.isEmpty ? stored.detail : stored.summary
@@ -2540,12 +2551,84 @@ final class AssistantEngine {
         }
     }
 
+    func applyLiveActivityPreference() {
+        if !AppSettings.shared.liveActivityEnabled {
+            Task { await LiveActivityManager.shared.end(finalState: self.activityState) }
+            return
+        }
+        if isSessionActive {
+            _ = beginLiveActivity()
+            pushActivity()
+        } else {
+            refreshCallActivity()
+        }
+    }
+
+    private func beginLiveActivity() -> Bool {
+        guard AppSettings.shared.liveActivityEnabled else { return false }
+        return LiveActivityManager.shared.start(state: activityState)
+    }
+
     private var activityState: JarvisActivityAttributes.ContentState {
-        .init(phase: phase, transcript: String(transcript.suffix(90)), reply: String(reply.prefix(140)))
+        .init(phase: phase, transcript: String(transcript.suffix(90)), reply: String(reply.prefix(140)), callStatus: callActivityLine())
+    }
+
+    private func activeCallID() -> String? {
+        if let inboundCall { return inboundCall.id }
+        return CallLogStore.openCalls().first?.id
+    }
+
+    private func callActivityLine() -> String {
+        if let call = inboundCall {
+            let name = call.callerName?.isEmpty == false ? (call.callerName ?? "Incoming call") : "Incoming call"
+            return "\(name) · \(Self.callPhaseLabel(call.status))"
+        }
+        guard let open = CallLogStore.openCalls().first else { return "" }
+        return "\(open.displayName) · \(open.titleStatus)"
+    }
+
+    private static func callPhaseLabel(_ status: String) -> String {
+        switch status {
+        case "screening": "Screening"
+        case "listening": "Listening"
+        case "handling": "JARVIS handling"
+        case "message": "Taking a message"
+        case "connecting": "Connecting you"
+        case "placing": "Placing"
+        case "ringing": "Ringing"
+        case "in_progress": "On the call"
+        case "wrapping": "Finishing"
+        default: status
+        }
+    }
+
+    /// Shows an active call on the Lock Screen when a voice session is not already up.
+    private func refreshCallActivity() {
+        guard AppSettings.shared.liveActivityEnabled else { return }
+        let id = activeCallID()
+        if id == nil { dismissedCallActivityID = nil }
+        if let id, id == dismissedCallActivityID { return }
+        if isSessionActive {
+            pushActivity()
+            return
+        }
+        let line = callActivityLine()
+        if line.isEmpty {
+            guard LiveActivityManager.shared.isRunning else { return }
+            let state = activityState
+            Task { await LiveActivityManager.shared.end(finalState: state) }
+            return
+        }
+        let state = JarvisActivityAttributes.ContentState(phase: .idle, transcript: "", reply: "", callStatus: line)
+        if LiveActivityManager.shared.isRunning {
+            Task { await LiveActivityManager.shared.update(state) }
+        } else {
+            _ = LiveActivityManager.shared.start(state: state)
+        }
     }
 
     private func pushActivity() {
-        guard isSessionActive else { return }
+        guard AppSettings.shared.liveActivityEnabled, isSessionActive else { return }
         let state = activityState
         Task { await LiveActivityManager.shared.update(state) }
     }

@@ -89,6 +89,10 @@ struct RootView: View {
         .onOpenURL { url in
             switch url.host() {
             case "standby": forceStandBy = true
+            case "listen":
+                forceStandBy = false
+                JarvisStartListening.request()
+                startListeningIfRequested()
             case "shortcut-done", "shortcut-cancel", "shortcut-error": engine.shortcutReturned(url.host() ?? "")
             default: break
             }

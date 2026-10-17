@@ -39,14 +39,24 @@ struct SettingsView: View {
                 NavigationLink { AppearanceSettingsView() } label: { Label("Appearance", systemImage: "paintpalette") }
             }
             Section {
+                Toggle("Live Activity", isOn: $settings.liveActivityEnabled)
+            } header: {
+                Text("Always available")
+            } footer: {
+                Text("Say “Hey Siri, JARVIS” or “Talk to JARVIS” to open listening. The Action Button control Talk to JARVIS does the same, and so does a Lock Screen widget tap. The Live Activity shows listening, thinking, responding, and an active call. Turn it off to hide that. Tasks keep running on the Cloudflare Worker, not on this iPhone.")
+            }
+            .onChange(of: settings.liveActivityEnabled) { _, _ in
+                engine.applyLiveActivityPreference()
+            }
+            Section {
                 Text("""
-                Action Button > Controls > search JARVIS.
+                Action Button > Controls > search Talk to JARVIS.
                 1. Open the iPhone Settings app > Action Button.
                 2. Swipe to Controls.
-                3. Tap the control and search JARVIS.
-                Pressing it starts JARVIS in the Dynamic Island without opening the app. Press again to end it.
+                3. Tap the control and search Talk to JARVIS.
+                Pressing it opens JARVIS and starts listening. The same phrase works with Hey Siri.
+                The JARVIS toggle still starts a session in the Dynamic Island without opening the app. Press it again to end that session.
                 Start a session in the app once and allow Microphone and Speech Recognition. iOS can only show those prompts while JARVIS is on screen.
-                Talk to JARVIS is still under Shortcut > Choose a Shortcut > JARVIS. That shortcut opens the app and starts listening.
                 """)
                 .font(.footnote)
             } header: {

@@ -4,8 +4,10 @@ import Foundation
 enum SharedConfig {
     static let appGroup = "group.com.sohail.jarvis"
     static let standByWidgetKind = "JarvisStandByWidget"
-    /// Control Center / Action Button control. The app and the widget extension must use the same kind.
+    /// Control Center / Action Button toggle. The app and the widget extension must use the same kind.
     static let controlKind = "com.sohail.jarvis.control"
+    /// Control Center / Action Button button that opens JARVIS into listening.
+    static let talkControlKind = "com.sohail.jarvis.talk"
 
     /// Falls back to standard defaults if the App Group isn't provisioned (data then won't reach the widget).
     static var defaults: UserDefaults { UserDefaults(suiteName: appGroup) ?? .standard }
