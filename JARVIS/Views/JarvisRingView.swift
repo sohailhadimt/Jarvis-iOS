@@ -26,7 +26,10 @@ final class JarvisRingCanvas: UIView {
     private final class FrameLink: NSObject {
         weak var canvas: JarvisRingCanvas?
         @objc func tick(_ link: CADisplayLink) {
-            canvas?.tick(link)
+            // The link is added to the main run loop.
+            MainActor.assumeIsolated {
+                canvas?.tick(link)
+            }
         }
     }
 
@@ -187,6 +190,8 @@ final class JarvisRingCanvas: UIView {
     }
 
     deinit {
-        link?.invalidate()
+        MainActor.assumeIsolated {
+            link?.invalidate()
+        }
     }
 }

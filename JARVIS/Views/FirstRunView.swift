@@ -147,10 +147,7 @@ struct FirstRunView: View {
     }
 
     private func allowCalendar() async {
-        let store = EKEventStore()
-        if #available(iOS 17.0, *) {
-            _ = try? await store.requestFullAccessToEvents()
-        }
+        _ = try? await EKEventStore().requestFullAccessToEvents()
     }
 
     private func finish() {

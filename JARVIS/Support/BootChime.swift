@@ -2,6 +2,7 @@ import AVFoundation
 import Foundation
 
 /// A short two-note tone generated in memory. Nothing is stored in the repo.
+@MainActor
 enum BootChime {
     private static var player: AVAudioPlayer?
 

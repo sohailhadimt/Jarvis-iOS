@@ -6,6 +6,7 @@ extension Notification.Name {
 }
 
 /// Local reminder for the morning briefing. The worker routine stays in Agents and starts off.
+@MainActor
 enum BriefingClock {
     static let requestID = "jarvis.daily.briefing"
     private static let deliveredKey = "jarvis.briefing.delivered"

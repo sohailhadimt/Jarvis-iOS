@@ -1,6 +1,7 @@
 import UIKit
 
 /// Short taps for buttons and the drawer. Never call this from a display-link frame.
+@MainActor
 enum JarvisHaptics {
     static func tap() {
         guard AppSettings.shared.hapticsEnabled else { return }

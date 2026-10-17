@@ -10,7 +10,7 @@ struct RootView: View {
     @State private var forceStandBy = false
     @State private var offerVoiceMatch = false
     @State private var showBoot = false
-    @State private var unlocked = !AppSettings.shared.privacyLock
+    @State private var unlocked = !UserDefaults.standard.bool(forKey: "privacyLock")
     @State private var recoveryNote: String?
 
     var body: some View {
