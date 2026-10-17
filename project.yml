@@ -55,6 +55,7 @@ targets:
         UIBackgroundModes:
           - audio
         NSMicrophoneUsageDescription: "JARVIS listens to your voice so it can answer your questions."
+        NSCameraUsageDescription: "JARVIS uses the camera when you ask what it sees."
         NSSpeechRecognitionUsageDescription: "JARVIS converts your speech to text on your iPhone so it can understand you."
         NSContactsUsageDescription: "JARVIS looks up contacts when you ask it to call, FaceTime or message someone."
         NSCalendarsFullAccessUsageDescription: "JARVIS reads and edits your calendar events when you ask it to."

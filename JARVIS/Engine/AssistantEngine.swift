@@ -305,6 +305,7 @@ final class AssistantEngine {
             refreshWake()
         } else {
             stopWake()
+            VisionCamera.shared.suspend()
             // A control-center session stays up. An in-app voice session stays only when background conversations are on.
             if isSessionActive, !launchedFromControl, !AppSettings.shared.backgroundConversations {
                 Task { await self.endSession(reason: "background") }
@@ -914,28 +915,35 @@ final class AssistantEngine {
         let userMessage = ChatMessage(role: "user", content: text)
         tools.resetTurn()
         citations = []
+        let visionJPEG = await visionAttachment(for: text)
 
         do {
-            let endpoint = try settings.resolvedEndpoint()
-            if endpoint.kind != settings.provider {
-                statusLine = "Using \(endpoint.providerName) because no \(settings.provider.title) key is saved."
-            }
             let facts = JarvisStore.allFacts()
-            let streamTalk = shouldStreamConversation(text)
-            let primary = streamTalk ? settings.conversationalEndpoint(from: endpoint) : endpoint
-            let system = streamTalk ? settings.voicePrompt(facts: facts) : settings.systemPrompt(facts: facts)
-            let groq = streamTalk ? settings.fastGroqEndpoint() : settings.groqEndpoint()
             let prior = recordedUser ? Array(conversation.dropLast()) : conversation
             let history = Array(prior.suffix(16))
-            let produced = try await ModelFallback.run(
-                primary: primary,
-                groq: groq,
-                status: { line in self.applyBusyStatus(line) },
-                work: { endpoint in
-                    try await self.produce(text: text, endpoint: endpoint, system: system,
-                                           history: history, user: userMessage, streamTalk: streamTalk)
+            let produced: Produced
+            if let visionJPEG {
+                let system = settings.voicePrompt(facts: facts)
+                produced = try await answerVision(jpeg: visionJPEG, system: system, history: history, user: userMessage)
+            } else {
+                let endpoint = try settings.resolvedEndpoint()
+                if endpoint.kind != settings.provider {
+                    statusLine = "Using \(endpoint.providerName) because no \(settings.provider.title) key is saved."
                 }
-            )
+                let streamTalk = shouldStreamConversation(text)
+                let primary = streamTalk ? settings.conversationalEndpoint(from: endpoint) : endpoint
+                let system = streamTalk ? settings.voicePrompt(facts: facts) : settings.systemPrompt(facts: facts)
+                let groq = streamTalk ? settings.fastGroqEndpoint() : settings.groqEndpoint()
+                produced = try await ModelFallback.run(
+                    primary: primary,
+                    groq: groq,
+                    status: { line in self.applyBusyStatus(line) },
+                    work: { endpoint in
+                        try await self.produce(text: text, endpoint: endpoint, system: system,
+                                               history: history, user: userMessage, streamTalk: streamTalk)
+                    }
+                )
+            }
             let raw = produced.text
             let alreadySpoken = produced.spoken
             guard !Task.isCancelled else { return }
@@ -1316,6 +1324,82 @@ final class AssistantEngine {
     }
 
     private static let searchingLine = "Searching…"
+    private static let lookingLine = "Looking…"
+
+    /// A live frame or a snapped photo. Calls, tools and briefings keep their own path.
+    /// A plain web question keeps searching unless they are pointing at something.
+    private func visionAttachment(for text: String) async -> Data? {
+        if Self.needsTools(text) || wantsCloudTool(text) || isBriefingRequest(text) { return nil }
+        let camera = VisionCamera.shared
+        if !camera.hasHeld && !camera.isLive { return nil }
+        if WebKnowledge.needsLiveFacts(text), !camera.hasHeld, !Self.wantsEyes(text) { return nil }
+        if camera.hasHeld { return camera.frameForQuestion() }
+        guard camera.isLive else { return nil }
+        var waited: Int = 0
+        while waited < 8 {
+            if let frame = camera.frameForQuestion() { return frame }
+            try? await Task.sleep(for: .milliseconds(250))
+            waited += 1
+        }
+        return camera.frameForQuestion()
+    }
+
+    private static func wantsEyes(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let needles = ["see", "look", "this", "holding", "wearing", "picture", "photo", "camera"]
+        return needles.contains { lower.contains($0) }
+    }
+
+    /// Gemini sees one JPEG and answers in the same voice as a spoken turn.
+    private func answerVision(jpeg: Data, system: String, history: [ChatMessage],
+                              user: ChatMessage) async throws -> Produced {
+        statusLine = Self.lookingLine
+        pushActivity()
+        defer {
+            if statusLine == Self.lookingLine || statusLine == ModelFallback.busyLine {
+                statusLine = nil
+            }
+        }
+        guard let key = KeychainStore.get(.gemini), !key.isEmpty else {
+            throw LLMError.missingKey("Gemini")
+        }
+        let brief = system + " The user is showing you a photo from the iPhone camera. Answer their question about it. When they ask what you see, describe only what is visible. Do not claim you can see anything that is not in the photo."
+        let models = Self.groundModels()
+        var last: Error = LLMError.emptyReply(provider: "Gemini")
+        var index: Int = 0
+        while index < models.count {
+            let model = models[index]
+            var attempt: Int = 0
+            while attempt < 3 {
+                do {
+                    let stream = GeminiVision.stream(system: brief, history: history, user: user,
+                                                     jpeg: jpeg, model: model, apiKey: key)
+                    let streamed = try await speakStream(stream, fallback: nil)
+                    let trimmed = streamed.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.isEmpty { throw LLMError.emptyReply(provider: "Gemini") }
+                    if statusLine == Self.lookingLine { statusLine = nil }
+                    return Produced(text: streamed.text, spoken: streamed.spoken)
+                } catch {
+                    if Task.isCancelled { throw error }
+                    last = error
+                    guard let llm = error as? LLMError else { throw error }
+                    if llm.isBusy {
+                        statusLine = ModelFallback.busyLine
+                        pushActivity()
+                        let shift: Int = attempt
+                        let delay: Int = 400 * (1 << shift)
+                        try await Task.sleep(for: .milliseconds(delay))
+                        attempt += 1
+                        continue
+                    }
+                    if Self.groundingRejected(error) { break }
+                    throw error
+                }
+            }
+            index += 1
+        }
+        throw last
+    }
 
     private static func groundModels() -> [String] {
         let fast = AppSettings.fastGeminiModel
@@ -1390,7 +1474,9 @@ final class AssistantEngine {
                 if delta.text.isEmpty { continue }
                 if full.isEmpty {
                     LatencyLog.event("llm-first-token")
-                    if statusLine == Self.searchingLine { statusLine = nil }
+                    if statusLine == Self.searchingLine || statusLine == Self.lookingLine {
+                        statusLine = nil
+                    }
                 }
                 full += delta.text
                 let cleaned = MemoryParser.extract(from: full).cleaned

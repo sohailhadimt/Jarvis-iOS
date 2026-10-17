@@ -65,7 +65,10 @@ struct ChatView: View {
                 .padding(.bottom, 8)
         }
         .background(scheme == .dark ? Color.black : Color.white)
-        .onAppear { syncOrb(active: engine.isSessionActive, animated: false) }
+        .onAppear {
+            syncOrb(active: engine.isSessionActive, animated: false)
+            VisionCamera.shared.release(owner: .voice)
+        }
         .onChange(of: engine.isSessionActive) { _, active in
             syncOrb(active: active, animated: true)
         }
@@ -280,6 +283,7 @@ struct FullScreenVoiceView: View {
     var onSettings: () -> Void
 
     @State private var voice = VoiceSession.shared
+    @State private var camera = VisionCamera.shared
     @State private var draft = ""
 
     var body: some View {
@@ -308,6 +312,7 @@ struct FullScreenVoiceView: View {
             Color.black
             VStack(spacing: 14) {
                 Spacer(minLength: 0)
+                cameraStrip
                 orbStack(diameter: diameter, ring: ring)
                 Text(engine.voiceState.label.uppercased())
                     .font(.system(size: 12, weight: .medium, design: .monospaced))
@@ -347,21 +352,76 @@ struct FullScreenVoiceView: View {
     }
 
     private var controlCluster: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             hudButton(system: "line.3.horizontal", label: "Menu", action: onMenu)
             hudButton(system: "slider.horizontal.3", label: "Voice settings", action: onSettings)
+            hudButton(system: camera.isLive ? "video.fill" : "video", label: "Camera", active: camera.isLive, action: toggleCamera)
             hudButton(system: engine.microphoneMuted ? "mic.slash" : "mic", label: "Mute", action: mute)
             hudButton(system: "xmark", label: "End", action: end)
         }
     }
 
-    private func hudButton(system: String, label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+    @ViewBuilder
+    private var cameraStrip: some View {
+        if camera.isLive || camera.heldPreview != nil {
+            cameraControls
+        }
+    }
+
+    private var cameraControls: some View {
+        let previewWidth: CGFloat = 96
+        let previewHeight: CGFloat = 128
+        return HStack(spacing: 10) {
+            ZStack(alignment: .topTrailing) {
+                livePreview(width: previewWidth, height: previewHeight)
+                if camera.heldPreview != nil {
+                    Button(action: { camera.discardHeld() }) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 22, height: 22)
+                            .background(Circle().fill(Color.black.opacity(0.65)))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Discard photo")
+                    .padding(4)
+                }
+            }
+            VStack(spacing: 8) {
+                if camera.isLive {
+                    hudButton(system: "camera", label: "Snap photo", action: { camera.holdStill() })
+                }
+                hudButton(system: "eye", label: "Ask what you see", action: askSight)
+            }
+        }
+    }
+
+    private func livePreview(width: CGFloat, height: CGFloat) -> some View {
+        ZStack {
+            if camera.isLive {
+                CameraPreview(session: camera.previewSession)
+            } else {
+                Color.black
+            }
+            if let still = camera.heldPreview {
+                Image(uiImage: still)
+                    .resizable()
+                    .scaledToFill()
+            }
+        }
+        .frame(width: width, height: height)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(settings.accentColor.opacity(0.75), lineWidth: 1))
+    }
+
+    private func hudButton(system: String, label: String, active: Bool = false, action: @escaping () -> Void) -> some View {
+        let fill = active ? settings.accentColor.opacity(0.22) : Color.black
+        return Button(action: action) {
             Image(systemName: system)
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(settings.accentColor)
-                .frame(width: 48, height: 48)
-                .background(Circle().fill(Color.black))
+                .frame(width: 44, height: 44)
+                .background(Circle().fill(fill))
                 .overlay(Circle().stroke(settings.accentColor.opacity(0.75), lineWidth: 1))
         }
         .buttonStyle(.plain)
@@ -398,6 +458,8 @@ struct FullScreenVoiceView: View {
             }
             if let status = engine.statusLine, !status.isEmpty {
                 hudText(status)
+            } else if let note = camera.note, !note.isEmpty {
+                hudText(note)
             }
             if let error = engine.errorMessage, !error.isEmpty {
                 hudText(error)
@@ -451,6 +513,14 @@ struct FullScreenVoiceView: View {
                 }
             }
         }
+    }
+
+    private func toggleCamera() {
+        Task { await camera.toggleFromVoice() }
+    }
+
+    private func askSight() {
+        engine.ask("What do you see?")
     }
 
     private func sendDraft() {

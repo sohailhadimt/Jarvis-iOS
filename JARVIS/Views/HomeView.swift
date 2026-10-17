@@ -86,7 +86,7 @@ struct HomeView: View {
                     sheetLink("Integrations", systemImage: "square.grid.3x3") { IntegrationsSettingsView() }
                     sheetLink("Voice", systemImage: "waveform") { VoicesSettingsView() }
                     sheetLink("Voice ID", systemImage: "mic.badge.plus") { VoiceIDSettingsView() }
-                    sheetLink("Vision", systemImage: "eye") { VisionPlaceholderView() }
+                    sheetLink("Vision", systemImage: "eye") { VisionStudioView() }
                     Button {
                         showSheet = false
                         openStandBy()
@@ -441,31 +441,3 @@ struct TasksView: View {
     }
 }
 
-struct VisionPlaceholderView: View {
-    @Environment(AppSettings.self) private var settings
-
-    var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            VStack(spacing: 14) {
-                Image(systemName: "eye")
-                    .font(.system(size: 42, weight: .thin))
-                    .foregroundStyle(settings.primaryColor)
-                    .shadow(color: settings.primaryColor.opacity(0.8), radius: 10)
-                Text("COMING SOON")
-                    .font(.system(size: 14, weight: .light))
-                    .tracking(4)
-                    .foregroundStyle(settings.primaryColor)
-                Text("Vision will see and analyse what's around you. It isn't available in this build.")
-                    .font(.system(size: 14, weight: .light))
-                    .foregroundStyle(.white.opacity(0.65))
-                    .multilineTextAlignment(.center)
-            }
-            .padding(28)
-            .glassPanel(tint: settings.primaryColor)
-            .padding(24)
-        }
-        .navigationTitle("Vision")
-        .toolbar(.visible, for: .navigationBar)
-    }
-}
