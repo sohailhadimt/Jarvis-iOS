@@ -4,6 +4,7 @@ import SwiftUI
 struct QuestionCard: View {
     @Environment(AssistantEngine.self) private var engine
     @State private var draft = ""
+    @FocusState private var focused: Bool
 
     var body: some View {
         if let question = engine.pendingQuestion {
@@ -14,12 +15,13 @@ struct QuestionCard: View {
                     .font(.subheadline)
                 TextField("What should I tell them?", text: $draft)
                     .textFieldStyle(.roundedBorder)
-                Button("Send answer") {
-                    engine.answerPendingQuestion(draft)
-                    draft = ""
-                }
+                    .focused($focused)
+                    .submitLabel(.send)
+                    .onSubmit(send)
+                    .disabled(engine.relayingAnswer)
+                Button("Send answer", action: send)
                 .buttonStyle(.borderedProminent)
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(engine.relayingAnswer || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Text("You can also just say the answer.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -28,6 +30,14 @@ struct QuestionCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
         }
+    }
+
+    private func send() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !engine.relayingAnswer else { return }
+        focused = false
+        JarvisHaptics.tap()
+        engine.answerPendingQuestion(text)
     }
 }
 
@@ -78,10 +88,16 @@ struct ScreeningCard: View {
                     Text("They asked for something personal. Share it for this call only?")
                         .font(.subheadline)
                     HStack {
-                        Button("Don't share") { engine.allowInboundPersonal(false) }
-                            .buttonStyle(.bordered)
-                        Button("Allow") { engine.allowInboundPersonal(true) }
-                            .buttonStyle(.borderedProminent)
+                        Button("Don't share") {
+                            JarvisHaptics.tap()
+                            engine.allowInboundPersonal(false)
+                        }
+                        .buttonStyle(.bordered)
+                        Button("Allow") {
+                            JarvisHaptics.tap()
+                            engine.allowInboundPersonal(true)
+                        }
+                        .buttonStyle(.borderedProminent)
                     }
                 }
                 transcript(call)
@@ -92,10 +108,16 @@ struct ScreeningCard: View {
                     choice("Decline", "decline")
                 }
                 HStack {
-                    Button("Listen") { engine.decideInbound("listen") }
-                        .buttonStyle(.bordered)
-                    Button("Take over") { engine.decideInbound("takeover") }
-                        .buttonStyle(.borderedProminent)
+                    Button("Listen") {
+                        JarvisHaptics.tap()
+                        engine.decideInbound("listen")
+                    }
+                    .buttonStyle(.bordered)
+                    Button("Take over") {
+                        JarvisHaptics.tap()
+                        engine.decideInbound("takeover")
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
                 Text("Listen shows the words here. Take over rings your mobile and JARVIS leaves the call.")
                     .font(.caption2)
@@ -140,7 +162,10 @@ struct ScreeningCard: View {
     }
 
     private func choice(_ label: String, _ action: String) -> some View {
-        Button(label) { engine.decideInbound(action) }
+        Button(label) {
+            JarvisHaptics.tap()
+            engine.decideInbound(action)
+        }
             .buttonStyle(.bordered)
             .font(.caption)
     }

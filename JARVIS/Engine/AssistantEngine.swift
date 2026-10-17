@@ -54,6 +54,8 @@ final class AssistantEngine {
     private(set) var inboundCall: PhoneCallRecord?
     /// A question from a live call that needs Sohail's answer.
     private(set) var pendingQuestion: CallQuestion?
+    /// True while that answer is being sent, so a second tap does not send it twice.
+    private(set) var relayingAnswer = false
     /// Latest problem JARVIS reported, when one is waiting in the app.
     private(set) var ownerAlert: OwnerAlert?
     /// Bumped when the on-phone call log changes.
@@ -1006,7 +1008,10 @@ final class AssistantEngine {
         pushActivity()
 
         // Tool cards stay tap-only. Spoken words do not approve them.
-        if pendingAction != nil { return }
+        if pendingAction != nil {
+            afterTurn()
+            return
+        }
         // A briefed phone call is the one approval that also accepts a spoken yes or no.
         if pendingCallBrief != nil {
             await resolvePendingCallBrief(text)
@@ -1014,10 +1019,17 @@ final class AssistantEngine {
         }
         if let question = pendingQuestion {
             let answer = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !answer.isEmpty else { return }
-            pendingQuestion = nil
-            Task { await self.sendCallAnswer(question, answer) }
-            await speakLine("I'll tell them, sir.", userText: text)
+            guard !answer.isEmpty else {
+                afterTurn()
+                return
+            }
+            if !relayingAnswer {
+                relayingAnswer = true
+                Task { await self.sendCallAnswer(question, answer) }
+                await speakLine("I'll tell them, sir.", userText: text)
+            }
+            guard !Task.isCancelled else { return }
+            afterTurn()
             return
         }
 
@@ -1428,19 +1440,28 @@ final class AssistantEngine {
     }
 
     func answerPendingQuestion(_ text: String) {
-        guard let question = pendingQuestion else { return }
+        guard let question = pendingQuestion, !relayingAnswer else { return }
         let answer = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !answer.isEmpty else { return }
-        pendingQuestion = nil
+        relayingAnswer = true
         Task { await self.sendCallAnswer(question, answer) }
     }
 
     private func sendCallAnswer(_ question: CallQuestion, _ text: String) async {
-        guard let client = try? JarvisCloudAPI.client() else { return }
+        defer { relayingAnswer = false }
+        guard let client = try? JarvisCloudAPI.client() else {
+            errorMessage = "Calling isn't set up yet, sir."
+            return
+        }
         let result = await client.answerCallQuestion(callId: question.callId, questionId: question.id, text: text)
-        if case .failed(let message) = result {
+        switch result {
+        case .failed(let message), .notSetUp(let message):
             statusLine = message
-            pendingQuestion = question
+            errorMessage = message
+            if pendingQuestion == nil { pendingQuestion = question }
+        case .done:
+            if pendingQuestion?.id == question.id { pendingQuestion = nil }
+            errorMessage = nil
         }
     }
 
@@ -1476,9 +1497,8 @@ final class AssistantEngine {
         let line = "Sir, they asked: \(question). What should I tell them?"
         recordAssistant(line)
         await say(line)
-        if isSessionActive && isContinuous {
-            beginListening(manual: false)
-        }
+        guard !Task.isCancelled else { return true }
+        afterTurn()
         return true
     }
 
@@ -1487,9 +1507,8 @@ final class AssistantEngine {
         let line = "They asked \(question). I said you would get back to them, sir."
         recordAssistant(line)
         await say(line)
-        if isSessionActive && isContinuous {
-            beginListening(manual: false)
-        }
+        guard !Task.isCancelled else { return true }
+        afterTurn()
         return true
     }
 
@@ -1537,21 +1556,26 @@ final class AssistantEngine {
         recordAssistant(line)
         saveForWidget(transcript: name, reply: line)
         await say(line)
-        if isSessionActive && isContinuous {
-            beginListening(manual: false)
-        }
+        guard !Task.isCancelled else { return }
+        afterTurn()
     }
 
     private func sendScreen(id: String, action: String) async {
-        guard let client = try? JarvisCloudAPI.client() else { return }
+        guard let client = try? JarvisCloudAPI.client() else {
+            errorMessage = "Calling isn't set up yet, sir."
+            return
+        }
         let result = await client.screenCall(id: id, action: action)
         await pullInbound()
-        if case .notSetUp(let message) = result {
+        switch result {
+        case .notSetUp(let message), .failed(let message):
             statusLine = message
-        } else if case .failed(let message) = result {
-            statusLine = message
-        } else if action == "listen" {
-            statusLine = "Live transcript is on this iPhone. Take over rings your mobile."
+            errorMessage = message
+        case .done:
+            errorMessage = nil
+            if action == "listen" {
+                statusLine = "Live transcript is on this iPhone. Take over rings your mobile."
+            }
         }
     }
 
