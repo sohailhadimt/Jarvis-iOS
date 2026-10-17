@@ -85,6 +85,7 @@ struct HomeView: View {
                     sheetLink("Settings", systemImage: "gearshape") { SettingsView() }
                     sheetLink("Integrations", systemImage: "square.grid.3x3") { IntegrationsSettingsView() }
                     sheetLink("Voice", systemImage: "waveform") { VoicesSettingsView() }
+                    sheetLink("Voice ID", systemImage: "mic.badge.plus") { VoiceIDSettingsView() }
                     sheetLink("Vision", systemImage: "eye") { VisionPlaceholderView() }
                     Button {
                         showSheet = false

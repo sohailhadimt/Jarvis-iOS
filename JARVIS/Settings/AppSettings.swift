@@ -56,6 +56,26 @@ enum OrbStyle: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum VoiceMatchSensitivity: String, CaseIterable, Identifiable {
+    case strict, balanced, relaxed
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .strict: "Strict"
+        case .balanced: "Balanced"
+        case .relaxed: "Relaxed"
+        }
+    }
+    /// Cosine similarity required before speech is sent to recognition.
+    var cosineMinimum: Double {
+        switch self {
+        case .strict: 0.82
+        case .balanced: 0.74
+        case .relaxed: 0.66
+        }
+    }
+}
+
 enum TaskRouting: String, CaseIterable, Identifiable {
     case split, auto, chatOnly
     var id: String { rawValue }
@@ -153,6 +173,13 @@ final class AppSettings {
     var captionsDefault: Bool { didSet { d.set(captionsDefault, forKey: "captionsDefault") } }
     /// 0 waits about 700ms of silence. 1 ends a turn after about 500ms.
     var vadSensitivity: Double { didSet { d.set(vadSensitivity, forKey: "vadSensitivity") } }
+    /// When on, and a voice print is saved, only that speaker reaches speech recognition.
+    var voiceMatchEnabled: Bool { didSet { d.set(voiceMatchEnabled, forKey: "voiceMatchEnabled") } }
+    var voiceMatchSensitivity: VoiceMatchSensitivity {
+        didSet { d.set(voiceMatchSensitivity.rawValue, forKey: "voiceMatchSensitivity") }
+    }
+    /// The first-launch enrolment sheet has been shown or dismissed.
+    var voiceMatchPrompted: Bool { didSet { d.set(voiceMatchPrompted, forKey: "voiceMatchPrompted") } }
     var routing: TaskRouting { didSet { d.set(routing.rawValue, forKey: "routing") } }
     var searchModel: String { didSet { d.set(searchModel, forKey: "searchModel") } }
     var shortcuts: [RegisteredShortcut] {
@@ -225,6 +252,9 @@ final class AppSettings {
         speechLocale = d.string(forKey: "speechLocale") ?? "en-GB"
         captionsDefault = d.object(forKey: "captionsDefault") as? Bool ?? true
         vadSensitivity = d.object(forKey: "vadSensitivity") as? Double ?? 0.5
+        voiceMatchEnabled = d.object(forKey: "voiceMatchEnabled") as? Bool ?? false
+        voiceMatchSensitivity = VoiceMatchSensitivity(rawValue: d.string(forKey: "voiceMatchSensitivity") ?? "") ?? .balanced
+        voiceMatchPrompted = d.object(forKey: "voiceMatchPrompted") as? Bool ?? false
         routing = TaskRouting(rawValue: d.string(forKey: "routing") ?? "") ?? .split
         searchModel = d.string(forKey: "searchModel") ?? "gpt-4.1-mini"
         shortcuts = (d.data(forKey: "shortcuts")).flatMap { try? JSONDecoder().decode([RegisteredShortcut].self, from: $0) } ?? []

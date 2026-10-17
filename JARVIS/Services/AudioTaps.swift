@@ -22,13 +22,38 @@ enum AudioTaps {
     }
 
     nonisolated static func recognitionTap(request: SFSpeechAudioBufferRecognitionRequest,
+                                           gate: SpeakerGate,
                                            level: @escaping @Sendable (Float) -> Void)
         -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
         nonisolated(unsafe) let request = request
         return { buffer, _ in
-            request.append(buffer)
+            let chunks = gate.observe(buffer)
+            if chunks.isEmpty {
+                // Keep the recogniser fed. Silence does not become a transcript.
+                if let silent = silentBuffer(buffer) {
+                    request.append(silent)
+                }
+            } else {
+                for chunk in chunks {
+                    request.append(chunk)
+                }
+            }
             level(rms(buffer))
         }
+    }
+
+    /// Mic level during playback. Also feeds the voice gate so barge-in can require the enrolled speaker.
+    nonisolated static func bargeTap(gate: SpeakerGate, level: @escaping @Sendable (Float) -> Void)
+        -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
+        return { buffer, _ in
+            _ = gate.observe(buffer)
+            level(rms(buffer))
+        }
+    }
+
+    nonisolated static func captureTap(_ body: @escaping @Sendable (AVAudioPCMBuffer) -> Void)
+        -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
+        return { buffer, _ in body(buffer) }
     }
 
     nonisolated static func recognitionHandler(_ handler: @escaping @Sendable (String?, Bool, (any Error)?) -> Void)
@@ -50,17 +75,40 @@ enum AudioTaps {
         }
     }
 
-    nonisolated static func fileTap(writer: PCMFileWriter, level: @escaping @Sendable (Float) -> Void)
+    nonisolated static func fileTap(writer: PCMFileWriter, gate: SpeakerGate,
+                                   level: @escaping @Sendable (Float) -> Void)
         -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
         return { buffer, _ in
-            writer.append(buffer)
-            level(rms(buffer))
+            let chunks = gate.observe(buffer)
+            var loudest: Float = rms(buffer)
+            for chunk in chunks {
+                writer.append(chunk)
+                let chunkLevel: Float = rms(chunk)
+                if chunkLevel > loudest { loudest = chunkLevel }
+            }
+            level(loudest)
         }
     }
 
     nonisolated static func playbackFinished(_ signal: OnceSignal)
         -> @Sendable (AVAudioPlayerNodeCompletionCallbackType) -> Void {
         return { _ in signal.fire() }
+    }
+
+    /// A zeroed copy so a rejected mic buffer cannot be transcribed.
+    nonisolated static func silentBuffer(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        let frames = Int(buffer.frameLength)
+        guard frames > 0,
+              let clone = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength),
+              let dest = clone.floatChannelData else { return nil }
+        clone.frameLength = buffer.frameLength
+        let channels: Int = Int(buffer.format.channelCount)
+        var channel: Int = 0
+        while channel < channels {
+            dest[channel].update(repeating: 0, count: frames)
+            channel += 1
+        }
+        return clone
     }
 
     nonisolated static func rms(_ buffer: AVAudioPCMBuffer) -> Float {

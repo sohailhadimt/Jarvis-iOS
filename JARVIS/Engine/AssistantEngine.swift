@@ -84,6 +84,9 @@ final class AssistantEngine {
     @ObservationIgnored private var captureMeter = 0.0
     /// Sentences still being spoken for the current streamed reply. Cancelled on barge-in.
     @ObservationIgnored private var spokenQueue: SpokenQueue?
+    /// Enrolment owns the microphone. Wake and hands-free listening stay down until it finishes.
+    @ObservationIgnored private var enrollmentHold = false
+    @ObservationIgnored private var resumeSessionAfterEnrollment = false
 
     /// Silence that ends a turn. Sensitivity 0 waits 700ms; 1 waits 500ms.
     private var silenceTimeout: Duration {
@@ -117,6 +120,7 @@ final class AssistantEngine {
         output.onBargeIn = { [weak self] in self?.bargeIn() }
         listener.onBargeLevel = { [weak self] value in self?.noteBarge(value) }
         tools.onComposeMessage = { [weak self] draft in self?.messageDraft = draft }
+        output.bindVoiceGate(listener.gate)
         ContactDirectory.shared.warm()
         HTTPConnections.prewarm()
     }
@@ -274,6 +278,7 @@ final class AssistantEngine {
         interrupt()
         listener.holdEngine = false
         listener.stop()
+        output.bindSharedPlayer(nil)
         isSessionActive = false
         isContinuous = false
         launchedFromControl = false
@@ -481,7 +486,6 @@ final class AssistantEngine {
             }
             phase = .listening
             listenRetries = 0
-            output.prewarm()
         } catch {
             errorMessage = error.localizedDescription
             sessionLog.error("beginListening failed: \(error.localizedDescription, privacy: .public)")
@@ -503,7 +507,43 @@ final class AssistantEngine {
                 phase = .idle
             }
         }
+        output.bindSharedPlayer(listener.sharedPlayback)
+        output.prewarm()
         pushActivity()
+    }
+
+    func applyVoicePolicy() {
+        listener.applyVoicePolicy()
+    }
+
+    /// Stops wake-word and hands-free capture so enrolment can open the microphone.
+    func prepareVoiceEnrollment() async {
+        if !enrollmentHold {
+            resumeSessionAfterEnrollment = isSessionActive
+            enrollmentHold = true
+        }
+        if isSessionActive {
+            await endSession(reason: "voice-id")
+        } else {
+            stopWake()
+            if listener.isEngineRunning {
+                listener.holdEngine = false
+                listener.stop()
+            }
+        }
+    }
+
+    /// Restores wake word, or the hands-free session enrolment interrupted.
+    func finishVoiceEnrollment() {
+        guard enrollmentHold else { return }
+        enrollmentHold = false
+        let resume = resumeSessionAfterEnrollment
+        resumeSessionAfterEnrollment = false
+        if resume {
+            Task { await self.startSession(continuous: true) }
+        } else {
+            refreshWake()
+        }
     }
 
     private func shouldCaptureForGroq() -> Bool {
@@ -1071,6 +1111,14 @@ final class AssistantEngine {
             bargeSince = nil
             return
         }
+        if listener.speechBandRatio < 0.30 {
+            bargeSince = nil
+            return
+        }
+        if AppSettings.shared.voiceMatchEnabled, !listener.allowsUtterance {
+            bargeSince = nil
+            return
+        }
         let sensitivity: Double = min(1.0, max(0.0, AppSettings.shared.vadSensitivity))
         let base: Double = listener.voiceProcessingEnabled ? 0.32 : 0.48
         let span: Double = 1.2 - sensitivity * 0.4
@@ -1413,6 +1461,7 @@ final class AssistantEngine {
     }
 
     private func refreshWake() {
+        if enrollmentHold { return }
         let want = appInForeground && AppSettings.shared.wakeWordEnabled && !isSessionActive && phase == .idle
         if want {
             startWake()
@@ -1472,9 +1521,15 @@ final class AssistantEngine {
     /// Groq Whisper is request/response, so silence is detected from the mic level instead of partial transcripts.
     private func noteCaptureLevel() {
         guard captureFile, phase == .listening, !manualTurn else { return }
-        if captureMeter > 0.2 {
+        let floor: Double = 0.30
+        let bandFloor: Double = 0.35
+        let band: Double = listener.speechBandRatio
+        let speakerOK: Bool = listener.allowsUtterance
+        if captureMeter > floor && band >= bandFloor && speakerOK {
             loudFrames += 1
-            if loudFrames >= 3 {
+            // Voice match already required a stretch of speech, so one loud frame can end the turn.
+            let needed: Int = AppSettings.shared.voiceMatchEnabled ? 1 : 3
+            if loudFrames >= needed {
                 heardVoice = true
                 userIsSpeaking = true
                 silenceTask?.cancel()

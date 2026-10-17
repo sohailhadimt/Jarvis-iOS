@@ -16,6 +16,7 @@ struct SettingsView: View {
             }
             Section("Voice & services") {
                 NavigationLink { VoicesSettingsView() } label: { Label("Voice", systemImage: "waveform") }
+                NavigationLink { VoiceIDSettingsView() } label: { Label("Voice ID", systemImage: "mic.badge.plus") }
                 NavigationLink { IntegrationsSettingsView() } label: { Label("Integrations & Task agent", systemImage: "square.grid.3x3") }
                 NavigationLink { APIKeysSettingsView() } label: { Label("API Keys & Provider", systemImage: "key") }
                 NavigationLink { CloudSettingsView() } label: { Label("JARVIS Cloud", systemImage: "cloud") }

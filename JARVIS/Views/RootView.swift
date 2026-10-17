@@ -8,6 +8,7 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var isCharging = false
     @State private var forceStandBy = false
+    @State private var offerVoiceMatch = false
 
     var body: some View {
         GeometryReader { geo in
@@ -33,6 +34,19 @@ struct RootView: View {
             AgentStore.shared.startCloudSync()
             if settings.startWithVoice, !engine.isSessionActive {
                 Task { await engine.startSession(continuous: true) }
+            }
+            if !settings.voiceMatchPrompted && !VoiceProfileStore.hasProfile {
+                offerVoiceMatch = true
+            }
+        }
+        .sheet(isPresented: $offerVoiceMatch, onDismiss: {
+            settings.voiceMatchPrompted = true
+        }) {
+            VoiceEnrollmentView(allowsSkip: true) {
+                settings.voiceMatchEnabled = true
+                settings.voiceMatchPrompted = true
+                offerVoiceMatch = false
+                engine.applyVoicePolicy()
             }
         }
         .onChange(of: scenePhase) { _, phase in

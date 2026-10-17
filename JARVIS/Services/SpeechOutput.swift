@@ -18,6 +18,10 @@ final class SpeechOutput: NSObject {
     private var scheduledFrames = 0
     private var loggedFirstAudio = false
     private var prefetchTasks: [String: Task<Data, Error>] = [:]
+    private var sharedPlayer: AVAudioPlayerNode?
+    private var usingSharedPlayback = false
+    private var sharedTapInstalled = false
+    private var voiceGate: SpeakerGate?
     /// 50 ms at 24 kHz, 16-bit mono, so the first buffer starts as soon as speech arrives.
     private static let primeBytes: Int = 2_400
     /// 200 ms follow-on buffers.
@@ -61,8 +65,24 @@ final class SpeechOutput: NSObject {
         }
     }
 
+    func bindVoiceGate(_ gate: SpeakerGate) {
+        voiceGate = gate
+    }
+
+    /// The listener engine plays TTS when it is up, so echo cancellation hears the same output.
+    func bindSharedPlayer(_ player: AVAudioPlayerNode?) {
+        if sharedTapInstalled, player !== sharedPlayer {
+            removeSharedLevelTap()
+        }
+        sharedPlayer = player
+    }
+
     /// Opens the playback engine while listening so the first sentence does not pay startup cost.
     func prewarm() {
+        if sharedPlayer?.engine?.isRunning == true {
+            releasePrivateEngine()
+            return
+        }
         guard engine == nil else { return }
         if (try? openEngine(monitorMicrophone: false)) != nil {
             engineMonitorsMic = false
@@ -217,6 +237,7 @@ final class SpeechOutput: NSObject {
         if monitorMicrophone {
             do {
                 try engine.inputNode.setVoiceProcessingEnabled(true)
+                engine.inputNode.isVoiceProcessingBypassed = false
                 monitoring = true
             } catch {
                 monitoring = false
@@ -239,8 +260,13 @@ final class SpeechOutput: NSObject {
             }
             let format = engine.inputNode.outputFormat(forBus: 0)
             if format.sampleRate > 0, format.channelCount > 0 {
-                engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: format,
-                                            block: AudioTaps.levelTap(bargeHandler))
+                if let voiceGate {
+                    engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: format,
+                                                block: AudioTaps.bargeTap(gate: voiceGate, level: bargeHandler))
+                } else {
+                    engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: format,
+                                                block: AudioTaps.levelTap(bargeHandler))
+                }
                 inputTapInstalled = true
             }
         }
@@ -265,6 +291,15 @@ final class SpeechOutput: NSObject {
     }
 
     private func ensureEngine(monitorMicrophone: Bool) throws -> AVAudioPlayerNode {
+        if let sharedPlayer, sharedPlayer.engine?.isRunning == true {
+            releasePrivateEngine()
+            usingSharedPlayback = true
+            if !sharedPlayer.isPlaying { sharedPlayer.play() }
+            installSharedLevelTap()
+            player = sharedPlayer
+            return sharedPlayer
+        }
+        usingSharedPlayback = false
         if let engine, engine.isRunning, let player, engineMonitorsMic == monitorMicrophone {
             if !player.isPlaying { player.play() }
             return player
@@ -273,8 +308,32 @@ final class SpeechOutput: NSObject {
         return try openEngine(monitorMicrophone: monitorMicrophone)
     }
 
+    private func installSharedLevelTap() {
+        guard !sharedTapInstalled, let mixer = sharedPlayer?.engine?.mainMixerNode else { return }
+        let levelHandler: @Sendable (Float) -> Void = { [weak self] rms in
+            let value = AudioTaps.normalized(rms)
+            Task { @MainActor in self?.onLevel?(value) }
+        }
+        mixer.installTap(onBus: 0, bufferSize: 1024, format: nil, block: AudioTaps.levelTap(levelHandler))
+        sharedTapInstalled = true
+    }
+
+    private func removeSharedLevelTap() {
+        guard sharedTapInstalled else { return }
+        sharedPlayer?.engine?.mainMixerNode.removeTap(onBus: 0)
+        sharedTapInstalled = false
+    }
+
     private func noteBarge(_ value: Double) {
         guard player != nil else { return }
+        if let voiceGate, voiceGate.speechBandRatio < 0.30 {
+            bargeSince = nil
+            return
+        }
+        if let voiceGate, AppSettings.shared.voiceMatchEnabled, !voiceGate.allowsUtterance {
+            bargeSince = nil
+            return
+        }
         if value > 0.36 {
             let start = bargeSince ?? Date()
             bargeSince = start
@@ -285,6 +344,32 @@ final class SpeechOutput: NSObject {
         } else if value < 0.18 {
             bargeSince = nil
         }
+    }
+
+    /// Drops the fallback playback engine once TTS is playing on the capture engine.
+    private func releasePrivateEngine() {
+        guard engine != nil else { return }
+        if mixerTapInstalled {
+            engine?.mainMixerNode.removeTap(onBus: 0)
+            mixerTapInstalled = false
+        }
+        if inputTapInstalled {
+            engine?.inputNode.removeTap(onBus: 0)
+            inputTapInstalled = false
+        }
+        if let active = player {
+            let playingShared: Bool = sharedPlayer.map { node in node === active } ?? false
+            if !playingShared {
+                active.stop()
+                self.player = nil
+                playbackSignal?.fire()
+                playbackSignal = nil
+                bargeSince = nil
+            }
+        }
+        engine?.stop()
+        engine = nil
+        engineMonitorsMic = false
     }
 
     private func stopEngine() {
@@ -312,6 +397,16 @@ final class SpeechOutput: NSObject {
             task.cancel()
         }
         prefetchTasks.removeAll()
+        removeSharedLevelTap()
+        if usingSharedPlayback {
+            playbackSignal?.fire()
+            playbackSignal = nil
+            sharedPlayer?.stop()
+            usingSharedPlayback = false
+            player = nil
+            onLevel?(0)
+            return
+        }
         stopEngine()
     }
 }

@@ -21,6 +21,7 @@ final class SpeechListener {
     var onTranscript: ((String, Bool) -> Void)?
     var onError: ((any Error) -> Void)?
 
+    let gate = SpeakerGate()
     private var recognizer: SFSpeechRecognizer? = SFSpeechRecognizer(locale: Locale(identifier: "en-GB")) ?? SFSpeechRecognizer()
     private var engine: AVAudioEngine?
     private var request: SFSpeechAudioBufferRecognitionRequest?
@@ -32,6 +33,10 @@ final class SpeechListener {
     private var bargeMonitor = false
     private(set) var voiceProcessingEnabled = false
     private(set) var lastCaptureFailure: String?
+    private var playbackPlayer: AVAudioPlayerNode?
+    var speechBandRatio: Double { gate.speechBandRatio }
+    var allowsUtterance: Bool { gate.allowsUtterance }
+    var sharedPlayback: AVAudioPlayerNode? { playbackPlayer }
     /// While a hands-free session is up, `stop` leaves the engine running so iOS does not suspend the process.
     var holdEngine = false
 
@@ -63,7 +68,8 @@ final class SpeechListener {
             let value = AudioTaps.normalized(rms)
             Task { @MainActor in self?.onLevel?(value) }
         }
-        try installTap(AudioTaps.recognitionTap(request: request, level: levelHandler), bufferSize: 1024)
+        applyVoicePolicy()
+        try installTap(AudioTaps.recognitionTap(request: request, gate: gate, level: levelHandler), bufferSize: 1024)
 
         generation += 1
         let gen = generation
@@ -93,7 +99,8 @@ final class SpeechListener {
             Task { @MainActor in self?.onLevel?(value) }
         }
         do {
-            try installTap(AudioTaps.fileTap(writer: writer, level: levelHandler), bufferSize: 4096)
+            applyVoicePolicy()
+            try installTap(AudioTaps.fileTap(writer: writer, gate: gate, level: levelHandler), bufferSize: 4096)
         } catch {
             try? FileManager.default.removeItem(at: url)
             throw error
@@ -121,7 +128,7 @@ final class SpeechListener {
                 let value = AudioTaps.normalized(rms)
                 Task { @MainActor in self?.onBargeLevel?(value) }
             }
-            try? installTap(AudioTaps.levelTap(handler), bufferSize: 1024)
+            try? installTap(AudioTaps.bargeTap(gate: gate, level: handler), bufferSize: 1024)
         } else {
             try? installTap(AudioTaps.silentTap(), bufferSize: 1024)
         }
@@ -165,10 +172,32 @@ final class SpeechListener {
         guard format.sampleRate > 0, format.channelCount > 0 else { throw ListenerError.noInput }
         input.installTap(onBus: 0, bufferSize: bufferSize, format: format, block: block)
         tapInstalled = true
+        // Attach before start so voice processing's echo reference includes TTS.
+        attachPlayback(engine)
         if !engine.isRunning {
             engine.prepare()
             try engine.start()
         }
+    }
+
+    func applyVoicePolicy() {
+        let settings = AppSettings.shared
+        let profile = VoiceProfileStore.load()
+        let enabled = settings.voiceMatchEnabled && profile != nil
+        gate.update(enabled: enabled, profile: profile, threshold: settings.voiceMatchSensitivity.cosineMinimum)
+    }
+
+    /// Plays TTS on this engine so voice processing can cancel it from the microphone.
+    private func attachPlayback(_ engine: AVAudioEngine) {
+        guard playbackPlayer == nil else { return }
+        guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                         sampleRate: 24_000,
+                                         channels: 1,
+                                         interleaved: false) else { return }
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: format)
+        playbackPlayer = player
     }
 
     private func removeTapIfInstalled() {
@@ -186,6 +215,7 @@ final class SpeechListener {
         voiceProcessingAttempted = true
         do {
             try engine.inputNode.setVoiceProcessingEnabled(true)
+            engine.inputNode.isVoiceProcessingBypassed = false
             voiceProcessingEnabled = true
         } catch {
             voiceProcessingEnabled = false
@@ -194,6 +224,11 @@ final class SpeechListener {
 
     private func teardownEngine() {
         removeTapIfInstalled()
+        playbackPlayer?.stop()
+        if let engine, let playbackPlayer {
+            engine.detach(playbackPlayer)
+        }
+        playbackPlayer = nil
         engine?.stop()
         engine = nil
         voiceProcessingAttempted = false
