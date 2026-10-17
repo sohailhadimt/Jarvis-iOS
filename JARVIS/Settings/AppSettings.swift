@@ -106,6 +106,9 @@ final class AppSettings {
     static let defaultGeminiModel = "gemini-3.8-flash"
     static let retiredGeminiModel = "gemini-2.5-flash"
     static let defaultGroqModel = "llama-3.3-70b-versatile"
+    /// Fastest free models for spoken chit-chat. Tool turns keep the selected model.
+    static let fastGeminiModel = "gemini-3.5-flash-lite"
+    static let fastGroqModel = "llama-3.1-8b-instant"
     /// Free models that are still served. gemini-2.0-flash and gemini-2.0-flash-lite shut down on 1 June 2026.
     static let geminiModelSuggestions = [
         "gemini-3.8-flash",
@@ -148,7 +151,7 @@ final class AppSettings {
     var speechLocale: String { didSet { d.set(speechLocale, forKey: "speechLocale") } }
     /// Full-screen captions start on when a voice session opens.
     var captionsDefault: Bool { didSet { d.set(captionsDefault, forKey: "captionsDefault") } }
-    /// 0 is patient, 1 ends a turn sooner. 0.5 is about 700ms of silence.
+    /// 0 waits about 700ms of silence. 1 ends a turn after about 500ms.
     var vadSensitivity: Double { didSet { d.set(vadSensitivity, forKey: "vadSensitivity") } }
     var routing: TaskRouting { didSet { d.set(routing.rawValue, forKey: "routing") } }
     var searchModel: String { didSet { d.set(searchModel, forKey: "searchModel") } }
@@ -313,6 +316,27 @@ final class AppSettings {
         WidgetCenter.shared.reloadTimelines(ofKind: SharedConfig.standByWidgetKind)
     }
 
+    /// Spoken turns use flash-lite or Llama 3.1 8B. The selected model is left as-is for tools.
+    func conversationalEndpoint(from endpoint: LLMEndpoint) -> LLMEndpoint {
+        switch endpoint.kind {
+        case .gemini:
+            return LLMEndpoint(url: endpoint.url, apiKey: endpoint.apiKey, model: Self.fastGeminiModel,
+                               providerName: endpoint.providerName, kind: .gemini)
+        case .groq:
+            return LLMEndpoint(url: endpoint.url, apiKey: endpoint.apiKey, model: Self.fastGroqModel,
+                               providerName: endpoint.providerName, kind: .groq)
+        case .openAI, .custom:
+            return endpoint
+        }
+    }
+
+    /// Groq's fast model, when a key is saved. Used after a conversational Gemini failure.
+    func fastGroqEndpoint() -> LLMEndpoint? {
+        guard let base = groqEndpoint() else { return nil }
+        return LLMEndpoint(url: base.url, apiKey: base.apiKey, model: Self.fastGroqModel,
+                           providerName: base.providerName, kind: .groq)
+    }
+
     /// Nil when no Groq key is saved. Used only after Gemini is overloaded.
     func groqEndpoint() -> LLMEndpoint? {
         let found: LLMEndpoint?
@@ -388,6 +412,33 @@ final class AppSettings {
     private static func cleaned(_ raw: String, fallback: String) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? fallback : trimmed
+    }
+
+    /// Short prompt for spoken chit-chat. Tool turns keep `systemPrompt`.
+    func voicePrompt(facts: [MemoryFact]) -> String {
+        var parts: [String] = [spokenPersona(), "Spoken reply only: one or two short sentences. No markdown, lists, or emojis."]
+        let kept = Array(facts.prefix(3))
+        if !kept.isEmpty {
+            let joined = kept.map(\.text).joined(separator: "; ")
+            parts.append("Known: \(joined)")
+        }
+        if autoRemember {
+            parts.append("If they share a lasting fact, end with a separate line REMEMBER: <fact>. Do not speak that line.")
+        }
+        return parts.joined(separator: " ")
+    }
+
+    private func spokenPersona() -> String {
+        if personality == PersonalityPreset.jarvis.prompt {
+            return "You are J.A.R.V.I.S., a brief British butler. Address Sohail as sir occasionally."
+        }
+        if personality == PersonalityPreset.concise.prompt {
+            return "You are a precise voice assistant."
+        }
+        if personality == PersonalityPreset.friendly.prompt {
+            return "You are a warm voice assistant for Sohail."
+        }
+        return String(personality.prefix(240))
     }
 
     func systemPrompt(facts: [MemoryFact]) -> String {

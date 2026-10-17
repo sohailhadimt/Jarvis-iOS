@@ -288,7 +288,7 @@ struct VoicesSettingsView: View {
             } header: {
                 Text("Voice mode")
             } footer: {
-                Text("Full-screen voice is the default: a black screen, the sky orb, and the ask bar. Turn separate mode off for the in-chat composer. Tap the orb for the transcript. Captions are the two lines under the orb. VAD sensitivity changes how quickly silence ends your turn; the middle is about 700ms. The Action Button session is unaffected.")
+                Text("Full-screen voice is the default: a black screen, the sky orb, and the ask bar. Turn separate mode off for the in-chat composer. Tap the orb for the transcript. Captions are the two lines under the orb. VAD sensitivity changes how quickly silence ends your turn; higher is about 500ms and lower is about 700ms. The Action Button session is unaffected.")
             }
             Section("Selected: \(settings.voiceName)") {
                 VStack(alignment: .leading) {

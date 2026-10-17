@@ -16,6 +16,12 @@ final class SpeechOutput: NSObject {
     private var engineMonitorsMic = false
     private var playbackAnchor: Date?
     private var scheduledFrames = 0
+    private var loggedFirstAudio = false
+    private var prefetchTasks: [String: Task<Data, Error>] = [:]
+    /// 50 ms at 24 kHz, 16-bit mono, so the first buffer starts as soon as speech arrives.
+    private static let primeBytes: Int = 2_400
+    /// 200 ms follow-on buffers.
+    private static let followBytes: Int = 9_600
     private let pcmFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                           sampleRate: ElevenLabsClient.pcmSampleRate,
                                           channels: 1, interleaved: false)!
@@ -38,6 +44,21 @@ final class SpeechOutput: NSObject {
     func preparePlayback() {
         playbackAnchor = nil
         scheduledFrames = 0
+        loggedFirstAudio = false
+    }
+
+    /// Starts the next sentence's download while the current one is still playing.
+    func prefetch(text: String, voiceID: String, apiKey: String, stability: Double, similarity: Double) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, prefetchTasks[trimmed] == nil else { return }
+        let voice = voiceID
+        let key = apiKey
+        let stable = stability
+        let similar = similarity
+        prefetchTasks[trimmed] = Task.detached {
+            try await ElevenLabsClient.collectSpeech(
+                text: trimmed, voiceID: voice, apiKey: key, stability: stable, similarity: similar)
+        }
     }
 
     /// Opens the playback engine while listening so the first sentence does not pay startup cost.
@@ -54,18 +75,40 @@ final class SpeechOutput: NSObject {
         playbackSignal = nil
         player?.stop()
         preparePlayback()
+        LatencyLog.event("tts-request")
+        if let data = await takePrefetch(text) {
+            try Task.checkCancellation()
+            let player = try ensureEngine(monitorMicrophone: monitorMicrophone)
+            try await play(data: data, player: player)
+            return
+        }
+        try Task.checkCancellation()
         let bytes = try await ElevenLabsClient.streamSpeech(
             text: text, voiceID: voiceID, apiKey: apiKey, stability: stability, similarity: similarity)
         try Task.checkCancellation()
 
         let player = try ensureEngine(monitorMicrophone: monitorMicrophone)
+        try await play(bytes: bytes, player: player)
+    }
 
+    private func takePrefetch(_ text: String) async -> Data? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let task = prefetchTasks.removeValue(forKey: trimmed) else { return nil }
+        do {
+            let data = try await task.value
+            return data.isEmpty ? nil : data
+        } catch {
+            return nil
+        }
+    }
+
+    private func play(bytes: URLSession.AsyncBytes, player: AVAudioPlayerNode) async throws {
         var primed = false
         var pending = Data()
-        pending.reserveCapacity(4_800 * 2)
+        pending.reserveCapacity(Self.followBytes)
         for try await byte in bytes {
             pending.append(byte)
-            let needed = primed ? 4_800 * 2 : 2_400 * 2
+            let needed: Int = primed ? Self.followBytes : Self.primeBytes
             if pending.count >= needed {
                 try Task.checkCancellation()
                 if let buffer = makeBuffer(pending) {
@@ -77,18 +120,65 @@ final class SpeechOutput: NSObject {
             }
         }
         try Task.checkCancellation()
+        await finishPlayback(tail: pending, player: player)
+    }
 
+    private func play(data: Data, player: AVAudioPlayerNode) async throws {
+        var buffers: [AVAudioPCMBuffer] = []
+        var offset: Int = 0
+        var primed = false
+        let count: Int = data.count
+        while offset < count {
+            try Task.checkCancellation()
+            let needed: Int = primed ? Self.followBytes : Self.primeBytes
+            let remaining: Int = count - offset
+            let take: Int = remaining < needed ? remaining : needed
+            if take <= 0 { break }
+            let end: Int = offset + take
+            let slice = data.subdata(in: offset..<end)
+            if let buffer = makeBuffer(slice) {
+                buffers.append(buffer)
+            }
+            offset = end
+            primed = true
+        }
+        await schedule(buffers, player: player, trackBuffers: true)
+    }
+
+    /// The last buffer carries the playback-finished callback. A silence marker covers an empty tail.
+    private func finishPlayback(tail: Data, player: AVAudioPlayerNode) async {
+        if let tailBuffer = makeBuffer(tail) {
+            await schedule([tailBuffer], player: player, trackBuffers: true)
+            return
+        }
+        if playbackAnchor != nil, let marker = makeBuffer(Data(count: 480)) {
+            await schedule([marker], player: player, trackBuffers: false)
+            return
+        }
         let signal = OnceSignal()
         playbackSignal = signal
-        if let tail = makeBuffer(pending) {
-            track(tail)
-            player.scheduleBuffer(tail, completionCallbackType: .dataPlayedBack,
-                                  completionHandler: AudioTaps.playbackFinished(signal))
-        } else if let marker = makeBuffer(Data(count: 480)) {
-            player.scheduleBuffer(marker, completionCallbackType: .dataPlayedBack,
-                                  completionHandler: AudioTaps.playbackFinished(signal))
-        } else {
+        signal.fire()
+        await signal.wait()
+    }
+
+    private func schedule(_ buffers: [AVAudioPCMBuffer], player: AVAudioPlayerNode, trackBuffers: Bool) async {
+        let signal = OnceSignal()
+        playbackSignal = signal
+        guard !buffers.isEmpty else {
             signal.fire()
+            await signal.wait()
+            return
+        }
+        let lastIndex: Int = buffers.count - 1
+        for index in 0..<buffers.count {
+            let buffer = buffers[index]
+            if trackBuffers { track(buffer) }
+            if index == lastIndex {
+                player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack,
+                                      completionHandler: AudioTaps.playbackFinished(signal))
+            } else {
+                player.scheduleBuffer(buffer, completionHandler: nil)
+            }
         }
         await signal.wait()
     }
@@ -109,7 +199,13 @@ final class SpeechOutput: NSObject {
     }
 
     private func track(_ buffer: AVAudioPCMBuffer) {
-        if playbackAnchor == nil { playbackAnchor = Date() }
+        if playbackAnchor == nil {
+            playbackAnchor = Date()
+            if !loggedFirstAudio {
+                loggedFirstAudio = true
+                LatencyLog.event("tts-first-audio")
+            }
+        }
         scheduledFrames += Int(buffer.frameLength)
     }
 
@@ -212,6 +308,10 @@ final class SpeechOutput: NSObject {
     }
 
     func stop() {
+        for task in prefetchTasks.values {
+            task.cancel()
+        }
+        prefetchTasks.removeAll()
         stopEngine()
     }
 }

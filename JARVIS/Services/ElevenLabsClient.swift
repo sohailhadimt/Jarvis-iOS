@@ -31,7 +31,7 @@ enum ElevenLabsClient {
     static func voices(apiKey: String) async throws -> [ElevenVoice] {
         var req = URLRequest(url: URL(string: "https://api.elevenlabs.io/v1/voices")!)
         req.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await HTTPConnections.session.data(for: req)
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else { throw ElevenLabsError.http(status, String(data: data, encoding: .utf8) ?? "") }
         return try JSONDecoder().decode(VoicesResponse.self, from: data).voices
@@ -65,7 +65,10 @@ enum ElevenLabsClient {
     private static func streamSpeech(text: String, voiceID: String, apiKey: String,
                                      stability: Double, similarity: Double, model: String) async throws -> URLSession.AsyncBytes {
         var comps = URLComponents(string: "https://api.elevenlabs.io/v1/text-to-speech/\(voiceID)/stream")!
-        comps.queryItems = [URLQueryItem(name: "output_format", value: "pcm_24000")]
+        comps.queryItems = [
+            URLQueryItem(name: "output_format", value: "pcm_24000"),
+            URLQueryItem(name: "optimize_streaming_latency", value: "4"),
+        ]
         var req = URLRequest(url: comps.url!)
         req.httpMethod = "POST"
         req.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
@@ -74,7 +77,7 @@ enum ElevenLabsClient {
             text: text, model_id: model,
             voice_settings: .init(stability: stability, similarity_boost: similarity)))
 
-        let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+        let (bytes, resp) = try await HTTPConnections.session.bytes(for: req)
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else {
             var body = Data()
@@ -85,5 +88,19 @@ enum ElevenLabsClient {
             throw ElevenLabsError.http(status, String(data: body, encoding: .utf8) ?? "")
         }
         return bytes
+    }
+
+    /// Downloads one utterance so the next sentence can start while the current one plays.
+    static func collectSpeech(text: String, voiceID: String, apiKey: String,
+                              stability: Double, similarity: Double) async throws -> Data {
+        let bytes = try await streamSpeech(text: text, voiceID: voiceID, apiKey: apiKey,
+                                           stability: stability, similarity: similarity)
+        var data = Data()
+        data.reserveCapacity(24_000)
+        for try await byte in bytes {
+            try Task.checkCancellation()
+            data.append(byte)
+        }
+        return data
     }
 }

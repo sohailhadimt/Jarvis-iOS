@@ -82,11 +82,14 @@ final class AssistantEngine {
     @ObservationIgnored private var turnAssistantStored = false
     /// Smoothed mic level used only to detect the end of a Groq recording.
     @ObservationIgnored private var captureMeter = 0.0
+    /// Sentences still being spoken for the current streamed reply. Cancelled on barge-in.
+    @ObservationIgnored private var spokenQueue: SpokenQueue?
 
-    /// Silence that ends a turn. Sensitivity 0.5 is about 700ms.
+    /// Silence that ends a turn. Sensitivity 0 waits 700ms; 1 waits 500ms.
     private var silenceTimeout: Duration {
         let sensitivity: Double = min(1.0, max(0.0, AppSettings.shared.vadSensitivity))
-        let milliseconds: Double = 1100.0 - sensitivity * 800.0
+        let span: Double = sensitivity * 200.0
+        let milliseconds: Double = 700.0 - span
         return .milliseconds(Int(milliseconds))
     }
 
@@ -115,6 +118,7 @@ final class AssistantEngine {
         listener.onBargeLevel = { [weak self] value in self?.noteBarge(value) }
         tools.onComposeMessage = { [weak self] draft in self?.messageDraft = draft }
         ContactDirectory.shared.warm()
+        HTTPConnections.prewarm()
     }
 
     // MARK: Session (Action Button / Live Activity)
@@ -338,12 +342,14 @@ final class AssistantEngine {
     func ask(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        LatencyLog.beginTurn("text-turn")
         Task {
             let session = AVAudioSession.sharedInstance()
             do {
                 try Self.configureVoiceSession(session)
                 try session.setActive(true)
                 audioConfigured = true
+                output.prewarm()
             } catch {
                 // A text turn can still run; speech falls back if the session won't start.
             }
@@ -437,6 +443,8 @@ final class AssistantEngine {
 
     private func interrupt() {
         silenceTask?.cancel()
+        spokenQueue?.cancel()
+        spokenQueue = nil
         turnTask?.cancel()
         turnTask = nil
         output.stop()
@@ -444,6 +452,7 @@ final class AssistantEngine {
     }
 
     private func beginListening(manual: Bool) {
+        LatencyLog.clear()
         manualTurn = manual
         transcript = ""
         heardVoice = false
@@ -537,6 +546,9 @@ final class AssistantEngine {
             return
         }
         silenceTask?.cancel()
+        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            LatencyLog.noteSpeechEnd()
+        }
         let timeout = silenceTimeout
         silenceTask = Task { [weak self] in
             try? await Task.sleep(for: timeout)
@@ -569,6 +581,8 @@ final class AssistantEngine {
     private func finishUtterance() {
         guard phase == .listening else { return }
         silenceTask?.cancel()
+        LatencyLog.noteSpeechEndIfNeeded()
+        LatencyLog.event("speech-end")
         phase = .thinking
         level = 0
         pushActivity()
@@ -675,7 +689,15 @@ final class AssistantEngine {
 
     /// One model attempt. ModelFallback calls this again after a busy response.
     private func produce(text: String, endpoint: LLMEndpoint, system: String,
-                         history: [ChatMessage], user: ChatMessage) async throws -> Produced {
+                         history: [ChatMessage], user: ChatMessage, streamTalk: Bool) async throws -> Produced {
+        if streamTalk {
+            if endpoint.kind == .openAI, Self.wantsLiveSearch(text) {
+                let raw = try await answerQuestion(system: system, history: history, user: user, endpoint: endpoint)
+                return Produced(text: raw, spoken: false)
+            }
+            let streamed = try await streamedChat(system: system, history: history, user: user, endpoint: endpoint)
+            return Produced(text: streamed.text, spoken: streamed.spoken)
+        }
         let settings = AppSettings.shared
         let cloudTools = JarvisCloud.isConfigured && wantsCloudTool(text)
         switch settings.routing {
@@ -692,8 +714,13 @@ final class AssistantEngine {
                                          includeWebSearch: KeychainStore.get(.openAI) != nil)
             return Produced(text: raw, spoken: false)
         case .split:
+            if cloudTools || Self.needsTools(text) {
+                let raw = try await runAgent(system: system, history: history, user: user, endpoint: endpoint,
+                                             includeWebSearch: false)
+                return Produced(text: raw, spoken: false)
+            }
             let classified = try await classify(text, endpoint: endpoint)
-            if cloudTools || classified != .question {
+            if classified != .question {
                 let raw = try await runAgent(system: system, history: history, user: user, endpoint: endpoint,
                                              includeWebSearch: false)
                 return Produced(text: raw, spoken: false)
@@ -854,16 +881,20 @@ final class AssistantEngine {
             if endpoint.kind != settings.provider {
                 statusLine = "Using \(endpoint.providerName) because no \(settings.provider.title) key is saved."
             }
-            let system = settings.systemPrompt(facts: JarvisStore.allFacts())
+            let facts = JarvisStore.allFacts()
+            let streamTalk = shouldStreamConversation(text)
+            let primary = streamTalk ? settings.conversationalEndpoint(from: endpoint) : endpoint
+            let system = streamTalk ? settings.voicePrompt(facts: facts) : settings.systemPrompt(facts: facts)
+            let groq = streamTalk ? settings.fastGroqEndpoint() : settings.groqEndpoint()
             let prior = recordedUser ? Array(conversation.dropLast()) : conversation
             let history = Array(prior.suffix(16))
             let produced = try await ModelFallback.run(
-                primary: endpoint,
-                groq: settings.groqEndpoint(),
+                primary: primary,
+                groq: groq,
                 status: { line in self.applyBusyStatus(line) },
                 work: { endpoint in
                     try await self.produce(text: text, endpoint: endpoint, system: system,
-                                           history: history, user: userMessage)
+                                           history: history, user: userMessage, streamTalk: streamTalk)
                 }
             )
             let raw = produced.text
@@ -1194,75 +1225,187 @@ final class AssistantEngine {
         var spoken: Bool
     }
 
-    /// Speaks the first sentence while the rest of the chat completion is still streaming.
+    /// Speaks each short chunk as it arrives. The first chunk starts ElevenLabs before the reply finishes.
     private func streamedChat(system: String, history: [ChatMessage], user: ChatMessage,
                               endpoint: LLMEndpoint) async throws -> StreamedReply {
         let messages = [ChatMessage(role: "system", content: system)] + history + [user]
+        let queue = SpokenQueue(
+            speak: { [weak self] piece in
+                await self?.say(piece)
+            },
+            prefetch: { [weak self] piece in
+                self?.prefetchSpeech(piece)
+            }
+        )
+        spokenQueue = queue
+        defer {
+            if let current = spokenQueue, current === queue {
+                spokenQueue = nil
+            }
+        }
         var full = ""
-        var spokenPiece = ""
-        var speakTask: Task<Void, Never>?
+        var taken = 0
+        var spoke = false
+        LatencyLog.event("llm-request")
         do {
             for try await delta in LLMClient.streamDeltas(messages: messages, endpoint: endpoint) {
                 try Task.checkCancellation()
+                if full.isEmpty { LatencyLog.event("llm-first-token") }
                 full += delta
                 let cleaned = MemoryParser.extract(from: full).cleaned
                 if !cleaned.isEmpty {
                     reply = cleaned
                     pushActivity()
                 }
-                if speakTask == nil, let sentence = Self.firstSentence(in: cleaned) {
-                    spokenPiece = sentence
-                    let piece = ResponsesClient.spokenText(sentence)
-                    if !piece.isEmpty {
-                        speakTask = Task { await self.say(piece) }
-                    }
+                let ready = Self.takeChunks(from: cleaned, taken: taken, flush: false)
+                taken = ready.taken
+                for chunk in ready.chunks {
+                    let piece = ResponsesClient.spokenText(chunk)
+                    if piece.isEmpty { continue }
+                    spoke = true
+                    queue.add(piece)
                 }
             }
         } catch {
-            speakTask?.cancel()
-            if Task.isCancelled { throw error }
+            if Task.isCancelled {
+                queue.cancel()
+                throw error
+            }
             if let llm = error as? LLMError, llm.isBusy, full.isEmpty {
+                queue.cancel()
                 throw error
             }
             if full.isEmpty {
+                queue.cancel()
+                LatencyLog.event("llm-fallback")
                 let text = try await LLMClient.complete(messages: messages, endpoint: endpoint)
                 return StreamedReply(text: text, spoken: false)
             }
         }
-        if let speakTask {
-            await speakTask.value
-            guard !Task.isCancelled else { return StreamedReply(text: full, spoken: true) }
-            let cleaned = MemoryParser.extract(from: full).cleaned
-            if let range = cleaned.range(of: spokenPiece) {
-                let rest = cleaned[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
-                if !rest.isEmpty {
-                    await say(ResponsesClient.spokenText(rest))
-                }
-            }
-            return StreamedReply(text: full, spoken: true)
+        let cleaned = MemoryParser.extract(from: full).cleaned
+        let rest = Self.takeChunks(from: cleaned, taken: taken, flush: true)
+        for chunk in rest.chunks {
+            let piece = ResponsesClient.spokenText(chunk)
+            if piece.isEmpty { continue }
+            spoke = true
+            queue.add(piece)
         }
-        return StreamedReply(text: full, spoken: false)
+        await queue.close()
+        guard !Task.isCancelled else { return StreamedReply(text: full, spoken: spoke) }
+        return StreamedReply(text: full, spoken: spoke)
     }
 
-    /// A chunk is ready at punctuation, or at 40 characters when the model has not paused yet.
-    private static func firstSentence(in text: String) -> String? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        let chars = Array(trimmed)
-        for index in 0..<chars.count {
+    private func prefetchSpeech(_ text: String) {
+        let settings = AppSettings.shared
+        guard let key = KeychainStore.get(.elevenLabs) else { return }
+        output.prefetch(text: text, voiceID: settings.voiceID, apiKey: key,
+                        stability: settings.stability, similarity: settings.similarity)
+    }
+
+    /// Ready speech from `taken` characters onward. `flush` returns whatever is left.
+    private static func takeChunks(from text: String, taken: Int, flush: Bool) -> (chunks: [String], taken: Int) {
+        let count: Int = text.count
+        guard taken >= 0, taken < count else { return ([], taken) }
+        let start = text.index(text.startIndex, offsetBy: taken)
+        var remainder = String(text[start...])
+        var chunks: [String] = []
+        var used: Int = taken
+        while !remainder.isEmpty {
+            guard let chunk = firstChunk(in: remainder, flush: flush) else { break }
+            let spoken = chunk.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !spoken.isEmpty { chunks.append(spoken) }
+            let chunkCount: Int = chunk.count
+            used += chunkCount
+            if chunkCount >= remainder.count { break }
+            let after = remainder.index(remainder.startIndex, offsetBy: chunkCount)
+            var cursor = after
+            while cursor < remainder.endIndex {
+                let character = remainder[cursor]
+                if !character.isWhitespace { break }
+                cursor = remainder.index(after: cursor)
+                used += 1
+            }
+            remainder = String(remainder[cursor...])
+        }
+        return (chunks, used)
+    }
+
+    /// A chunk is ready at punctuation, or at 18 characters on a word boundary.
+    private static func firstChunk(in text: String, flush: Bool) -> String? {
+        if let punctuated = punctuationChunk(in: text) { return punctuated }
+        if let bounded = lengthChunk(in: text) { return bounded }
+        guard flush else { return nil }
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return nil }
+        return text
+    }
+
+    private static func punctuationChunk(in text: String) -> String? {
+        let chars = Array(text)
+        let count: Int = chars.count
+        var index: Int = 0
+        while index < count {
             let ch = chars[index]
-            guard ch == "." || ch == "!" || ch == "?" || ch == ";" else { continue }
-            guard index >= 1 else { continue }
-            if ch == ".", index > 0, chars[index - 1].isNumber { continue }
-            if index + 1 < chars.count, chars[index + 1].isLetter { continue }
-            return String(chars[0...index])
+            let isBreak: Bool = ch == "." || ch == "!" || ch == "?" || ch == ";" || ch == "," || ch == ":"
+            if isBreak && index >= 1 {
+                let previous = chars[index - 1]
+                if ch == "." && previous.isNumber {
+                    index += 1
+                    continue
+                }
+                if index + 1 < count {
+                    let following = chars[index + 1]
+                    if following.isLetter {
+                        index += 1
+                        continue
+                    }
+                }
+                return String(chars[0...index])
+            }
+            index += 1
         }
-        guard trimmed.count >= 40 else { return nil }
-        let window = trimmed.prefix(80)
-        if let space = window.lastIndex(of: " "), trimmed.distance(from: trimmed.startIndex, to: space) >= 40 {
-            return String(trimmed[..<space])
+        return nil
+    }
+
+    private static func lengthChunk(in text: String) -> String? {
+        let minimum: Int = 18
+        let count: Int = text.count
+        guard count >= minimum else { return nil }
+        let windowLimit: Int = min(48, count)
+        let window = text.prefix(windowLimit)
+        let floor: Int = 12
+        if let space = window.lastIndex(of: " ") {
+            let distance: Int = text.distance(from: text.startIndex, to: space)
+            if distance >= floor {
+                return String(text[..<space])
+            }
         }
-        return String(trimmed.prefix(40))
+        let cut = text.index(text.startIndex, offsetBy: minimum)
+        return String(text[..<cut])
+    }
+
+    /// Phone, calendar and cloud actions keep the tool path. Everything else is spoken chat.
+    private func shouldStreamConversation(_ text: String) -> Bool {
+        if JarvisCloud.isConfigured && wantsCloudTool(text) { return false }
+        if AppSettings.shared.routing == .chatOnly { return true }
+        return !Self.needsTools(text)
+    }
+
+    private static func needsTools(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let needles = [
+            "message", "whatsapp", "facetime", "face time", "remind", "reminder",
+            "calendar", "timer", "alarm", "play ", "music", "directions", "navigate",
+            "maps", "open ", "shortcut", "email", "e-mail", "schedule", "text ",
+            "sms", "appointment", "meeting",
+        ]
+        return needles.contains { lower.contains($0) }
+    }
+
+    /// OpenAI questions that need the web still use the search path. Gemini and Groq stream.
+    private static func wantsLiveSearch(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let needles = ["search", "look up", "lookup", "weather", "news"]
+        return needles.contains { lower.contains($0) }
     }
 
     private static func hearsWakeWord(_ text: String) -> Bool {
@@ -1335,6 +1478,7 @@ final class AssistantEngine {
                 heardVoice = true
                 userIsSpeaking = true
                 silenceTask?.cancel()
+                LatencyLog.noteSpeechEnd()
                 let timeout = silenceTimeout
                 silenceTask = Task { [weak self] in
                     try? await Task.sleep(for: timeout)
@@ -1371,6 +1515,83 @@ final class AssistantEngine {
         defaults.synchronize()
         sessionLog.info("control flag \(self.isSessionActive, privacy: .public)")
         ControlCenter.shared.reloadControls(ofKind: SharedConfig.controlKind)
+    }
+}
+
+/// Speaks sentence chunks in order. The next chunk's audio is fetched while the current one plays.
+@MainActor
+private final class SpokenQueue {
+    private var pending: [String] = []
+    private var pumping = false
+    private var closed = false
+    private var finished = false
+    private var waiter: CheckedContinuation<Void, Never>?
+    private var pumpTask: Task<Void, Never>?
+    private let speak: (String) async -> Void
+    private let prefetch: (String) -> Void
+
+    init(speak: @escaping (String) async -> Void, prefetch: @escaping (String) -> Void) {
+        self.speak = speak
+        self.prefetch = prefetch
+    }
+
+    func add(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !closed else { return }
+        pending.append(trimmed)
+        if pumping, let latest = pending.last {
+            prefetch(latest)
+        }
+        pump()
+    }
+
+    func close() async {
+        closed = true
+        if finished || (!pumping && pending.isEmpty) { return }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            if finished || (!pumping && pending.isEmpty) {
+                cont.resume()
+                return
+            }
+            waiter = cont
+        }
+    }
+
+    func cancel() {
+        pending.removeAll()
+        closed = true
+        pumpTask?.cancel()
+        finishWait()
+    }
+
+    private func pump() {
+        guard !pumping else { return }
+        pumping = true
+        pumpTask = Task { [weak self] in
+            guard let self else { return }
+            while !self.pending.isEmpty {
+                if Task.isCancelled { break }
+                let next = self.pending.removeFirst()
+                if let upcoming = self.pending.first {
+                    self.prefetch(upcoming)
+                }
+                await self.speak(next)
+            }
+            self.pumping = false
+            self.pumpTask = nil
+            if self.closed || Task.isCancelled {
+                self.finishWait()
+            } else if !self.pending.isEmpty {
+                self.pump()
+            }
+        }
+    }
+
+    private func finishWait() {
+        finished = true
+        let waiting = waiter
+        waiter = nil
+        waiting?.resume()
     }
 }
 

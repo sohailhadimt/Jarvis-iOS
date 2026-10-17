@@ -200,7 +200,7 @@ enum LLMClient {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await HTTPConnections.session.data(for: request)
         } catch {
             throw LLMError.http(-1, error.localizedDescription, provider: endpoint.providerName)
         }
@@ -220,7 +220,9 @@ enum LLMClient {
         }
     }
 
-    /// Chat Completions SSE. Yields content deltas. Callers fall back to `complete` when this throws
+    /// SSE for Gemini and Groq. Gemini uses the OpenAI-compatible `stream: true` chat
+    /// endpoint (the same events as `streamGenerateContent?alt=sse`). Groq uses the same
+    /// shape. Yields content deltas. Callers fall back to `complete` when this throws
     /// before any text arrives.
     static func streamDeltas(messages: [ChatMessage], endpoint: LLMEndpoint) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
@@ -239,7 +241,7 @@ enum LLMClient {
                     let bytes: URLSession.AsyncBytes
                     let response: URLResponse
                     do {
-                        (bytes, response) = try await URLSession.shared.bytes(for: request)
+                        (bytes, response) = try await HTTPConnections.session.bytes(for: request)
                     } catch {
                         throw LLMError.http(-1, error.localizedDescription, provider: endpoint.providerName)
                     }
