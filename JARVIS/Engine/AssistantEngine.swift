@@ -443,6 +443,14 @@ final class AssistantEngine {
     func ask(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        if !Reachability.shared.online {
+            OfflineQueue.shared.enqueue(trimmed)
+            errorMessage = "I'm offline, sir. I'll send that when the line is back."
+            reply = ""
+            phase = .idle
+            level = 0
+            return
+        }
         LatencyLog.beginTurn("text-turn")
         Task {
             let session = AVAudioSession.sharedInstance()

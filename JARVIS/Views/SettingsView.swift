@@ -62,6 +62,31 @@ struct SettingsView: View {
             } header: {
                 Text("Action Button")
             }
+            Section {
+                Toggle("Lock with Face ID", isOn: $settings.privacyLock)
+                Toggle("Startup chime", isOn: $settings.bootChime)
+                Toggle("Haptics", isOn: $settings.hapticsEnabled)
+                Toggle("Weather and agenda", isOn: $settings.glanceEnabled)
+                Toggle("Daily briefing", isOn: $settings.briefingEnabled)
+                if settings.briefingEnabled {
+                    Stepper(value: $settings.briefingHour, in: 0...23) {
+                        Text("Hour \(settings.briefingHour), London")
+                    }
+                    Stepper(value: $settings.briefingMinute, in: 0...59) {
+                        Text(String(format: "Minute %02d", settings.briefingMinute))
+                    }
+                }
+                Button("Show the first-run setup again") {
+                    settings.onboarded = false
+                }
+            } header: {
+                Text("This iPhone")
+            } footer: {
+                Text("Face ID uses your passcode if Face ID is unavailable. The briefing reminder is on this iPhone. The worker's own routine stays in Agents and starts off.")
+            }
+            .onChange(of: settings.briefingEnabled) { _, _ in BriefingClock.schedule() }
+            .onChange(of: settings.briefingHour) { _, _ in BriefingClock.schedule() }
+            .onChange(of: settings.briefingMinute) { _, _ in BriefingClock.schedule() }
             Section("More") {
                 NavigationLink { CloudBriefingView() } label: { Label("Briefing", systemImage: "sun.horizon") }
                 NavigationLink { CloudActivityView() } label: { Label("Activity", systemImage: "list.bullet.rectangle") }

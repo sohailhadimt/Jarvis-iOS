@@ -55,6 +55,11 @@ enum JarvisStartListening {
     }
 
     @MainActor
+    static var isPending: Bool {
+        UserDefaults.standard.bool(forKey: pendingKey)
+    }
+
+    @MainActor
     static func consume() -> Bool {
         guard UserDefaults.standard.bool(forKey: pendingKey) else { return false }
         UserDefaults.standard.set(false, forKey: pendingKey)

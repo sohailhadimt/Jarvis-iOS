@@ -56,6 +56,7 @@ targets:
         UIBackgroundModes:
           - audio
           - remote-notification
+        NSFaceIDUsageDescription: "JARVIS uses Face ID to unlock the home screen."
         NSMicrophoneUsageDescription: "JARVIS listens to your voice so it can answer your questions."
         NSCameraUsageDescription: "JARVIS uses the camera when you ask what it sees."
         NSPhotoLibraryUsageDescription: "JARVIS attaches a photo when you ask about it."

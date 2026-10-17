@@ -236,6 +236,17 @@ final class AppSettings {
     var orbTintHex: String { didSet { persistTint() } }
     var orbTintAmount: Double { didSet { persistTint() } }
     var appearancePreset: String { didSet { d.set(appearancePreset, forKey: "appearancePreset") } }
+    /// First-run sheet has been finished or skipped.
+    var onboarded: Bool { didSet { d.set(onboarded, forKey: "onboarded") } }
+    /// Face ID or the device passcode covers the home screen after leaving the app.
+    var privacyLock: Bool { didSet { d.set(privacyLock, forKey: "privacyLock") } }
+    var bootChime: Bool { didSet { d.set(bootChime, forKey: "bootChime") } }
+    var hapticsEnabled: Bool { didSet { d.set(hapticsEnabled, forKey: "hapticsEnabled") } }
+    var glanceEnabled: Bool { didSet { d.set(glanceEnabled, forKey: "glanceEnabled") } }
+    /// Local reminder. The worker's own routine stays off until it is enabled in Agents.
+    var briefingEnabled: Bool { didSet { d.set(briefingEnabled, forKey: "briefingEnabled") } }
+    var briefingHour: Int { didSet { d.set(briefingHour, forKey: "briefingHour") } }
+    var briefingMinute: Int { didSet { d.set(briefingMinute, forKey: "briefingMinute") } }
 
     var primaryColor: Color { Color(hex: primaryHex) }
     var accentColor: Color { Color(hex: accentHex) }
@@ -323,6 +334,14 @@ final class AppSettings {
         orbTintHex = d.string(forKey: "orbTintHex") ?? "4BA8EEFF"
         orbTintAmount = d.object(forKey: "orbTintAmount") as? Double ?? 0
         appearancePreset = d.string(forKey: "appearancePreset") ?? AppearancePreset.sky.rawValue
+        onboarded = d.object(forKey: "onboarded") as? Bool ?? false
+        privacyLock = d.object(forKey: "privacyLock") as? Bool ?? false
+        bootChime = d.object(forKey: "bootChime") as? Bool ?? true
+        hapticsEnabled = d.object(forKey: "hapticsEnabled") as? Bool ?? true
+        glanceEnabled = d.object(forKey: "glanceEnabled") as? Bool ?? true
+        briefingEnabled = d.object(forKey: "briefingEnabled") as? Bool ?? true
+        briefingHour = d.object(forKey: "briefingHour") as? Int ?? 7
+        briefingMinute = d.object(forKey: "briefingMinute") as? Int ?? 30
         SharedConfig.defaults.set(orbTintHex, forKey: SharedConfig.Key.orbTintHex)
         SharedConfig.defaults.set(orbTintAmount, forKey: SharedConfig.Key.orbTintAmount)
         // didSet does not run during init, so write a migrated factory colour through explicitly.

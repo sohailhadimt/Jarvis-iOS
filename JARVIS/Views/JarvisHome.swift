@@ -51,6 +51,7 @@ final class DrawerModel {
         withAnimation(Self.spring) {
             fraction = open ? 1 : 0
         }
+        if open { JarvisHaptics.tap() }
     }
 
     func drag(width: CGFloat) -> some Gesture {
@@ -269,17 +270,31 @@ struct HamburgerMark: View {
 }
 
 enum JarvisGreeting {
+    /// Stable for the calendar day, so the clock ticking each minute does not change the line.
     static func line(at date: Date, name: String = "Sohail") -> String {
         let hour = Calendar.current.component(.hour, from: date)
-        let part: String
+        let lines: [String]
         if hour < 12 {
-            part = "morning"
+            lines = [
+                "Good morning, \(name).",
+                "Good morning, \(name). I kept the night watch.",
+                "Morning, \(name). Coffee first, then the world.",
+            ]
         } else if hour < 17 {
-            part = "afternoon"
+            lines = [
+                "Good afternoon, \(name).",
+                "Good afternoon, \(name). The day is still yours.",
+                "Afternoon, \(name). I've been minding the details.",
+            ]
         } else {
-            part = "evening"
+            lines = [
+                "Good evening, \(name).",
+                "Good evening, \(name). The house is quiet.",
+                "Evening, \(name). Tell me what you need.",
+            ]
         }
-        return "Good \(part), \(name)."
+        let day = Calendar.current.ordinality(of: .day, in: .era, for: date) ?? 0
+        return lines[day % lines.count]
     }
 }
 
@@ -287,18 +302,28 @@ enum JarvisGreeting {
 
 private struct ConversationIndex: View {
     @State private var log = ConversationLog.shared
+    @State private var query = ""
+
+    private var rows: [StoredConversation] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return log.sorted }
+        return log.sorted.filter { convo in
+            convo.title.localizedCaseInsensitiveContains(needle)
+                || convo.turns.contains { $0.text.localizedCaseInsensitiveContains(needle) }
+        }
+    }
 
     var body: some View {
         ZStack {
             JarvisBackdrop().ignoresSafeArea()
             List {
-                if log.items.isEmpty {
-                    Text("Conversations you have with JARVIS show up here.")
+                if rows.isEmpty {
+                    Text(query.isEmpty ? "Conversations you have with JARVIS show up here." : "Nothing saved matches that.")
                         .font(.system(size: 15))
                         .foregroundStyle(Color(hex: "#8E8A99"))
                         .listRowBackground(Color.clear)
                 }
-                ForEach(log.sorted) { convo in
+                ForEach(rows) { convo in
                     NavigationLink {
                         ConversationPage(id: convo.id)
                     } label: {
@@ -319,12 +344,13 @@ private struct ConversationIndex: View {
                     .listRowBackground(Color.white.opacity(0.04))
                 }
                 .onDelete { offsets in
-                    let ids = offsets.map { log.sorted[$0].id }
+                    let ids = offsets.map { rows[$0].id }
                     for id in ids { log.remove(id) }
                 }
             }
             .scrollContentBackground(.hidden)
         }
+        .searchable(text: $query, prompt: "Search conversations")
         .navigationTitle("Conversations")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)

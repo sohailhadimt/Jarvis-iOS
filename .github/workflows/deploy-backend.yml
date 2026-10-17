@@ -150,6 +150,11 @@ jobs:
           ELEVENLABS_WEBHOOK_SECRET: ${{ secrets.ELEVENLABS_WEBHOOK_SECRET }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+          APNS_KEY_ID: ${{ secrets.APNS_KEY_ID }}
+          APNS_TEAM_ID: ${{ secrets.APNS_TEAM_ID }}
+          APNS_PRIVATE_KEY: ${{ secrets.APNS_PRIVATE_KEY }}
+          APNS_BUNDLE_ID: ${{ secrets.APNS_BUNDLE_ID }}
+          APNS_ENVIRONMENT: ${{ secrets.APNS_ENVIRONMENT }}
         run: |
           set -euo pipefail
           put_if_present() {
@@ -178,6 +183,11 @@ jobs:
             ELEVENLABS_WEBHOOK_SECRET
             TAVILY_API_KEY
             BRAVE_API_KEY
+            APNS_KEY_ID
+            APNS_TEAM_ID
+            APNS_PRIVATE_KEY
+            APNS_BUNDLE_ID
+            APNS_ENVIRONMENT
           )
           missing_required=()
           missing_optional=()

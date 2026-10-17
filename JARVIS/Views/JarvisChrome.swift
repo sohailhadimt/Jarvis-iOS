@@ -66,6 +66,8 @@ struct HomeScreen: View {
             Text("What can I do for you?")
                 .font(.system(size: 17, weight: .regular))
                 .foregroundStyle(Color(hex: "#A39BB4"))
+            GlanceLine()
+            OfflineStrip()
         }
         .multilineTextAlignment(.center)
         .frame(maxWidth: .infinity)
@@ -82,6 +84,40 @@ struct HomeScreen: View {
                         keyboardOverlap = overlap
                     }
                 }
+        }
+    }
+}
+
+/// Weather and the next event. Isolated so a refresh does not rebuild the ring.
+private struct GlanceLine: View {
+    @Environment(AppSettings.self) private var settings
+    @State private var glance = DayGlance.shared
+
+    var body: some View {
+        Group {
+            if settings.glanceEnabled, !glance.line.isEmpty {
+                Text(glance.line)
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(Color(hex: "#6E86A8"))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .padding(.horizontal, 28)
+                    .padding(.top, 4)
+            }
+        }
+        .task { await glance.refresh() }
+    }
+}
+
+private struct OfflineStrip: View {
+    @State private var net = Reachability.shared
+
+    var body: some View {
+        if !net.online {
+            Text("Offline. I'll keep messages until the line returns.")
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(Color(hex: "#A39BB4"))
+                .padding(.top, 6)
         }
     }
 }
@@ -203,10 +239,12 @@ private struct AskBar: View {
         guard !text.isEmpty else { return }
         draft = ""
         focused = false
+        JarvisHaptics.tap()
         engine.ask(text)
     }
 
     private func micTapped() {
+        JarvisHaptics.tap()
         focused = false
         if engine.isSessionActive {
             Task { await engine.endSession(reason: "mic-button") }

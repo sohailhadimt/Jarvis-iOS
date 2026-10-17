@@ -48,6 +48,12 @@ final class JarvisPush: NSObject, UIApplicationDelegate, UNUserNotificationCente
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let info = response.notification.request.content.userInfo
+        if info["kind"] as? String == "briefing" {
+            await MainActor.run {
+                NotificationCenter.default.post(name: .jarvisDeliverBriefing, object: nil)
+            }
+            return
+        }
         guard let client = try? await MainActor.run(body: { try JarvisCloudAPI.client() }) else { return }
         if let typed = response as? UNTextInputNotificationResponse,
            let callId = info["call_id"] as? String,
