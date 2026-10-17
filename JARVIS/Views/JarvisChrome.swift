@@ -1,49 +1,73 @@
+import Observation
 import SwiftUI
 import UIKit
+
+/// How far the ask bar sits above the keyboard. The home screen does not read this,
+/// so the ring stays mounted while the bar follows the keyboard.
+@MainActor
+@Observable
+final class KeyboardLift {
+    static let shared = KeyboardLift()
+    private init() {}
+    var overlap: CGFloat = 0
+}
 
 struct HomeScreen: View {
     @Environment(\.scenePhase) private var scenePhase
     var ringPaused: Bool
     var onMenu: () -> Void
-    @State private var keyboardOverlap: CGFloat = 0
+    @State private var keyboardVisible = false
+    @State private var keyboardReveal: Task<Void, Never>?
 
     var body: some View {
         VStack(spacing: 0) {
             topBar
                 .padding(.horizontal, 20)
                 .padding(.top, 8)
-            if keyboardOverlap == 0 {
-                Spacer(minLength: 8)
-                Color.clear
-                    .aspectRatio(1.15, contentMode: .fit)
-                    .overlay {
-                        GeometryReader { geo in
-                            let side = geo.size.width * 0.65
-                            JarvisRingHost(paused: ringPaused || scenePhase != .active)
-                                .frame(width: side + 56, height: side + 56)
-                                .position(x: geo.size.width / 2, y: geo.size.height / 2)
-                        }
-                    }
-                greeting
-                    .padding(.top, 16)
-                LiveCaption()
-                Spacer(minLength: 8)
-            } else {
-                Spacer(minLength: 8)
-            }
+            stage
             SessionExtras()
             AskBar()
                 .padding(.horizontal, 20)
-                .padding(.bottom, 12 + keyboardOverlap)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .background(keyboardReader)
+    }
+
+    /// The ring stays in the hierarchy. Height snaps once; it does not track the keyboard curve.
+    private var stage: some View {
+        VStack(spacing: 0) {
+            Spacer(minLength: 8)
+            Color.clear
+                .aspectRatio(1.15, contentMode: .fit)
+                .overlay {
+                    GeometryReader { geo in
+                        let side = geo.size.width * 0.65
+                        JarvisRingHost(paused: ringPaused || scenePhase != .active || keyboardVisible)
+                            .frame(width: side + 56, height: side + 56)
+                            .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                    }
+                }
+            greeting
+                .padding(.top, 16)
+            LiveCaption()
+            Spacer(minLength: 8)
+        }
+        .frame(maxHeight: keyboardVisible ? 0 : .infinity)
+        .clipped()
+        .opacity(keyboardVisible ? 0 : 1)
+        .allowsHitTesting(!keyboardVisible)
+        .accessibilityHidden(keyboardVisible)
+        .animation(nil, value: keyboardVisible)
     }
 
     private var topBar: some View {
         ZStack {
             JarvisWordmark()
             HStack {
-                Button(action: onMenu) {
+                Button(action: {
+                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                    onMenu()
+                }) {
                     HamburgerMark()
                         .frame(width: 44, height: 44, alignment: .leading)
                         .contentShape(Rectangle())
@@ -80,8 +104,24 @@ struct HomeScreen: View {
                     guard let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
                     let overlap = max(0, proxy.frame(in: .global).maxY - frame.minY)
                     let duration = note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+                    let visible = overlap > 0.5
+                    keyboardReveal?.cancel()
+                    if visible {
+                        var transaction = Transaction()
+                        transaction.disablesAnimations = true
+                        withTransaction(transaction) { keyboardVisible = true }
+                    } else if keyboardVisible {
+                        let wait = duration
+                        keyboardReveal = Task {
+                            try? await Task.sleep(for: .seconds(wait))
+                            guard !Task.isCancelled else { return }
+                            var transaction = Transaction()
+                            transaction.disablesAnimations = true
+                            withTransaction(transaction) { keyboardVisible = false }
+                        }
+                    }
                     withAnimation(.easeOut(duration: duration)) {
-                        keyboardOverlap = overlap
+                        KeyboardLift.shared.overlap = overlap
                     }
                 }
         }
@@ -196,6 +236,7 @@ private struct SessionExtras: View {
 private struct AskBar: View {
     @Environment(AssistantEngine.self) private var engine
     @State private var draft = ""
+    @State private var lift = KeyboardLift.shared
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -232,6 +273,7 @@ private struct AskBar: View {
         .background(Color(hex: "#0B1220").opacity(0.72), in: Capsule())
         .overlay(Capsule().stroke(Color(hex: "#2E8BFF").opacity(0.55), lineWidth: 0.8))
         .shadow(color: Color(hex: "#2E8BFF").opacity(0.28), radius: 8)
+        .padding(.bottom, 12 + lift.overlap)
     }
 
     private func send() {
