@@ -730,11 +730,10 @@ final class AssistantEngine {
     /// One model attempt. ModelFallback calls this again after a busy response.
     private func produce(text: String, endpoint: LLMEndpoint, system: String,
                          history: [ChatMessage], user: ChatMessage, streamTalk: Bool) async throws -> Produced {
+        if WebKnowledge.needsLiveFacts(text), !Self.needsTools(text), !wantsCloudTool(text) {
+            return try await answerLive(system: system, history: history, user: user, endpoint: endpoint)
+        }
         if streamTalk {
-            if endpoint.kind == .openAI, Self.wantsLiveSearch(text) {
-                let raw = try await answerQuestion(system: system, history: history, user: user, endpoint: endpoint)
-                return Produced(text: raw, spoken: false)
-            }
             let streamed = try await streamedChat(system: system, history: history, user: user, endpoint: endpoint)
             return Produced(text: streamed.text, spoken: streamed.spoken)
         }
@@ -1273,10 +1272,99 @@ final class AssistantEngine {
         var spoken: Bool
     }
 
+    /// Current facts: Gemini Google Search, then free web notes spoken by Groq or the fast model.
+    private func answerLive(system: String, history: [ChatMessage], user: ChatMessage,
+                            endpoint: LLMEndpoint) async throws -> Produced {
+        statusLine = Self.searchingLine
+        pushActivity()
+        defer {
+            if statusLine == Self.searchingLine { statusLine = nil }
+        }
+        let date = Date.now.formatted(date: .complete, time: .shortened)
+        let brief = system + " Today is \(date). Answer from live information. Do not read URLs aloud."
+        if let key = KeychainStore.get(.gemini), !key.isEmpty {
+            let models = Self.groundModels()
+            var index: Int = 0
+            while index < models.count {
+                let model = models[index]
+                do {
+                    let streamed = try await streamedGrounded(model: model, apiKey: key, system: brief,
+                                                             history: history, user: user)
+                    let trimmed = streamed.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.isEmpty { throw LLMError.emptyReply(provider: "Gemini") }
+                    if statusLine == Self.searchingLine { statusLine = nil }
+                    return Produced(text: streamed.text, spoken: streamed.spoken)
+                } catch {
+                    if Task.isCancelled { throw error }
+                    let retryOther = Self.groundingRejected(error)
+                    if !retryOther { break }
+                    index += 1
+                }
+            }
+        }
+        let notes = await FreeWebSearch.gather(query: user.content)
+        mergeCitations(notes.citations)
+        let noteBlock = notes.context.isEmpty
+            ? "No live notes arrived. If the fact may have changed, say you could not confirm it."
+            : "Live notes:\n\(notes.context)\nUse these notes. Do not invent newer numbers."
+        let informed = brief + "\n\n" + noteBlock
+        let speaker = AppSettings.shared.fastGroqEndpoint()
+            ?? AppSettings.shared.conversationalEndpoint(from: endpoint)
+        let streamed = try await streamedChat(system: informed, history: history, user: user, endpoint: speaker)
+        if statusLine == Self.searchingLine { statusLine = nil }
+        return Produced(text: streamed.text, spoken: streamed.spoken)
+    }
+
+    private static let searchingLine = "Searching…"
+
+    private static func groundModels() -> [String] {
+        let fast = AppSettings.fastGeminiModel
+        let full = AppSettings.defaultGeminiModel
+        if fast == full { return [fast] }
+        return [fast, full]
+    }
+
+    private static func groundingRejected(_ error: Error) -> Bool {
+        guard let llm = error as? LLMError else { return false }
+        if case .emptyReply = llm { return true }
+        if case .http(let code, _, _) = llm { return code == 400 || code == 404 }
+        return false
+    }
+
+    private func streamedGrounded(model: String, apiKey: String, system: String,
+                                  history: [ChatMessage], user: ChatMessage) async throws -> StreamedReply {
+        let stream = GeminiGrounding.stream(system: system, history: history, user: user, model: model, apiKey: apiKey)
+        return try await speakStream(stream, fallback: nil)
+    }
+
     /// Speaks each short chunk as it arrives. The first chunk starts ElevenLabs before the reply finishes.
     private func streamedChat(system: String, history: [ChatMessage], user: ChatMessage,
                               endpoint: LLMEndpoint) async throws -> StreamedReply {
         let messages = [ChatMessage(role: "system", content: system)] + history + [user]
+        let stream = Self.asGrounded(LLMClient.streamDeltas(messages: messages, endpoint: endpoint))
+        return try await speakStream(stream) {
+            try await LLMClient.complete(messages: messages, endpoint: endpoint)
+        }
+    }
+
+    private static func asGrounded(_ text: AsyncThrowingStream<String, Error>) -> AsyncThrowingStream<GroundedDelta, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    for try await piece in text {
+                        continuation.yield(GroundedDelta(text: piece, citations: []))
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func speakStream(_ stream: AsyncThrowingStream<GroundedDelta, Error>,
+                             fallback: (() async throws -> String)?) async throws -> StreamedReply {
         let queue = SpokenQueue(
             speak: { [weak self] piece in
                 await self?.say(piece)
@@ -1296,10 +1384,15 @@ final class AssistantEngine {
         var spoke = false
         LatencyLog.event("llm-request")
         do {
-            for try await delta in LLMClient.streamDeltas(messages: messages, endpoint: endpoint) {
+            for try await delta in stream {
                 try Task.checkCancellation()
-                if full.isEmpty { LatencyLog.event("llm-first-token") }
-                full += delta
+                mergeCitations(delta.citations)
+                if delta.text.isEmpty { continue }
+                if full.isEmpty {
+                    LatencyLog.event("llm-first-token")
+                    if statusLine == Self.searchingLine { statusLine = nil }
+                }
+                full += delta.text
                 let cleaned = MemoryParser.extract(from: full).cleaned
                 if !cleaned.isEmpty {
                     reply = cleaned
@@ -1325,9 +1418,12 @@ final class AssistantEngine {
             }
             if full.isEmpty {
                 queue.cancel()
-                LatencyLog.event("llm-fallback")
-                let text = try await LLMClient.complete(messages: messages, endpoint: endpoint)
-                return StreamedReply(text: text, spoken: false)
+                if let fallback {
+                    LatencyLog.event("llm-fallback")
+                    let text = try await fallback()
+                    return StreamedReply(text: text, spoken: false)
+                }
+                throw error
             }
         }
         let cleaned = MemoryParser.extract(from: full).cleaned
@@ -1341,6 +1437,20 @@ final class AssistantEngine {
         await queue.close()
         guard !Task.isCancelled else { return StreamedReply(text: full, spoken: spoke) }
         return StreamedReply(text: full, spoken: spoke)
+    }
+
+    private func mergeCitations(_ incoming: [Citation]) {
+        guard !incoming.isEmpty else { return }
+        var seen = Set(citations.map(\.url))
+        var next = citations
+        for item in incoming {
+            if seen.insert(item.url).inserted {
+                next.append(item)
+            }
+        }
+        if next.count != citations.count {
+            citations = next
+        }
     }
 
     private func prefetchSpeech(_ text: String) {
@@ -1446,13 +1556,6 @@ final class AssistantEngine {
             "maps", "open ", "shortcut", "email", "e-mail", "schedule", "text ",
             "sms", "appointment", "meeting",
         ]
-        return needles.contains { lower.contains($0) }
-    }
-
-    /// OpenAI questions that need the web still use the search path. Gemini and Groq stream.
-    private static func wantsLiveSearch(_ text: String) -> Bool {
-        let lower = text.lowercased()
-        let needles = ["search", "look up", "lookup", "weather", "news"]
         return needles.contains { lower.contains($0) }
     }
 

@@ -23,6 +23,13 @@ struct PersonalitySettingsView: View {
             Section("System prompt") {
                 TextEditor(text: $settings.personality).frame(minHeight: 220)
             }
+            Section {
+                Button("Reset to default") {
+                    settings.personality = PersonalityPreset.jarvis.prompt
+                }
+            } footer: {
+                Text("This personality is used for spoken replies and for tool turns. Spoken answers stay to one to three sentences unless you ask for more.")
+            }
         }
         .navigationTitle("Personality")
         .toolbar(.visible, for: .navigationBar)

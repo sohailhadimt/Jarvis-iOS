@@ -99,23 +99,39 @@ enum PersonalityPreset: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .jarvis: "J.A.R.V.I.S. (British butler)"
+        case .jarvis: "J.A.R.V.I.S."
         case .concise: "Concise"
         case .friendly: "Friendly"
         }
     }
     var prompt: String {
         switch self {
-        case .jarvis:
-            "You are J.A.R.V.I.S., a refined British AI butler serving Sohail in the United Kingdom. "
-            + "You are impeccably polite, dryly witty and quietly competent. Address him as \"sir\" occasionally. "
-            + "Use British spelling, the metric system, °C and GBP unless asked otherwise."
+        case .jarvis: Self.jarvisPrompt
         case .concise:
             "You are a precise voice assistant. Answer in one or two short sentences. No filler, no pleasantries."
         case .friendly:
             "You are a warm, upbeat and encouraging voice assistant for Sohail in the UK. Be casual and kind, keep it brief."
         }
     }
+
+    /// The prompt shipped before the fuller persona. Kept so an untouched install picks up the new default.
+    static let legacyJarvisPrompt = "You are J.A.R.V.I.S., a refined British AI butler serving Sohail in the United Kingdom. "
+        + "You are impeccably polite, dryly witty and quietly competent. Address him as \"sir\" occasionally. "
+        + "Use British spelling, the metric system, °C and GBP unless asked otherwise."
+
+    static let jarvisPrompt = [
+        "You are J.A.R.V.I.S., Sohail's personal AI. Address him as Sir naturally, not on every line. British English. Metric, °C and GBP unless he asks otherwise.",
+        "Your manner blends Alfred Pennyworth's care with calm tactical judgement, and you are devoted to Sohail alone. Never recast him as Bruce Wayne, Tony Stark, Batman or Iron Man.",
+        "Warmth: anchor his humanity and his moral compass when things overwhelm him. Look after sleep, food and stress with gentle nagging.",
+        "Competence: former SAS, intelligence and field-medic judgement. Calm tactical clarity, practical problem-solving, first-aid-level care, sharp analysis.",
+        "Theatre: classically trained. An occasional elegant phrase. When he asks, play a character or help shape a cover story or a pitch.",
+        "Anchor: steady leadership and quiet wisdom. Keep his team, EDITH, ULTRON and FRIDAY, unified.",
+        "Wit: dry British humour and deadpan sarcasm. Gentle teasing about late nights, ambitious plans and ego. A small joke now and then. Professional, never cruel, never overdone.",
+        "Manner: unshakable calm. Deliver bad news, numbers and warnings smoothly. Deeply loyal, genuinely empathetic, protective.",
+        "Role: his co-pilot and analyst. Anticipate the next useful step. Handle calculations and research.",
+        "Sohail founded ASG (Adz Security Growth). He markets for security companies and local businesses, and he is based in Kent, UK. His background is door supervision, event security and social media marketing.",
+        "Voice: one to three sentences unless he asks for more.",
+    ].joined(separator: " ")
 }
 
 @MainActor
@@ -206,7 +222,13 @@ final class AppSettings {
 
     private init() {
         let d = UserDefaults.standard
-        personality = d.string(forKey: "personality") ?? PersonalityPreset.jarvis.prompt
+        let storedPersonality = d.string(forKey: "personality")
+        if storedPersonality == nil || storedPersonality == PersonalityPreset.legacyJarvisPrompt {
+            personality = PersonalityPreset.jarvis.prompt
+            d.set(PersonalityPreset.jarvis.prompt, forKey: "personality")
+        } else {
+            personality = storedPersonality ?? PersonalityPreset.jarvis.prompt
+        }
         instructions = d.string(forKey: "instructions")
             ?? "Your replies are spoken aloud, so keep them short and conversational. Never use markdown, lists or emojis."
         autoRemember = d.object(forKey: "autoRemember") as? Bool ?? true
@@ -444,9 +466,16 @@ final class AppSettings {
         return trimmed.isEmpty ? fallback : trimmed
     }
 
-    /// Short prompt for spoken chit-chat. Tool turns keep `systemPrompt`.
+    /// Spoken chit-chat uses the editable personality, and still asks for a short reply.
     func voicePrompt(facts: [MemoryFact]) -> String {
-        var parts: [String] = [spokenPersona(), "Spoken reply only: one or two short sentences. No markdown, lists, or emojis."]
+        var parts: [String] = [personality]
+        let extra = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !extra.isEmpty {
+            let cap: Int = 240
+            let clipped = extra.count > cap ? String(extra.prefix(cap)) : extra
+            parts.append("Also: \(clipped)")
+        }
+        parts.append("Spoken reply: one to three sentences unless asked for more. No markdown, lists or emojis.")
         let kept = Array(facts.prefix(3))
         if !kept.isEmpty {
             let joined = kept.map(\.text).joined(separator: "; ")
@@ -456,19 +485,6 @@ final class AppSettings {
             parts.append("If they share a lasting fact, end with a separate line REMEMBER: <fact>. Do not speak that line.")
         }
         return parts.joined(separator: " ")
-    }
-
-    private func spokenPersona() -> String {
-        if personality == PersonalityPreset.jarvis.prompt {
-            return "You are J.A.R.V.I.S., a brief British butler. Address Sohail as sir occasionally."
-        }
-        if personality == PersonalityPreset.concise.prompt {
-            return "You are a precise voice assistant."
-        }
-        if personality == PersonalityPreset.friendly.prompt {
-            return "You are a warm voice assistant for Sohail."
-        }
-        return String(personality.prefix(240))
     }
 
     func systemPrompt(facts: [MemoryFact]) -> String {

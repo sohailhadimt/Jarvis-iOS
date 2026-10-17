@@ -161,6 +161,7 @@ struct APIKeysSettingsView: View {
     @State private var groqKey = ""
     @State private var elevenKey = ""
     @State private var customKey = ""
+    @State private var braveKey = ""
     @State private var savedMessage: String?
 
     var body: some View {
@@ -217,6 +218,16 @@ struct APIKeysSettingsView: View {
             }
 
             Section {
+                SecureField("Brave Search API key", text: $braveKey)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                Link("api.search.brave.com", destination: URL(string: "https://api.search.brave.com")!)
+            } header: {
+                Text("Brave Search")
+            } footer: {
+                Text("Optional. News, weather, prices and sport use Gemini Google Search first. If that fails, JARVIS uses DuckDuckGo and Wikipedia with no key, and Brave when this key is saved.")
+            }
+
+            Section {
                 TextField("Base URL, e.g. https://example.com/v1", text: $settings.customBaseURL)
                     .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
                 SecureField("Bearer key (optional)", text: $customKey)
@@ -235,6 +246,7 @@ struct APIKeysSettingsView: View {
                     KeychainStore.set(groqKey, for: .groq)
                     KeychainStore.set(elevenKey, for: .elevenLabs)
                     KeychainStore.set(customKey, for: .customAgent)
+                    KeychainStore.set(braveKey, for: .brave)
                     savedMessage = "Saved securely in the Keychain."
                 }
                 if let savedMessage { Text(savedMessage).font(.footnote).foregroundStyle(.green) }
@@ -248,6 +260,7 @@ struct APIKeysSettingsView: View {
             groqKey = KeychainStore.get(.groq) ?? ""
             elevenKey = KeychainStore.get(.elevenLabs) ?? ""
             customKey = KeychainStore.get(.customAgent) ?? ""
+            braveKey = KeychainStore.get(.brave) ?? ""
         }
     }
 

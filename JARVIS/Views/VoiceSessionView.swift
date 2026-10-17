@@ -192,12 +192,17 @@ struct MessageList: View {
                         bubble(VoiceTurn(role: "assistant", text: engine.reply))
                             .id("stream")
                     }
+                    if !engine.citations.isEmpty {
+                        SourceLinks(citations: engine.citations)
+                            .id("sources")
+                    }
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
             }
             .onChange(of: engine.turns.count) { _, _ in scroll(proxy) }
             .onChange(of: engine.reply) { _, _ in scroll(proxy) }
+            .onChange(of: engine.citations.count) { _, _ in scroll(proxy) }
         }
     }
 
@@ -226,12 +231,41 @@ struct MessageList: View {
 
     private func scroll(_ proxy: ScrollViewProxy) {
         withAnimation(.easeOut(duration: 0.2)) {
-            if streaming {
+            if !engine.citations.isEmpty {
+                proxy.scrollTo("sources", anchor: .bottom)
+            } else if streaming {
                 proxy.scrollTo("stream", anchor: .bottom)
             } else if let id = engine.turns.last?.id {
                 proxy.scrollTo(id, anchor: .bottom)
             } else {
                 proxy.scrollTo("live", anchor: .bottom)
+            }
+        }
+    }
+}
+
+struct SourceLinks: View {
+    let citations: [Citation]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Sources")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            ForEach(citations) { citation in
+                sourceLink(citation)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func sourceLink(_ citation: Citation) -> some View {
+        let title = citation.title
+        let destination = URL(string: citation.url)
+        return Group {
+            if let destination {
+                Link(title, destination: destination)
+                    .font(.footnote)
             }
         }
     }
@@ -411,6 +445,9 @@ struct FullScreenVoiceView: View {
                         .font(.callout)
                         .foregroundStyle(.white.opacity(0.9))
                         .frame(maxWidth: .infinity, alignment: turn.role == "user" ? .trailing : .leading)
+                }
+                if !engine.citations.isEmpty {
+                    SourceLinks(citations: engine.citations)
                 }
             }
         }

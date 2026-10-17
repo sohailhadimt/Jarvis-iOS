@@ -31,7 +31,7 @@ enum LLMError: LocalizedError, Sendable {
             case "OpenAI":
                 "No OpenAI API key. Add one in Settings > API Keys & Provider, or save a free Gemini or Groq key and JARVIS will use that."
             case "OpenAI web search":
-                "Web search needs an OpenAI API key. Add one in Settings > API Keys & Provider. Gemini and Groq answer from their own models without live web search."
+                "Web search needs an OpenAI API key, or a free Gemini key. Gemini Google Search covers current questions. Add a key in Settings > API Keys & Provider."
             default:
                 "No \(name) API key. Add one in Settings > API Keys & Provider."
             }

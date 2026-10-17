@@ -33,7 +33,7 @@ struct IntegrationsSettingsView: View {
             } header: {
                 Text("Task agent routing")
             } footer: {
-                Text("Questions are answered by the AI Provider above. Gemini uses gemini-3.8-flash unless you change it. Groq uses llama-3.3-70b-versatile. OpenAI can also search the web with the search model in this section, and sources are shown under the reply. Actions use tools: contacts, calls, messages, calendar, reminders, music, maps, apps and Shortcuts. One matching contact is called immediately. Messages, deletes and agent tasks ask you to confirm first.")
+                Text("Questions are answered by the AI Provider above. Gemini uses gemini-3.8-flash unless you change it. Current facts use Gemini Google Search, then DuckDuckGo, Wikipedia, or Brave if that key is saved. Sources show under the reply. Groq uses llama-3.3-70b-versatile. Actions use tools: contacts, calls, messages, calendar, reminders, music, maps, apps and Shortcuts. One matching contact is called immediately. Messages, deletes and agent tasks ask you to confirm first.")
             }
 
             Section {
