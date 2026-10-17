@@ -106,7 +106,13 @@ final class AppSettings {
     static let defaultGeminiModel = "gemini-3.8-flash"
     static let retiredGeminiModel = "gemini-2.5-flash"
     static let defaultGroqModel = "llama-3.3-70b-versatile"
-    static let geminiModelSuggestions = ["gemini-3.8-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
+    /// Free models that are still served. gemini-2.0-flash and gemini-2.0-flash-lite shut down on 1 June 2026.
+    static let geminiModelSuggestions = [
+        "gemini-3.8-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "gemini-2.5-flash-lite",
+    ]
     static let groqModelSuggestions = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
 
     private static let openAIURL = URL(string: "https://api.openai.com/v1/chat/completions")!
@@ -187,7 +193,7 @@ final class AppSettings {
         }
         openAIModel = d.string(forKey: "openAIModel") ?? "gpt-4o-mini"
         let storedGemini = d.string(forKey: "geminiModel")
-        if storedGemini?.trimmingCharacters(in: .whitespacesAndNewlines) == Self.retiredGeminiModel {
+        if Self.isRetiredGemini(storedGemini) {
             geminiModel = Self.defaultGeminiModel
             // didSet does not run during init, so write the migrated model through explicitly.
             d.set(Self.defaultGeminiModel, forKey: "geminiModel")
@@ -282,6 +288,15 @@ final class AppSettings {
         accentHex = hex
     }
 
+    /// gemini-2.5-flash was replaced in-app. Every gemini-2.0 id was shut down by Google.
+    private static func isRetiredGemini(_ stored: String?) -> Bool {
+        guard let stored else { return false }
+        let name = stored.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if name == retiredGeminiModel { return true }
+        if name.hasPrefix("gemini-2.0") { return true }
+        return false
+    }
+
     /// Agents and tools ask Gemini directly. The main voice still falls back when that key is missing.
     func geminiEndpoint() throws -> LLMEndpoint {
         if let endpoint = try configuredEndpoint(for: .gemini, strict: true) {
@@ -296,6 +311,17 @@ final class AppSettings {
         SharedConfig.defaults.set(orbTintHex, forKey: SharedConfig.Key.orbTintHex)
         SharedConfig.defaults.set(orbTintAmount, forKey: SharedConfig.Key.orbTintAmount)
         WidgetCenter.shared.reloadTimelines(ofKind: SharedConfig.standByWidgetKind)
+    }
+
+    /// Nil when no Groq key is saved. Used only after Gemini is overloaded.
+    func groqEndpoint() -> LLMEndpoint? {
+        let found: LLMEndpoint?
+        do {
+            found = try configuredEndpoint(for: .groq, strict: false)
+        } catch {
+            found = nil
+        }
+        return found
     }
 
     /// The selected provider when its key is saved. If that key is missing, another saved provider is used.

@@ -37,15 +37,41 @@ enum LLMError: LocalizedError, Sendable {
             }
         case .badURL:
             "The custom agent endpoint URL is invalid."
-        case .http(let code, let body, provider: let provider):
-            if code < 0 {
-                "\(provider) reply could not be read: \(Self.clip(body))"
+        case .http(let code, _, provider: _):
+            if Self.busyCodes.contains(code) {
+                "JARVIS is busy. Try again in a moment."
+            } else if code == 401 || code == 403 {
+                "The API key was rejected. Check Settings > API Keys & Provider."
+            } else if code == 404 {
+                "That model is unavailable. Check Settings > API Keys & Provider."
+            } else if code < 0 {
+                "JARVIS could not reach the model."
             } else {
-                "\(provider) error \(code): \(Self.clip(body))\(Self.hint(code: code, provider: provider))"
+                "JARVIS could not answer just now."
             }
-        case .emptyReply(provider: let provider):
-            "\(provider) returned an empty reply. Check the model name in Settings > API Keys & Provider."
+        case .emptyReply(provider: _):
+            "JARVIS got an empty reply."
         }
+    }
+
+    /// 429 and 5xx mean the model is overloaded or briefly down. Callers retry, then switch models.
+    var isBusy: Bool {
+        guard case .http(let code, _, _) = self else { return false }
+        return Self.busyCodes.contains(code)
+    }
+
+    private static let busyCodes: Set<Int> = [429, 500, 502, 503, 504]
+
+    static func short(_ error: Error) -> String {
+        if let llm = error as? LLMError {
+            return llm.localizedDescription
+        }
+        let text = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.contains("{") || text.contains("[") || text.contains("\"error\"") {
+            return "JARVIS is busy. Try again in a moment."
+        }
+        if text.isEmpty { return "JARVIS could not answer just now." }
+        return String(text.prefix(120))
     }
 
     /// A 400/422 whose body says the tools payload was rejected. Callers retry once with no tools.
@@ -56,37 +82,91 @@ enum LLMError: LocalizedError, Sendable {
         let needles = ["tool", "function_call", "function calling", "tool_choice", "tool_use", "\"functions\""]
         return needles.contains { haystack.contains($0) }
     }
+}
 
-    static func clip(_ body: String) -> String {
-        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return "no details" }
-        if let data = trimmed.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let error = json["error"] as? [String: Any],
-               let message = error["message"] as? String, !message.isEmpty {
-                return String(message.prefix(240))
+/// Retries an overloaded model, then a free Gemini model, then Groq when that key exists.
+@MainActor
+enum ModelFallback {
+    static let busyLine = "JARVIS is busy, retrying…"
+    /// gemini-2.0-flash and gemini-2.0-flash-lite shut down on 1 June 2026.
+    static let alternateGeminiModels = [
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "gemini-2.5-flash-lite",
+    ]
+
+    static func run<T>(
+        primary: LLMEndpoint,
+        groq: LLMEndpoint?,
+        status: @escaping (String?) -> Void,
+        work: @escaping (LLMEndpoint) async throws -> T
+    ) async throws -> T {
+        let chain = endpoints(primary: primary, groq: groq)
+        var last: Error = LLMError.http(503, "", provider: primary.providerName)
+        var overloaded = false
+        var index = 0
+        while index < chain.count {
+            let endpoint = chain[index]
+            let tries: Int = index == 0 ? 4 : 1
+            var attempt = 0
+            var advance = true
+            while attempt < tries {
+                do {
+                    let value = try await work(endpoint)
+                    status(nil)
+                    return value
+                } catch {
+                    if Task.isCancelled { throw error }
+                    last = error
+                    guard let llm = error as? LLMError else { throw error }
+                    if llm.isBusy {
+                        overloaded = true
+                        let moreHere: Bool = attempt + 1 < tries
+                        if moreHere {
+                            status(busyLine)
+                            let shift: Int = attempt
+                            let delay: Int = 400 * (1 << shift)
+                            try await Task.sleep(for: .milliseconds(delay))
+                            attempt += 1
+                            continue
+                        }
+                        break
+                    }
+                    if case .http(let code, _, _) = llm, code == 404 {
+                        break
+                    }
+                    if case .http(let code, _, _) = llm, (code == 401 || code == 403), endpoint.kind == .gemini {
+                        if let groqIndex = chain.firstIndex(where: { $0.kind == .groq }), groqIndex > index {
+                            index = groqIndex
+                            advance = false
+                            break
+                        }
+                    }
+                    throw error
+                }
             }
-            if let message = json["message"] as? String, !message.isEmpty {
-                return String(message.prefix(240))
-            }
-            if let error = json["error"] as? String, !error.isEmpty {
-                return String(error.prefix(240))
+            if advance { index += 1 }
+            if overloaded, index < chain.count {
+                status(busyLine)
             }
         }
-        return String(trimmed.prefix(200))
+        status(nil)
+        throw last
     }
 
-    private static func hint(code: Int, provider: String) -> String {
-        switch code {
-        case 401, 403:
-            " Check the \(provider) API key in Settings > API Keys & Provider."
-        case 404:
-            " Check the \(provider) model name in Settings > API Keys & Provider."
-        case 429:
-            " \(provider) is rate-limiting this key. Wait, or switch AI Provider in Settings."
-        default:
-            ""
+    private static func endpoints(primary: LLMEndpoint, groq: LLMEndpoint?) -> [LLMEndpoint] {
+        var chain: [LLMEndpoint] = [primary]
+        if primary.kind == .gemini {
+            for model in alternateGeminiModels where model != primary.model {
+                let next = LLMEndpoint(url: primary.url, apiKey: primary.apiKey, model: model,
+                                       providerName: primary.providerName, kind: .gemini)
+                chain.append(next)
+            }
         }
+        if let groq, primary.kind != .groq {
+            chain.append(groq)
+        }
+        return chain
     }
 }
 

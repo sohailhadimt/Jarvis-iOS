@@ -232,7 +232,7 @@ struct MessageList: View {
     }
 }
 
-/// Default voice screen. Black field, sky orb, hamburger, sliders, and the ask capsule.
+/// Default voice screen. Black field, sky orb, and a compact cyan HUD under the orb.
 struct FullScreenVoiceView: View {
     @Environment(AssistantEngine.self) private var engine
     @Environment(AppSettings.self) private var settings
@@ -243,68 +243,9 @@ struct FullScreenVoiceView: View {
     @State private var voice = VoiceSession.shared
     @State private var draft = ""
 
-    private let chrome = Color(red: 28.0 / 255.0, green: 28.0 / 255.0, blue: 30.0 / 255.0)
-    private let arc = Color(red: 75.0 / 255.0, green: 168.0 / 255.0, blue: 238.0 / 255.0)
-
     var body: some View {
         GeometryReader { geo in
-            let diameter: CGFloat = geo.size.width * 0.53
-            let orbY: CGFloat = geo.size.height * 0.56
-            let midX: CGFloat = geo.size.width / 2.0
-            let captionY: CGFloat = orbY + diameter / 2.0 + 28.0
-            let topPad: CGFloat = geo.safeAreaInsets.top + 8.0
-            let bottomPad: CGFloat = max(geo.safeAreaInsets.bottom, 8.0) + 8.0
-            ZStack {
-                Color.black
-                SkyCloudOrbView(level: engine.level, state: engine.voiceState, closing: voice.exiting,
-                                tint: settings.orbTintColor, tintAmount: settings.orbTintAmount,
-                                crispEdge: true)
-                    .frame(width: diameter, height: diameter)
-                    .matchedGeometryEffect(id: "voice-orb", in: orbSpace)
-                    .position(x: midX, y: orbY)
-                    .onTapGesture { voice.showTranscript.toggle() }
-                if voice.captionsOn, !caption.isEmpty {
-                    Text(caption)
-                        .font(.system(size: 16, weight: .regular))
-                        .foregroundStyle(Color(white: 0.78))
-                        .multilineTextAlignment(.center)
-                        .lineLimit(2)
-                        .frame(maxWidth: 300)
-                        .position(x: midX, y: captionY)
-                }
-                VStack(spacing: 12) {
-                    topBar
-                    Spacer(minLength: 0)
-                        .allowsHitTesting(false)
-                    if voice.showTranscript {
-                        transcript
-                            .frame(maxHeight: 150)
-                    }
-                    if let status = engine.statusLine {
-                        Text(status)
-                            .font(.footnote.weight(.medium))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(chrome, in: Capsule())
-                    }
-                    if let error = engine.errorMessage, !error.isEmpty {
-                        Text(error)
-                            .font(.footnote)
-                            .foregroundStyle(.white.opacity(0.7))
-                            .multilineTextAlignment(.center)
-                            .lineLimit(2)
-                    }
-                    if engine.pendingSummary != nil {
-                        ApprovalCard()
-                    }
-                    AgentJobStrip()
-                    bottomBar
-                }
-                .padding(.top, topPad)
-                .padding(.bottom, bottomPad)
-                .padding(.horizontal, 14)
-            }
+            voiceScreen(geo: geo)
         }
         .ignoresSafeArea()
         .background(Color.black)
@@ -313,117 +254,140 @@ struct FullScreenVoiceView: View {
         }
     }
 
-    private var topBar: some View {
-        HStack {
-            glassButton(action: onMenu) { hamburger }
-                .accessibilityLabel("Menu")
-            Spacer()
-            glassButton(action: onSettings) { sliders }
-                .accessibilityLabel("Voice settings")
-        }
-    }
-
-    private var bottomBar: some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 8) {
-                Button(action: onMenu) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 20, weight: .medium))
-                        .foregroundStyle(.white)
-                        .frame(width: 32, height: 32)
+    /// Lets stay in this function. The geometry closure only calls it.
+    private func voiceScreen(geo: GeometryProxy) -> some View {
+        let width: CGFloat = geo.size.width
+        let height: CGFloat = geo.size.height
+        let widthCap: CGFloat = width * 0.62
+        let heightCap: CGFloat = height * 0.42
+        let diameter: CGFloat = min(widthCap, heightCap)
+        let ring: CGFloat = diameter + 28.0
+        let topPad: CGFloat = geo.safeAreaInsets.top + 12.0
+        let bottomInset: CGFloat = max(geo.safeAreaInsets.bottom, 8.0)
+        let bottomPad: CGFloat = bottomInset + 8.0
+        return ZStack {
+            Color.black
+            VStack(spacing: 14) {
+                Spacer(minLength: 0)
+                orbStack(diameter: diameter, ring: ring)
+                Text(engine.voiceState.label.uppercased())
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .tracking(2.4)
+                    .foregroundStyle(settings.accentColor)
+                if voice.captionsOn, !caption.isEmpty {
+                    Text(hudLine(caption))
+                        .font(.system(size: 15, weight: .regular, design: .monospaced))
+                        .foregroundStyle(Color(white: 0.78))
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .frame(maxWidth: 280)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("More")
-                TextField("", text: $draft, prompt: Text("Ask JARVIS…").foregroundStyle(Color(white: 0.55)))
-                    .font(.system(size: 17))
-                    .foregroundStyle(.white)
-                    .submitLabel(.send)
-                    .onSubmit(sendDraft)
-                Button(action: startVoice) {
-                    voiceArc
-                        .frame(width: 20, height: 20)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Voice")
+                controlCluster
+                askBar
+                    .frame(maxWidth: 280)
+                detailStack
+                Spacer(minLength: 0)
             }
-            .padding(.leading, 12)
-            .padding(.trailing, 14)
-            .frame(height: 60)
-            .background(chrome, in: Capsule())
-
-            solidButton(fill: chrome, foreground: .white, system: "mic.slash", action: mute)
-                .accessibilityLabel("Mute")
-            solidButton(fill: .white, foreground: .black, system: "xmark", action: end)
-                .accessibilityLabel("End")
+            .padding(.top, topPad)
+            .padding(.bottom, bottomPad)
+            .padding(.horizontal, 24)
         }
     }
 
-    private var hamburger: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Capsule().fill(.white).frame(width: 16, height: 1.6)
-            Capsule().fill(.white).frame(width: 10, height: 1.6)
-        }
-    }
-
-    private var sliders: some View {
-        VStack(spacing: 6) {
-            sliderLine(knob: 0.72)
-            sliderLine(knob: 0.30)
-        }
-        .frame(width: 18)
-    }
-
-    private func sliderLine(knob: CGFloat) -> some View {
-        GeometryReader { geo in
-            let midX: CGFloat = geo.size.width / 2.0
-            let midY: CGFloat = geo.size.height / 2.0
-            let knobX: CGFloat = geo.size.width * knob
-            Capsule()
-                .fill(.white)
-                .frame(height: 1.5)
-                .position(x: midX, y: midY)
-            Circle()
-                .fill(.white)
-                .frame(width: 5.5, height: 5.5)
-                .position(x: knobX, y: midY)
-        }
-        .frame(height: 6)
-    }
-
-    private var voiceArc: some View {
+    private func orbStack(diameter: CGFloat, ring: CGFloat) -> some View {
         ZStack {
-            Circle()
-                .trim(from: 0.08, to: 0.42)
-                .stroke(arc, style: StrokeStyle(lineWidth: 2, lineCap: .round))
-            Circle()
-                .trim(from: 0.58, to: 0.92)
-                .stroke(arc, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+            ReactorHUD(diameter: ring, accent: settings.accentColor)
+            SkyCloudOrbView(level: engine.level, state: engine.voiceState, closing: voice.exiting,
+                            tint: settings.orbTintColor, tintAmount: settings.orbTintAmount,
+                            crispEdge: true)
+                .frame(width: diameter, height: diameter)
+                .matchedGeometryEffect(id: "voice-orb", in: orbSpace)
+                .onTapGesture { voice.showTranscript.toggle() }
         }
-        .rotationEffect(.degrees(-18))
+        .frame(width: ring, height: ring)
     }
 
-    private func glassButton<Label: View>(action: @escaping () -> Void, @ViewBuilder label: () -> Label) -> some View {
-        Button(action: action) {
-            label()
-                .frame(width: 56, height: 56)
-                .background {
-                    Circle().fill(.ultraThinMaterial)
-                    Circle().fill(chrome.opacity(0.78))
-                }
-                .overlay(Circle().stroke(Color.white.opacity(0.08), lineWidth: 0.5))
+    private var controlCluster: some View {
+        HStack(spacing: 12) {
+            hudButton(system: "line.3.horizontal", label: "Menu", action: onMenu)
+            hudButton(system: "slider.horizontal.3", label: "Voice settings", action: onSettings)
+            hudButton(system: engine.microphoneMuted ? "mic.slash" : "mic", label: "Mute", action: mute)
+            hudButton(system: "xmark", label: "End", action: end)
         }
-        .buttonStyle(.plain)
     }
 
-    private func solidButton(fill: Color, foreground: Color, system: String, action: @escaping () -> Void) -> some View {
+    private func hudButton(system: String, label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: system)
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(foreground)
-                .frame(width: 60, height: 60)
-                .background(fill, in: Circle())
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(settings.accentColor)
+                .frame(width: 48, height: 48)
+                .background(Circle().fill(Color.black))
+                .overlay(Circle().stroke(settings.accentColor.opacity(0.75), lineWidth: 1))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
+
+    private var askBar: some View {
+        HStack(spacing: 8) {
+            TextField("", text: $draft, prompt: Text("Ask JARVIS…").foregroundStyle(settings.accentColor.opacity(0.55)))
+                .font(.system(size: 15, weight: .regular, design: .monospaced))
+                .foregroundStyle(.white)
+                .submitLabel(.send)
+                .onSubmit(sendDraft)
+            Button(action: startVoice) {
+                Image(systemName: "waveform")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(settings.accentColor)
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Voice")
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 8)
+        .frame(height: 44)
+        .background(Color.black, in: Capsule())
+        .overlay(Capsule().stroke(settings.accentColor.opacity(0.55), lineWidth: 1))
+    }
+
+    private var detailStack: some View {
+        VStack(spacing: 10) {
+            if let status = engine.statusLine, !status.isEmpty {
+                hudText(status)
+            }
+            if let error = engine.errorMessage, !error.isEmpty {
+                hudText(error)
+            }
+            if voice.showTranscript {
+                transcript
+                    .frame(maxWidth: 320, maxHeight: 120)
+            }
+            if engine.pendingSummary != nil {
+                ApprovalCard()
+                    .frame(maxWidth: 320)
+            }
+            AgentJobStrip()
+                .frame(maxWidth: 320)
+        }
+    }
+
+    private func hudText(_ raw: String) -> some View {
+        Text(hudLine(raw))
+            .font(.system(size: 12, weight: .medium, design: .monospaced))
+            .foregroundStyle(settings.accentColor.opacity(0.9))
+            .multilineTextAlignment(.center)
+            .lineLimit(2)
+            .frame(maxWidth: 280)
+    }
+
+    private func hudLine(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.contains("{") || trimmed.contains("[") || trimmed.contains("\"error\"") {
+            return "JARVIS is busy, retrying…"
+        }
+        return String(trimmed.prefix(80))
     }
 
     private var caption: String {

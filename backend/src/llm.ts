@@ -132,12 +132,16 @@ async function callProvider(
     const text = await response.text();
     const rateLimited =
       response.status === 429 ||
-      (response.status >= 400 && /RESOURCE_EXHAUSTED|rate_limit_exceeded|rate limit/i.test(text));
+      response.status === 500 ||
+      response.status === 502 ||
+      response.status === 503 ||
+      response.status === 504 ||
+      (response.status >= 400 && /RESOURCE_EXHAUSTED|rate_limit_exceeded|rate limit|overloaded|UNAVAILABLE/i.test(text));
     if (rateLimited) {
       return {
         ok: false,
         code: "rate_limited",
-        message: `${provider} rate limited (HTTP ${response.status}).`,
+        message: `${provider} is busy (HTTP ${response.status}).`,
         status: response.status,
       };
     }
@@ -145,7 +149,7 @@ async function callProvider(
       return {
         ok: false,
         code: "upstream",
-        message: `${provider} error HTTP ${response.status}: ${text.slice(0, 400)}`,
+        message: `${provider} could not answer (HTTP ${response.status}).`,
         status: response.status,
       };
     }

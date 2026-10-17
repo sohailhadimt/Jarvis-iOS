@@ -266,10 +266,18 @@ final class AgentStore {
                 ChatMessage(role: "system", content: system),
                 ChatMessage(role: "user", content: prompt),
             ]
-            let reply = try await LLMClient.complete(messages: messages, endpoint: endpoint)
+            let reply = try await ModelFallback.run(
+                primary: endpoint,
+                groq: AppSettings.shared.groqEndpoint(),
+                status: { line in AssistantEngine.shared.noteStatus(line) },
+                work: { endpoint in
+                    try await LLMClient.complete(messages: messages, endpoint: endpoint)
+                }
+            )
             return reply.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
-            return error.localizedDescription
+            AssistantEngine.shared.noteStatus(nil)
+            return LLMError.short(error)
         }
     }
 

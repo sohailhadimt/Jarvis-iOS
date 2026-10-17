@@ -14,6 +14,7 @@ struct SkyCloudOrbView: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var meter = LevelSmooth()
+    @State private var clockOrigin = Date()
     @State private var closeScale: CGFloat = 1
     @State private var closeOpacity: Double = 1
 
@@ -37,7 +38,9 @@ struct SkyCloudOrbView: View {
     private func orbBody(date: Date) -> some View {
         let crisp: Bool = crispEdge ?? (colorScheme != .light)
         let feather: Float = crisp ? 0.0 : 0.1
-        let t: Double = date.timeIntervalSinceReferenceDate
+        // Seconds since this view appeared. A raw reference-date does not fit in
+        // the shader's 32-bit clock, so sin/cos freeze and the disc looks still.
+        let t: Double = max(0.0, date.timeIntervalSince(clockOrigin))
         let speaking: Bool = state == .aiSpeaking
         let clamped: Double = min(1.0, max(0.0, level))
         let target: Double = speaking ? clamped : 0.0
@@ -92,17 +95,44 @@ private struct SkyCloudDisc: View {
     /// Matches `skyClouds(position, color, time, size, tint, tintAmount, feather)`.
     /// SwiftUI supplies position and color; the rest are explicit Float arguments.
     private func painted(width: Float, height: Float) -> some View {
-        Rectangle()
-            .fill(Color(red: 0.0, green: 0.35, blue: 0.9))
-            .colorEffect(
-                ShaderLibrary.default.skyClouds(
-                    .float(time),
-                    .float2(width, height),
-                    .float3(tint.x, tint.y, tint.z),
-                    .float(tintAmount),
-                    .float(feather)
-                )
+        let side: CGFloat = CGFloat(min(width, height))
+        return ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.0, green: 0.22, blue: 0.72),
+                    Color(red: 0.15, green: 0.55, blue: 0.95),
+                ],
+                startPoint: .bottom,
+                endPoint: .top
             )
+            fallbackCloud(side: side, phase: 0.2, widthScale: 0.72, heightScale: 0.40)
+            fallbackCloud(side: side, phase: 2.4, widthScale: 0.5, heightScale: 0.28)
+            fallbackCloud(side: side, phase: 4.1, widthScale: 0.34, heightScale: 0.22)
+        }
+        .colorEffect(
+            ShaderLibrary.default.skyClouds(
+                .float(time),
+                .float2(width, height),
+                .float3(tint.x, tint.y, tint.z),
+                .float(tintAmount),
+                .float(feather)
+            )
+        )
+    }
+
+    /// Shown only if the stitchable shader does not replace the view.
+    private func fallbackCloud(side: CGFloat, phase: Double, widthScale: CGFloat, heightScale: CGFloat) -> some View {
+        let seconds: Double = Double(time)
+        let angle: Double = seconds * 0.35 + phase
+        let x: CGFloat = CGFloat(sin(angle)) * side * 0.14
+        let y: CGFloat = CGFloat(cos(angle * 0.8)) * side * 0.1
+        let blobW: CGFloat = side * widthScale
+        let blobH: CGFloat = side * heightScale
+        return Ellipse()
+            .fill(Color.white.opacity(0.88))
+            .frame(width: blobW, height: blobH)
+            .blur(radius: 10)
+            .offset(x: x, y: y)
     }
 }
 

@@ -74,12 +74,14 @@ float2 rotate2(float2 p, float angle) {
 
     float broad = fbm(p * 2.15);
     float tight = fbm(p2 * 3.35);
-    float clouds = broad * 0.58 + tight * 0.42;
+    float field = broad * 0.55 + tight * 0.45;
+    // Stretch the middle of the noise so white masses and blue gaps are obvious.
+    float clouds = smoothstep(0.36, 0.58, field);
 
     float2 holeOrbit = float2(cos(t * 0.23), sin(t * 0.19)) * 0.5;
     float holes = fbm(rotate2(centered, t * 0.09) * 1.55 + holeOrbit);
-    float shaped = clouds * 0.82 - smoothstep(0.46, 0.72, holes) * 0.28;
-    shaped += smoothstep(0.15, 0.95, uv.y) * 0.08;
+    float shaped = saturate(clouds - smoothstep(0.55, 0.74, holes) * 0.9);
+    shaped += smoothstep(0.15, 0.95, uv.y) * 0.05;
 
     float edge = smoothstep(0.34, 0.50, shaped) * (1.0 - smoothstep(0.50, 0.72, shaped));
     float2 detailOrbit = float2(cos(t * 0.31), sin(t * 0.27)) * 0.25;
@@ -97,7 +99,7 @@ float2 rotate2(float2 p, float angle) {
     skyBlue = mix(skyBlue, chosen, amount * 0.72);
 
     float3 sky = mix(deepBlue, skyBlue, smoothstep(0.0, 1.0, uv.y));
-    float cover = smoothstep(0.36, 0.74, shaped);
+    float cover = smoothstep(0.12, 0.55, shaped);
     float3 rgb = mix(sky, cloudWhite, cover);
     float hottest = smoothstep(0.78, 0.98, shaped);
     if (amount < 0.05) {

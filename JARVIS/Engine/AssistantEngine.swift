@@ -651,9 +651,64 @@ final class AssistantEngine {
         }
     }
 
+    func noteStatus(_ line: String?) {
+        applyBusyStatus(line)
+    }
+
+    private func applyBusyStatus(_ line: String?) {
+        if let line {
+            statusLine = line
+            errorMessage = nil
+        } else if statusLine == ModelFallback.busyLine {
+            statusLine = nil
+        }
+        pushActivity()
+    }
+
+    private struct Produced: Sendable {
+        var text: String
+        var spoken: Bool
+    }
+
+    /// One model attempt. ModelFallback calls this again after a busy response.
+    private func produce(text: String, endpoint: LLMEndpoint, system: String,
+                         history: [ChatMessage], user: ChatMessage) async throws -> Produced {
+        let settings = AppSettings.shared
+        let cloudTools = JarvisCloud.isConfigured && wantsCloudTool(text)
+        switch settings.routing {
+        case .chatOnly:
+            if cloudTools {
+                let raw = try await runAgent(system: system, history: history, user: user, endpoint: endpoint,
+                                             includeWebSearch: false)
+                return Produced(text: raw, spoken: false)
+            }
+            let streamed = try await streamedChat(system: system, history: history, user: user, endpoint: endpoint)
+            return Produced(text: streamed.text, spoken: streamed.spoken)
+        case .auto:
+            let raw = try await runAgent(system: system, history: history, user: user, endpoint: endpoint,
+                                         includeWebSearch: KeychainStore.get(.openAI) != nil)
+            return Produced(text: raw, spoken: false)
+        case .split:
+            let classified = try await classify(text, endpoint: endpoint)
+            if cloudTools || classified != .question {
+                let raw = try await runAgent(system: system, history: history, user: user, endpoint: endpoint,
+                                             includeWebSearch: false)
+                return Produced(text: raw, spoken: false)
+            }
+            if endpoint.kind == .openAI {
+                let raw = try await answerQuestion(system: system, history: history, user: user, endpoint: endpoint)
+                return Produced(text: raw, spoken: false)
+            }
+            let streamed = try await streamedChat(system: system, history: history, user: user, endpoint: endpoint)
+            return Produced(text: streamed.text, spoken: streamed.spoken)
+        }
+    }
+
     private func respond(to text: String) async {
         phase = .thinking
         statusLine = nil
+        errorMessage = nil
+        reply = ""
         pushActivity()
 
         // Approval is a card. Spoken words do not approve or dismiss it.
@@ -698,35 +753,17 @@ final class AssistantEngine {
             let system = settings.systemPrompt(facts: JarvisStore.allFacts())
             let prior = recordedUser ? Array(conversation.dropLast()) : conversation
             let history = Array(prior.suffix(16))
-            let raw: String
-            var alreadySpoken = false
-            let cloudTools = JarvisCloud.isConfigured && wantsCloudTool(text)
-            switch settings.routing {
-            case .chatOnly:
-                if cloudTools {
-                    raw = try await runAgent(system: system, history: history, user: userMessage, endpoint: endpoint,
-                                             includeWebSearch: false)
-                } else {
-                    let streamed = try await streamedChat(system: system, history: history, user: userMessage, endpoint: endpoint)
-                    raw = streamed.text
-                    alreadySpoken = streamed.spoken
+            let produced = try await ModelFallback.run(
+                primary: endpoint,
+                groq: settings.groqEndpoint(),
+                status: { line in self.applyBusyStatus(line) },
+                work: { endpoint in
+                    try await self.produce(text: text, endpoint: endpoint, system: system,
+                                           history: history, user: userMessage)
                 }
-            case .auto:
-                raw = try await runAgent(system: system, history: history, user: userMessage, endpoint: endpoint,
-                                         includeWebSearch: KeychainStore.get(.openAI) != nil)
-            case .split:
-                let classified = try await classify(text, endpoint: endpoint)
-                if cloudTools || classified != .question {
-                    raw = try await runAgent(system: system, history: history, user: userMessage, endpoint: endpoint,
-                                             includeWebSearch: false)
-                } else if endpoint.kind == .openAI {
-                    raw = try await answerQuestion(system: system, history: history, user: userMessage, endpoint: endpoint)
-                } else {
-                    let streamed = try await streamedChat(system: system, history: history, user: userMessage, endpoint: endpoint)
-                    raw = streamed.text
-                    alreadySpoken = streamed.spoken
-                }
-            }
+            )
+            let raw = produced.text
+            let alreadySpoken = produced.spoken
             guard !Task.isCancelled else { return }
             if pendingAction != nil {
                 phase = .idle
@@ -748,8 +785,9 @@ final class AssistantEngine {
             }
         } catch {
             if Task.isCancelled { return }
-            errorMessage = error.localizedDescription
-            reply = "⚠︎ \(error.localizedDescription)"
+            let line = LLMError.short(error)
+            errorMessage = line
+            reply = "⚠︎ \(line)"
             if let llmError = error as? LLMError, case .missingKey = llmError {
                 isContinuous = false
             }
@@ -1079,6 +1117,9 @@ final class AssistantEngine {
         } catch {
             speakTask?.cancel()
             if Task.isCancelled { throw error }
+            if let llm = error as? LLMError, llm.isBusy, full.isEmpty {
+                throw error
+            }
             if full.isEmpty {
                 let text = try await LLMClient.complete(messages: messages, endpoint: endpoint)
                 return StreamedReply(text: text, spoken: false)

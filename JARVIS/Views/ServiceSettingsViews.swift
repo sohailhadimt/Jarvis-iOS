@@ -112,7 +112,7 @@ struct AIProviderSection: View {
     private var help: String {
         switch settings.provider {
         case .gemini:
-            "Gemini is the default provider. Free key. Default model gemini-3.8-flash. JARVIS calls Google's OpenAI-compatible chat endpoint with Authorization: Bearer. If this key is missing, JARVIS uses another saved key."
+            "Gemini is the default provider. Free key. Default model gemini-3.8-flash. If Gemini is overloaded, JARVIS retries, then tries another free Gemini model, then Groq when that key is saved. If this key is missing, JARVIS uses another saved key."
         case .groq:
             "Free key. Default model llama-3.3-70b-versatile. A saved Groq key also transcribes speech with Whisper. Without a Groq key, JARVIS uses on-device Apple Speech. If this key is missing, JARVIS uses another saved key."
         case .openAI:
@@ -183,7 +183,7 @@ struct APIKeysSettingsView: View {
             } header: {
                 Text("Gemini")
             } footer: {
-                Text("Free key. Default model: gemini-3.8-flash. JARVIS calls Google's OpenAI-compatible chat endpoint with Authorization: Bearer.")
+                Text("Free key. Default model: gemini-3.8-flash. If Gemini is overloaded, JARVIS retries, then tries another free Gemini model, then Groq when that key is saved.")
             }
 
             Section {
