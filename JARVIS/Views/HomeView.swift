@@ -327,10 +327,21 @@ struct ConfirmBar: View {
 struct ReplyDetailView: View {
     @Environment(AssistantEngine.self) private var engine
     @Environment(AppSettings.self) private var settings
+    @State private var reports: [ResearchCard] = []
+    @State private var openReport: UUID?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
+                if !reports.isEmpty {
+                    Text("Research")
+                        .font(.caption.weight(.semibold))
+                        .tracking(1.2)
+                        .foregroundStyle(settings.primaryColor)
+                    ForEach(reports) { report in
+                        researchRow(report)
+                    }
+                }
                 if !engine.turns.isEmpty {
                     ForEach(engine.turns) { turn in
                         labeled(turn.role == "user" ? "You" : "JARVIS", turn.text)
@@ -347,22 +358,79 @@ struct ReplyDetailView: View {
                     labeled("JARVIS", engine.reply.isEmpty ? "Nothing yet." : engine.reply)
                 }
                 if !engine.citations.isEmpty {
-                    Text("Sources")
-                        .font(.caption.weight(.semibold))
-                        .tracking(1.2)
-                        .foregroundStyle(settings.primaryColor)
-                    ForEach(engine.citations) { citation in
-                        if let url = URL(string: citation.url) {
-                            Link(citation.title, destination: url)
-                                .font(.footnote)
-                        }
-                    }
+                    sourceBlock(engine.citations)
                 }
             }
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Color.black)
+        .navigationTitle("Conversation")
+        .onAppear { reports = ResearchStore.cards() }
+        .onChange(of: engine.researchTick) { _, _ in
+            reports = ResearchStore.cards()
+        }
+    }
+
+    private func researchRow(_ report: ResearchCard) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                if openReport == report.id {
+                    openReport = nil
+                } else {
+                    openReport = report.id
+                }
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(report.title)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.leading)
+                    Text(report.createdAt.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.55))
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            if openReport == report.id {
+                Text(report.body)
+                    .font(.body)
+                    .foregroundStyle(.white)
+                    .textSelection(.enabled)
+                sourceBlock(report.sources)
+                Button("Delete report", role: .destructive) {
+                    ResearchStore.delete(id: report.id)
+                    if openReport == report.id { openReport = nil }
+                    reports = ResearchStore.cards()
+                }
+                .font(.footnote)
+            }
+        }
+    }
+
+    private func sourceBlock(_ citations: [Citation]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if !citations.isEmpty {
+                Text("Sources")
+                    .font(.caption.weight(.semibold))
+                    .tracking(1.2)
+                    .foregroundStyle(settings.primaryColor)
+                ForEach(citations) { citation in
+                    sourceLink(citation)
+                }
+            }
+        }
+    }
+
+    private func sourceLink(_ citation: Citation) -> some View {
+        let destination = URL(string: citation.url)
+        return Group {
+            if let destination {
+                Link(citation.title, destination: destination)
+                    .font(.footnote)
+            }
+        }
     }
 
     private func labeled(_ title: String, _ text: String) -> some View {

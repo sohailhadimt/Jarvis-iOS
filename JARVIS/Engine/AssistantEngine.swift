@@ -43,6 +43,8 @@ final class AssistantEngine {
     /// True for a turn that asks about cloud work while a cloud task is planning or running.
     private(set) var cloudExecuting = false
     private(set) var turns: [VoiceTurn] = []
+    /// Bumped when a research report is saved, so Conversation can reload it.
+    private(set) var researchTick: Int = 0
     private(set) var microphoneMuted = false
     /// True from the moment a session is requested until the microphone is actually listening.
     private(set) var voiceConnecting = false
@@ -910,6 +912,10 @@ final class AssistantEngine {
             await deliverBriefing(userText: text)
             return
         }
+        if DeepResearch.wants(text) {
+            await deliverResearch(userText: text)
+            return
+        }
 
         let settings = AppSettings.shared
         let userMessage = ChatMessage(role: "user", content: text)
@@ -1220,6 +1226,25 @@ final class AssistantEngine {
         let count = Int((Double(words.count) * fraction).rounded(.down))
         guard count > 0 else { return "" }
         return words.prefix(count).joined(separator: " ")
+    }
+
+    /// A multi-step search. The full report is saved under Conversation. Only the summary is spoken.
+    private func deliverResearch(userText: String) async {
+        let persona = AppSettings.shared.personality
+        let outcome = await DeepResearch.run(question: userText, persona: persona) { step in
+            self.statusLine = step
+            self.pushActivity()
+        }
+        guard !Task.isCancelled else { return }
+        citations = outcome.citations
+        statusLine = nil
+        recordAssistant(outcome.report)
+        saveForWidget(transcript: userText, reply: outcome.spoken)
+        ResearchStore.save(title: outcome.title, question: userText, body: outcome.report, sources: outcome.citations)
+        researchTick += 1
+        await say(outcome.spoken)
+        guard !Task.isCancelled else { return }
+        afterTurn()
     }
 
     /// Morning and "what's been happening" are read from the stored briefing, then spoken as facts then recommendations.
