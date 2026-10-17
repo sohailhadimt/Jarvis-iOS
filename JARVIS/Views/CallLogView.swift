@@ -129,10 +129,16 @@ struct CallBriefBar: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 HStack(spacing: 10) {
-                    Button("Decline") { engine.declinePendingCall() }
-                        .buttonStyle(.bordered)
-                    Button("Approve") { engine.approvePendingCall() }
-                        .buttonStyle(.borderedProminent)
+                    Button("Decline") {
+                        JarvisHaptics.tap()
+                        engine.declinePendingCall()
+                    }
+                    .buttonStyle(.bordered)
+                    Button("Approve") {
+                        JarvisHaptics.tap()
+                        engine.approvePendingCall()
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
             }
             .padding(14)

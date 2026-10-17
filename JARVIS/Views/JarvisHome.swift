@@ -138,6 +138,7 @@ struct JarvisShell: View {
                     }
                     .simultaneousGesture(drawer.drag(width: drawerW))
                 }
+                .ignoresSafeArea(.keyboard)
             }
             .navigationDestination(item: $route) { destination($0) }
             .toolbar(.hidden, for: .navigationBar)

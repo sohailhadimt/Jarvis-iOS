@@ -47,7 +47,6 @@ struct RootView: View {
         }
         .background(Color(hex: "#05080F").ignoresSafeArea())
         .preferredColorScheme(.dark)
-        .ignoresSafeArea(.keyboard)
         .onAppear {
             UIDevice.current.isBatteryMonitoringEnabled = true
             refreshBattery()
