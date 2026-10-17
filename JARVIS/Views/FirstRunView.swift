@@ -13,6 +13,7 @@ struct FirstRunView: View {
     @State private var hour = 7
     @State private var minute = 30
     @State private var micReady = false
+    @FocusState private var tokenFocused: Bool
 
     var body: some View {
         ZStack {
@@ -98,19 +99,25 @@ struct FirstRunView: View {
     }
 
     private var pageCloud: some View {
-        VStack(spacing: 16) {
-            copy(
-                title: "The worker token, if you have it.",
-                body: "Calling, the team, and the cloud briefing need the app token from the worker. It stays in the Keychain. Leave this blank and I'll still talk on the phone."
-            )
-            SecureField("App token", text: $token)
-                .textContentType(.password)
-                .font(.system(size: 16))
-                .padding(.horizontal, 16)
-                .frame(height: 48)
-                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .padding(.horizontal, 24)
+        ScrollView {
+            VStack(spacing: 16) {
+                copy(
+                    title: "The worker token, if you have it.",
+                    body: "Calling, the team, and the cloud briefing need the app token from the worker. It stays in the Keychain. Leave this blank and I'll still talk on the phone."
+                )
+                SecureField("App token", text: $token)
+                    .textContentType(.password)
+                    .focused($tokenFocused)
+                    .submitLabel(.done)
+                    .onSubmit { tokenFocused = false }
+                    .font(.system(size: 16))
+                    .padding(.horizontal, 16)
+                    .frame(height: 48)
+                    .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .padding(.horizontal, 24)
+            }
         }
+        .scrollDismissesKeyboard(.interactively)
     }
 
     private func copy(title: String, body: String) -> some View {
@@ -151,6 +158,7 @@ struct FirstRunView: View {
     }
 
     private func finish() {
+        tokenFocused = false
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty { KeychainStore.set(trimmed, for: .jarvisCloud) }
         settings.privacyLock = lock && PrivacyGate.canUnlock()
