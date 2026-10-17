@@ -303,6 +303,46 @@ CREATE TABLE IF NOT EXISTS owner_alerts (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_alerts_source ON owner_alerts (source_id);
 
+-- One temporary instruction for inbound calls, set by voice. Expired rows stay inactive.
+CREATE TABLE IF NOT EXISTS call_away (
+  id TEXT PRIMARY KEY,
+  instruction TEXT NOT NULL,
+  expires_at TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+
+-- A business call that must come back to Sohail before JARVIS confirms.
+CREATE TABLE IF NOT EXISTS call_delegations (
+  id TEXT PRIMARY KEY,
+  call_id TEXT NOT NULL,
+  confirm_call_id TEXT,
+  contact_name TEXT NOT NULL,
+  to_number TEXT NOT NULL,
+  goal TEXT NOT NULL,
+  status TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  decision TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_call_delegations_call ON call_delegations (call_id);
+
+-- Latest phone context. Coordinates are not stored.
+CREATE TABLE IF NOT EXISTS owner_presence (
+  id TEXT PRIMARY KEY,
+  activity TEXT NOT NULL DEFAULT 'unknown',
+  busy INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS call_recordings (
+  call_id TEXT PRIMARY KEY,
+  recording_sid TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS call_permissions (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,

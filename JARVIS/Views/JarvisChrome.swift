@@ -76,6 +76,7 @@ struct HomeScreen: View {
                     .font(.system(size: 26, weight: .regular))
                     .foregroundStyle(.white)
             }
+            RingStateLabel()
             Text("What can I do for you?")
                 .font(.system(size: 17, weight: .regular))
                 .foregroundStyle(Color(hex: "#A39BB4"))
@@ -124,6 +125,22 @@ struct HomeScreen: View {
 }
 
 /// Weather and the next event. Isolated so a refresh does not rebuild the ring.
+private struct RingStateLabel: View {
+    @Environment(AssistantEngine.self) private var engine
+
+    var body: some View {
+        if let label = engine.ringLabel {
+            Text(label)
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(1.6)
+                .foregroundStyle(engine.interceptor ? Color(hex: "#FF5A2A") : Color(hex: "#4A7FD0"))
+                .padding(.top, 2)
+                .transition(.opacity)
+                .animation(.easeInOut(duration: 0.25), value: label)
+        }
+    }
+}
+
 private struct GlanceLine: View {
     @Environment(AppSettings.self) private var settings
     @State private var glance = DayGlance.shared
@@ -199,6 +216,11 @@ private struct SessionExtras: View {
     @State private var agents = AgentStore.shared
 
     var body: some View {
+        if !engine.deskCalls.isEmpty {
+            CallTaskStrip()
+                .padding(.horizontal, 20)
+                .padding(.bottom, 8)
+        }
         if engine.pendingCallBrief != nil {
             CallBriefBar()
                 .padding(.horizontal, 20)

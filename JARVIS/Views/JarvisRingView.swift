@@ -38,6 +38,7 @@ final class JarvisRingCanvas: UIView {
     private var wantsRunning = true
     private var laidOutSize = CGSize.zero
     private var laidOutScale: CGFloat = 0
+    private var paintedInterceptor = false
 
     private let bloomWide = CAShapeLayer()
     private let bloomTight = CAShapeLayer()
@@ -205,8 +206,28 @@ final class JarvisRingCanvas: UIView {
         let pulse = motion.sample(level: VoiceMeter.shared.level, phase: VoiceMeter.shared.phase, now: link.timestamp)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        paint(interceptor: VoiceMeter.shared.interceptor)
         apply(pulse)
         CATransaction.commit()
+    }
+
+    private func paint(interceptor: Bool) {
+        guard interceptor != paintedInterceptor else { return }
+        paintedInterceptor = interceptor
+        let ui = interceptor ? UIColor(red: 1, green: 0.35, blue: 0.16, alpha: 1) : UIColor(red: 46 / 255, green: 139 / 255, blue: 1, alpha: 1)
+        let color = ui.cgColor
+        bloomWide.strokeColor = color
+        bloomTight.strokeColor = color
+        bloomWide.shadowColor = color
+        bloomTight.shadowColor = color
+        floorGlow.colors = [UIColor.clear.cgColor, ui.withAlphaComponent(0.55).cgColor, UIColor.clear.cgColor]
+        floorLine.colors = [
+            UIColor.clear.cgColor,
+            ui.withAlphaComponent(0.45).cgColor,
+            UIColor.white.cgColor,
+            ui.withAlphaComponent(0.45).cgColor,
+            UIColor.clear.cgColor
+        ]
     }
 
     private func apply(_ pulse: Double) {

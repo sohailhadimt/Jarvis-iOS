@@ -564,6 +564,16 @@ export async function recomputeTaskStatus(env: Env, taskId: string): Promise<voi
     [summary, now, now, taskId],
   );
   await logActivity(env, "orchestrator", "task.completed", taskId, { qc_pass: verdict });
+  const finished = summary.replace(/\s+/g, " ").trim().slice(0, 180);
+  void import("./owner-alert").then((mod) =>
+    mod.reportProblem(env, {
+      sourceId: `task:${taskId}`,
+      kind: "task_done",
+      urgent: false,
+      summary: finished ? `A task has finished. ${finished}` : "A task has finished.",
+      detail: summary.slice(0, 800),
+    }),
+  );
 }
 
 function readMessages(raw: string | null): ChatMessage[] | null {

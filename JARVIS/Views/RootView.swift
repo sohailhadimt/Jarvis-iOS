@@ -76,6 +76,7 @@ struct RootView: View {
             engine.startScreenWatch()
             if settings.onboarded {
                 DeviceLocation.shared.prepare()
+                DevicePresence.shared.start()
             }
             if settings.onboarded, !settings.voiceMatchPrompted && !VoiceProfileStore.hasProfile {
                 offerVoiceMatch = true

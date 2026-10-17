@@ -795,6 +795,47 @@ struct CloudClient: Sendable {
         }
     }
 
+    func setAway(_ text: String) async throws -> Bool {
+        let body = try JSONSerialization.data(withJSONObject: ["text": text])
+        let (payload, status) = try await raw(method: "POST", path: "/calls/away", authorize: true, body: body, query: [])
+        guard (200..<300).contains(status) else { return false }
+        let parsed = try JSONSerialization.jsonObject(with: payload) as? [String: Any]
+        return parsed?["active"] as? Bool ?? false
+    }
+
+    func awayStatus() async throws -> (active: Bool, instruction: String) {
+        let (payload, status) = try await raw(method: "GET", path: "/calls/away", authorize: true, body: nil, query: [])
+        guard (200..<300).contains(status),
+              let parsed = try JSONSerialization.jsonObject(with: payload) as? [String: Any] else {
+            return (false, "")
+        }
+        return (parsed["active"] as? Bool ?? false, parsed["instruction"] as? String ?? "")
+    }
+
+    func postPresence(activity: String, busy: Bool, lat: Double?, lon: Double?) async {
+        var body: [String: Any] = ["activity": activity, "busy": busy]
+        if let lat, let lon {
+            body["lat"] = lat
+            body["lon"] = lon
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else { return }
+        _ = try? await raw(method: "POST", path: "/calls/presence", authorize: true, body: data, query: [])
+    }
+
+    func decideCall(id: String, choice: String) async -> Bool {
+        guard let body = try? JSONSerialization.data(withJSONObject: ["choice": choice]) else { return false }
+        guard let (payload, status) = try? await raw(method: "POST", path: "/calls/\(Self.path(id))/decide", authorize: true, body: body, query: []) else {
+            return false
+        }
+        return (200..<300).contains(status) && !payload.isEmpty
+    }
+
+    func recordingData(id: String) async throws -> Data {
+        let (payload, status) = try await raw(method: "GET", path: "/calls/\(Self.path(id))/recording", authorize: true, body: nil, query: [])
+        guard (200..<300).contains(status), !payload.isEmpty else { throw CloudFailure.http(status, "No recording yet.") }
+        return payload
+    }
+
     func outboundCall(id: String) async throws -> PhoneCallRecord {
         let envelope: CallEnvelope = try await sendNoBody(method: "GET", path: "/calls/\(Self.path(id))")
         return envelope.call
@@ -1056,6 +1097,10 @@ struct PhoneCallRecord: Decodable, Sendable {
     var personalAllowed: Bool?
     var personalRequested: Bool?
     var decision: String?
+    var stage: String?
+    var callbackNeeded: Bool?
+    var recording: Bool?
+    var delegation: CallDelegation?
 
     var isFinished: Bool { status == "completed" || status == "failed" || status == "declined" }
     var isInbound: Bool { direction == "inbound" }
@@ -1068,7 +1113,16 @@ struct PhoneCallRecord: Decodable, Sendable {
         case callerName = "caller_name"
         case personalAllowed = "personal_allowed"
         case personalRequested = "personal_requested"
+        case stage, recording, delegation
+        case callbackNeeded = "callback_needed"
     }
+}
+
+struct CallDelegation: Decodable, Sendable {
+    var id: String
+    var status: String
+    var summary: String
+    var decision: String?
 }
 
 struct CallQuestion: Decodable, Identifiable, Equatable, Sendable {

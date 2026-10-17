@@ -1,3 +1,20 @@
+import {
+  attachConfirmCall,
+  callStage,
+  loadDelegation,
+  markDecision,
+  needsDelegation,
+  noteAwayOnCall,
+  openDelegation,
+  parseAway,
+  readActiveAway,
+  recordingSid,
+  rememberRecording,
+  savePresence,
+  settleDelegation,
+  wittyFallback,
+  writeAway,
+} from "./call-desk";
 import { dbAll, dbFirst, dbRun } from "./db";
 import { apiError, asString, isRecord, json, newId, nowIso } from "./http";
 import type { Env } from "./types";
@@ -50,6 +67,10 @@ export interface CallRecord {
   personal_requested: boolean;
   personal_note: string;
   decision: string | null;
+  stage: "dialing" | "live" | "ended";
+  callback_needed: boolean;
+  recording: boolean;
+  delegation: { id: string; status: string; summary: string; decision: string | null } | null;
 }
 
 interface CallRow {
@@ -350,7 +371,15 @@ export async function handleCallApi(request: Request, env: Env, path: string): P
   if (request.method === "GET" && path === "/calls/config") return configResponse(env);
   if (request.method === "POST" && path === "/calls") return createCall(request, env);
   if (request.method === "GET" && path === "/calls") return listCalls(env);
+  if (path === "/calls/away") return awayRoute(request, env);
+  if (request.method === "POST" && path === "/calls/presence") return presenceRoute(request, env);
   const parts = path.split("/").filter(Boolean);
+  if (request.method === "POST" && parts[0] === "calls" && parts[1] && parts[2] === "decide" && parts.length === 3) {
+    return decideRoute(request, env, parts[1]);
+  }
+  if (request.method === "GET" && parts[0] === "calls" && parts[1] && parts[2] === "recording" && parts.length === 3) {
+    return recordingRoute(env, parts[1]);
+  }
   if (request.method === "GET" && parts[0] === "calls" && parts[1] && parts.length === 2 && parts[1] !== "config") {
     return getCall(env, parts[1], url);
   }
@@ -431,6 +460,10 @@ async function createCall(request: Request, env: Env): Promise<Response> {
     personal_requested: false,
     personal_note: "",
     decision: null,
+    stage: "dialing",
+    callback_needed: false,
+    recording: false,
+    delegation: null,
   };
   try {
     await dbRun(
@@ -457,6 +490,10 @@ async function createCall(request: Request, env: Env): Promise<Response> {
   form.set("StatusCallbackMethod", "POST");
   for (const event of ["initiated", "ringing", "answered", "completed"]) {
     form.append("StatusCallbackEvent", event);
+  }
+  form.set("Record", "true");
+  if (needsDelegation(brief)) {
+    await openDelegation(env, { callId: id, contact, to, goal: brief }).catch(() => undefined);
   }
   let twilioSid = "";
   try {
@@ -511,6 +548,8 @@ async function getCall(env: Env, id: string, url: URL): Promise<Response> {
   if (url.searchParams.get("refresh") === "0") return json({ call: await presentCall(env, row) });
   const refreshed = await refreshFromElevenLabs(env, row);
   await noteScreenFromTranscript(env, refreshed);
+  await settleDelegation(env, refreshed.id).catch(() => undefined);
+  await ensureRecording(env, refreshed).catch(() => undefined);
   void import("./relay").then((mod) => mod.noteQuestion(env, refreshed, url.origin));
   void import("./owner-alert").then((mod) => mod.noteOwnerReply(env, refreshed));
   return json({ call: await presentCall(env, refreshed) });
@@ -587,7 +626,11 @@ async function twilioStatusWebhook(request: Request, env: Env, id: string): Prom
     patch.status = mapped;
   }
   if (params.CallSid) patch.twilio_sid = params.CallSid;
+  if (params.RecordingSid) await rememberRecording(env, id, params.RecordingSid).catch(() => undefined);
   await updateCall(env, id, patch);
+  if (patch.status === "completed" || patch.status === "failed") {
+    void import("./call-desk").then((mod) => mod.settleDelegation(env, id).catch(() => undefined));
+  }
   return json({ ok: true });
 }
 
@@ -616,6 +659,8 @@ async function elevenLabsWebhook(request: Request, env: Env): Promise<Response> 
     }
   }
   await updateCall(env, row.id, patch);
+  void noteAwayOnCall(env, row.id);
+  void settleDelegation(env, row.id);
   if (read?.lines.length) {
     const updated = { ...row, transcript: read.lines };
     await noteScreenFromTranscript(env, updated);
@@ -797,6 +842,10 @@ function fromRow(row: CallRow): StoredCall {
     personal_requested: false,
     personal_note: "",
     decision: null,
+    stage: callStage(row.status),
+    callback_needed: false,
+    recording: false,
+    delegation: null,
   };
 }
 
@@ -892,7 +941,20 @@ async function noteScreenFromTranscript(env: Env, row: StoredCall): Promise<void
 
 async function presentCall(env: Env, row: StoredCall): Promise<CallRecord> {
   const screen = await loadScreen(env, row.id);
-  return publicCall(row, screen);
+  const delegation = await loadDelegation(env, row.id);
+  const recorded = Boolean(await recordingSid(env, row.id));
+  const base = publicCall(row, screen);
+  const waiting = delegation?.status === "awaiting_decision";
+  return {
+    ...base,
+    summary: waiting && delegation?.summary ? delegation.summary : base.summary,
+    stage: callStage(row.status),
+    callback_needed: waiting || row.status === "failed" || /\bcall back\b/i.test(base.summary ?? ""),
+    recording: recorded,
+    delegation: delegation
+      ? { id: delegation.id, status: delegation.status, summary: delegation.summary, decision: delegation.decision }
+      : null,
+  };
 }
 
 function publicCall(row: StoredCall, screen?: ScreenBits | null): CallRecord {
@@ -914,7 +976,167 @@ function publicCall(row: StoredCall, screen?: ScreenBits | null): CallRecord {
     personal_requested: screen?.personal_requested ?? false,
     personal_note: screen?.personal_note ?? "",
     decision: screen?.decision ?? null,
+    stage: callStage(row.status),
+    callback_needed: row.status === "failed",
+    recording: false,
+    delegation: null,
   };
+}
+
+async function awayRoute(request: Request, env: Env): Promise<Response> {
+  if (request.method === "GET") {
+    const away = await readActiveAway(env);
+    return json({ active: Boolean(away), instruction: away?.instruction ?? "", expires_at: away?.expiresAt ?? null });
+  }
+  if (request.method === "DELETE") {
+    await writeAway(env, null).catch(() => undefined);
+    return json({ active: false });
+  }
+  if (request.method !== "POST") return apiError(405, "method_not_allowed", "Use GET, POST, or DELETE.");
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return apiError(400, "bad_request", "Request body must be JSON.");
+  }
+  if (!isRecord(body)) return apiError(400, "bad_request", "JSON body must be an object.");
+  const text = asString(body.instruction, 400) ?? asString(body.text, 400) ?? "";
+  const parsed = parseAway(text);
+  if (!parsed) return apiError(400, "bad_request", "Say that you want me to answer your calls.");
+  if (parsed.kind === "clear") {
+    await writeAway(env, null).catch(() => undefined);
+    return json({ active: false });
+  }
+  const saved = await writeAway(env, parsed);
+  return json({ active: true, instruction: saved?.instruction ?? parsed.instruction, expires_at: saved?.expiresAt ?? null });
+}
+
+async function presenceRoute(request: Request, env: Env): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return apiError(400, "bad_request", "Request body must be JSON.");
+  }
+  if (!isRecord(body)) return apiError(400, "bad_request", "JSON body must be an object.");
+  const activity = asString(body.activity, 40) || "unknown";
+  const busy = body.busy === true;
+  await savePresence(env, activity, busy).catch(() => undefined);
+  return json({ ok: true });
+}
+
+async function decideRoute(request: Request, env: Env, id: string): Promise<Response> {
+  if (!/^call_[A-Za-z0-9]+$/.test(id)) return apiError(400, "bad_request", "Unknown call id.");
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return apiError(400, "bad_request", "Request body must be JSON.");
+  }
+  if (!isRecord(body)) return apiError(400, "bad_request", "JSON body must be an object.");
+  const choice = asString(body.choice, 400);
+  if (!choice) return apiError(400, "bad_request", "choice is required.");
+  const decision = await markDecision(env, id, choice);
+  if (!decision) return apiError(404, "not_found", "That call is not waiting for a decision.");
+  if (!decision.confirm) {
+    const row = await loadCall(env, id);
+    return json({ ok: true, call: row ? await presentCall(env, row) : null });
+  }
+  const detail = decision.detail || decision.row.summary || wittyFallback("");
+  const brief = `CONFIRM ${detail}`.slice(0, 500);
+  const placed = await dialConfirm(env, decision.row.contact_name, decision.row.to_number, brief);
+  if (placed) await attachConfirmCall(env, decision.row.id, placed).catch(() => undefined);
+  const row = await loadCall(env, id);
+  return json({ ok: true, confirming: Boolean(placed), call: row ? await presentCall(env, row) : null });
+}
+
+async function dialConfirm(env: Env, contact: string, to: string, brief: string): Promise<string | null> {
+  const from = toE164(env.TWILIO_FROM_NUMBER ?? "");
+  const sid = (env.TWILIO_ACCOUNT_SID ?? "").trim();
+  const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
+  if (!from || !sid || !token || !toE164(to)) return null;
+  const id = newId("call");
+  const now = nowIso();
+  try {
+    await dbRun(
+      env,
+      `INSERT INTO outbound_calls
+        (id, contact_name, to_number, brief, status, twilio_sid, conversation_id, transcript_json, summary, error, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'placing', NULL, NULL, '[]', NULL, NULL, ?, ?)`,
+      [id, contact, to, brief, now, now],
+    );
+  } catch {
+    return null;
+  }
+  const origin = (await dbFirst<{ worker_origin: string }>(env, "SELECT worker_origin FROM call_settings WHERE id = 'default'"))?.worker_origin;
+  const base = origin && origin.startsWith("http") ? origin.replace(/\/$/, "") : `https://${PUBLIC_VOICE_HOST}`;
+  const form = new URLSearchParams({
+    To: to,
+    From: from,
+    Url: `${base}/calls/voice/${id}`,
+    Method: "POST",
+    StatusCallback: `${base}/calls/twilio-status/${id}`,
+    StatusCallbackMethod: "POST",
+    Record: "true",
+  });
+  try {
+    const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Calls.json`, {
+      method: "POST",
+      redirect: "error",
+      signal: AbortSignal.timeout(20_000),
+      headers: {
+        authorization: `Basic ${btoa(`${sid}:${token}`)}`,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: form.toString(),
+    });
+    if (!response.ok) {
+      await updateCall(env, id, { status: "failed", error: "The confirmation call could not be placed." });
+      return null;
+    }
+    const parsed = parseJson(await response.text());
+    const twilioSid = isRecord(parsed) && typeof parsed.sid === "string" ? parsed.sid : "";
+    if (twilioSid) await updateCall(env, id, { twilio_sid: twilioSid });
+    return id;
+  } catch {
+    await updateCall(env, id, { status: "failed", error: "The confirmation call could not be placed." }).catch(() => undefined);
+    return null;
+  }
+}
+
+async function ensureRecording(env: Env, row: StoredCall): Promise<void> {
+  if (!row.twilio_sid || callStage(row.status) !== "ended") return;
+  if (await recordingSid(env, row.id)) return;
+  const sid = (env.TWILIO_ACCOUNT_SID ?? "").trim();
+  const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
+  if (!sid || !token) return;
+  const response = await fetch(
+    `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Calls/${encodeURIComponent(row.twilio_sid)}/Recordings.json`,
+    { headers: { authorization: `Basic ${btoa(`${sid}:${token}`)}` }, signal: AbortSignal.timeout(8_000) },
+  );
+  if (!response.ok) return;
+  const payload = parseJson(await response.text());
+  if (!isRecord(payload) || !Array.isArray(payload.recordings)) return;
+  const first = payload.recordings.find((item) => isRecord(item) && typeof item.sid === "string");
+  if (isRecord(first) && typeof first.sid === "string") await rememberRecording(env, row.id, first.sid);
+}
+
+async function recordingRoute(env: Env, id: string): Promise<Response> {
+  if (!/^call_[A-Za-z0-9]+$/.test(id)) return apiError(400, "bad_request", "Unknown call id.");
+  const row = await loadCall(env, id);
+  if (!row) return apiError(404, "not_found", "Call not found.");
+  await ensureRecording(env, row).catch(() => undefined);
+  const media = await recordingSid(env, id);
+  const sid = (env.TWILIO_ACCOUNT_SID ?? "").trim();
+  const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
+  if (!media || !sid || !token) return apiError(404, "not_found", "No recording for that call yet.");
+  const response = await fetch(
+    `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Recordings/${encodeURIComponent(media)}.mp3`,
+    { headers: { authorization: `Basic ${btoa(`${sid}:${token}`)}` }, signal: AbortSignal.timeout(20_000) },
+  );
+  if (!response.ok) return apiError(404, "not_found", "The recording is not ready.");
+  const bytes = await response.arrayBuffer();
+  return new Response(bytes, { status: 200, headers: { "content-type": "audio/mpeg", "cache-control": "private, max-age=60" } });
 }
 
 function parseLines(raw: string | null): CallLine[] {

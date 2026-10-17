@@ -58,6 +58,20 @@ final class AssistantEngine {
     private(set) var relayingAnswer = false
     /// Latest problem JARVIS reported, when one is waiting in the app.
     private(set) var ownerAlert: OwnerAlert?
+    /// Calls shown as cards on the home screen.
+    private(set) var deskCalls: [StoredCall] = []
+    /// True while a spoken away order is still in force.
+    private(set) var awayActive = false
+    var interceptor: Bool { inboundCall != nil || awayActive }
+    var ringLabel: String? {
+        if deskCalls.contains(where: { CallDeskStage.of($0) == .dialing }) { return "DIALING" }
+        if inboundCall != nil || deskCalls.contains(where: { CallDeskStage.of($0) == .live }) { return "ON THE CALL" }
+        switch phase {
+        case .listening: return "LISTENING"
+        case .speaking: return "SPEAKING"
+        default: return nil
+        }
+    }
     /// Bumped when the on-phone call log changes.
     private(set) var callLogTick: Int = 0
     var hasContactChoices: Bool { !callChoices.isEmpty || !briefChoices.isEmpty }
@@ -1171,6 +1185,17 @@ final class AssistantEngine {
             await resolvePendingCallBrief(text)
             return
         }
+        if AwayCommand.matches(text) {
+            await applyAway(text)
+            return
+        }
+        if let waiting = deskCalls.first(where: { $0.delegationStatus == "awaiting_decision" }) {
+            await sendDecision(waiting.id, choice: text)
+            await speakLine("Right away, Sir.", userText: text)
+            guard !Task.isCancelled else { return }
+            afterTurn()
+            return
+        }
         if let question = pendingQuestion {
             let answer = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !answer.isEmpty else {
@@ -1594,6 +1619,63 @@ final class AssistantEngine {
         }
     }
 
+    func decideDesk(_ id: String, choice: String) {
+        Task { await self.sendDecision(id, choice: choice) }
+    }
+
+    func playRecording(_ id: String) {
+        Task { await self.playCallRecording(id) }
+    }
+
+    private func refreshDesk() {
+        let now = Date()
+        let rows = CallLogStore.entries().filter { call in
+            let stage = CallDeskStage.of(call)
+            if stage != .ended { return true }
+            if call.delegationStatus == "awaiting_decision" { return true }
+            return now.timeIntervalSince(call.updatedAt) < 60 * 60
+        }
+        deskCalls = Array(rows.prefix(2))
+        VoiceMeter.shared.interceptor = interceptor
+    }
+
+    private func applyAway(_ text: String) async {
+        let active = (try? await JarvisCloudAPI.client().setAway(text)) ?? false
+        awayActive = active
+        VoiceMeter.shared.interceptor = interceptor
+        let line = active ? "I'll answer your calls, Sir." : "I'll leave the phone to you, Sir."
+        recordAssistant(line)
+        await speakLine(line, userText: text)
+        guard !Task.isCancelled else { return }
+        afterTurn()
+    }
+
+    private func sendDecision(_ id: String, choice: String) async {
+        guard let client = try? JarvisCloudAPI.client() else { return }
+        if let call = deskCalls.first(where: { $0.id == id }), call.delegationStatus != "awaiting_decision" {
+            let result = await client.placeOutboundCall(to: call.number, contactName: call.displayName, brief: call.brief)
+            if case .placed(let record) = result {
+                absorb(record, announce: false)
+                Task { await self.pollCall(id: record.id) }
+            }
+            return
+        }
+        guard await client.decideCall(id: id, choice: choice) else { return }
+        if let record = try? await client.outboundCall(id: id) {
+            absorb(record, announce: false)
+        }
+    }
+
+    private func playCallRecording(_ id: String) async {
+        guard let client = try? JarvisCloudAPI.client(), let data = try? await client.recordingData(id: id) else {
+            statusLine = "The recording isn't ready yet, Sir."
+            return
+        }
+        if !CallPlayback.shared.play(data) {
+            statusLine = "I couldn't play that recording, Sir."
+        }
+    }
+
     func answerPendingQuestion(_ text: String) {
         guard let question = pendingQuestion, !relayingAnswer else { return }
         let answer = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1684,6 +1766,11 @@ final class AssistantEngine {
         await CallDevice.uploadIfNeeded()
         await pullQuestions(client)
         await pullOwnerAlerts(client)
+        if let away = try? await client.awayStatus() {
+            awayActive = away.active
+            VoiceMeter.shared.interceptor = interceptor
+        }
+        await DevicePresence.shared.postIfDue()
         guard let calls = try? await client.activeInboundCalls() else { return }
         let seen = Set(calls.map(\.id))
         for record in calls {
@@ -1702,6 +1789,7 @@ final class AssistantEngine {
             }
         }
         inboundCall = calls.first
+        refreshDesk()
         refreshCallActivity()
     }
 
@@ -1756,6 +1844,7 @@ final class AssistantEngine {
         if shouldSpeak { stored.spoken = true }
         CallLogStore.update(stored)
         callLogTick += 1
+        refreshDesk()
         refreshCallActivity()
         guard shouldSpeak else { return }
         let name = stored.displayName

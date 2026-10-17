@@ -268,6 +268,11 @@ struct StoredCall: Codable, Equatable, Identifiable {
     var personalAllowed: Bool? = nil
     var personalRequested: Bool? = nil
     var decision: String? = nil
+    var stage: String? = nil
+    var callbackNeeded: Bool? = nil
+    var hasRecording: Bool? = nil
+    var delegationStatus: String? = nil
+    var delegationSummary: String? = nil
 
     var titleStatus: String {
         switch status {
@@ -338,7 +343,12 @@ extension StoredCall {
             reason: record.reason,
             personalAllowed: record.personalAllowed,
             personalRequested: record.personalRequested,
-            decision: record.decision
+            decision: record.decision,
+            stage: record.stage,
+            callbackNeeded: record.callbackNeeded,
+            hasRecording: record.recording,
+            delegationStatus: record.delegation?.status,
+            delegationSummary: record.delegation?.summary
         )
     }
 

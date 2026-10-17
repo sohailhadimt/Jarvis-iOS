@@ -1,3 +1,4 @@
+import { ownerReach, readPresence, recordVoiceApproval } from "./call-desk";
 import { dbAll, dbFirst, dbRun, getState, setState } from "./db";
 import { FALLBACK_SAY_VOICE, registerElevenLabsCall, safeError, toE164, twilioRequestSigned, type CallLine } from "./calls";
 import { apiError, isRecord, json, newId, nowIso } from "./http";
@@ -130,8 +131,11 @@ export async function reportProblem(
     } catch {
       count = 0;
     }
-    const channel = mayCall({
+    const presence = await readPresence(env);
+    const channel = ownerReach({
       quiet,
+      busy: presence.busy,
+      driving: presence.activity === "automotive",
       countToday: count,
       max: settings.max_calls_per_day,
       urgentOnly: settings.urgent_only === 1,
@@ -145,13 +149,17 @@ export async function reportProblem(
       `INSERT OR IGNORE INTO owner_alerts
         (id, source_id, kind, summary, detail, urgent, channel, day, call_id, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
-      [id, problem.sourceId, problem.kind, summary, detail, problem.urgent ? 1 : 0, channel, day, nowIso()],
+      [id, problem.sourceId, problem.kind, summary, detail, problem.urgent ? 1 : 0, channel === "call" ? "call" : "push", day, nowIso()],
     );
     if (changes === 0) return;
     if (channel === "call") {
       const placed = await placeOwnerCall(env, settings, id, summary);
       if (placed) return;
       await dbRun(env, "UPDATE owner_alerts SET channel = 'push' WHERE id = ?", [id]);
+    }
+    if (channel === "text") {
+      const texted = await textOwner(env, summary);
+      if (texted) return;
     }
     await pushNotice(env, "JARVIS", summary, { alert_id: id }, "JARVIS_ALERT");
   } catch (err) {
@@ -178,6 +186,7 @@ export async function noteOwnerReply(env: Env, call: { id: string; transcript: C
        ON CONFLICT(id) DO UPDATE SET goal = excluded.goal, result_summary = excluded.result_summary, updated_at = excluded.updated_at`,
       [id, goal, "Noted from the call JARVIS placed to you.", now, now, now],
     );
+    await recordVoiceApproval(env, text).catch(() => undefined);
   } catch (err) {
     console.error("owner reply was not stored", safeError(err instanceof Error ? err.message : "reply"));
   }
@@ -345,15 +354,20 @@ async function speakAlert(
   detailFirst: boolean,
   numbers: { from: string; to: string },
 ): Promise<Response> {
+  const presence = await readPresence(env);
+  const driving = presence.activity === "automotive";
   const first = detailFirst
     ? `Here is the detail. ${clip(alert.detail, 400)} Tell me what you would like me to do.`
-    : ownerSummaryLine(clip(alert.summary, 240));
+    : driving
+      ? `Hello, this is JARVIS. Briefly: ${clip(alert.summary, 120)}`
+      : ownerSummaryLine(clip(alert.summary, 240));
   const prompt = [
     "You are JARVIS calling Master Hadi on his own mobile.",
+    driving ? "He is driving. One short sentence, then wait. Do not give a long detail unless he asks." : "Keep it brief.",
     `Your first words are exactly: "${first}"`,
     "If he says details, give this once, briefly, then wait:",
     clip(alert.detail, 800),
-    "If he tells you what to do, repeat it in one sentence, say you have noted it, and end the call.",
+    "If he tells you what to do, repeat it in one sentence, say you have noted it, and end the call. That note becomes an approval. Do not do it yourself.",
     "Do not talk about anything else. British English.",
   ].join("\n");
   const connected = await registerElevenLabsCall(env, {
@@ -375,6 +389,30 @@ async function speakAlert(
     ]).catch(() => undefined);
   }
   return new Response(connected.twiml, { status: 200, headers: { "content-type": "text/xml; charset=utf-8" } });
+}
+
+async function textOwner(env: Env, body: string): Promise<boolean> {
+  const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
+  const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
+  const from = toE164(env.TWILIO_FROM_NUMBER ?? "");
+  const to = await readOwnerMobile(env);
+  if (!account || !token || !from || !to) return false;
+  const form = new URLSearchParams({ From: from, To: to, Body: clip(body, 300) });
+  try {
+    const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Messages.json`, {
+      method: "POST",
+      redirect: "error",
+      signal: AbortSignal.timeout(15_000),
+      headers: {
+        authorization: `Basic ${btoa(`${account}:${token}`)}`,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: form.toString(),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
 
 async function checkBalance(env: Env): Promise<void> {

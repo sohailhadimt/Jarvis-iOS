@@ -1,3 +1,4 @@
+import { awayFirstMessage, awayPrompt, readActiveAway, rememberRecording } from "./call-desk";
 import { dbAll, dbFirst, dbRun } from "./db";
 import {
   FALLBACK_SAY_VOICE,
@@ -96,15 +97,17 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
   }
   ctx.waitUntil(notify(env, id, caller, "", ""));
   ctx.waitUntil(learnCaller(env, id, new URL(request.url).origin));
+  if (sid) ctx.waitUntil(startCallRecording(env, sid, id));
+  const away = await readActiveAway(env);
   const connected = await registerElevenLabsCall(env, {
     id,
     from: caller,
     to: dialed || caller,
     direction: "inbound",
-    first: INBOUND_GREETING,
-    prompt: permission.allow ? approvedScreening(permission.note) : screeningScript(),
+    first: away ? awayFirstMessage(away.instruction) : INBOUND_GREETING,
+    prompt: away ? awayPrompt(away.instruction) : permission.allow ? approvedScreening(permission.note) : screeningScript(),
     contact: "Caller",
-    brief: "Find out who is calling and why. Do not reveal personal information.",
+    brief: away ? away.instruction : "Find out who is calling and why. Do not reveal personal information.",
   });
   if (!connected.twiml) {
     await dbRun(env, "UPDATE outbound_calls SET status = 'message', error = ?, updated_at = ? WHERE id = ?", [
@@ -555,6 +558,32 @@ async function twilioPost(account: string, token: string, path: string, form: UR
     return { ok: false, error: twilioMessage(text) };
   } catch (err) {
     return { ok: false, error: safeError(err instanceof Error ? err.message : "Twilio could not be reached.") };
+  }
+}
+
+async function startCallRecording(env: Env, callSid: string, id: string): Promise<void> {
+  const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
+  const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
+  if (!account || !token || !callSid) return;
+  try {
+    const response = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls/${encodeURIComponent(callSid)}/Recordings.json`,
+      {
+        method: "POST",
+        redirect: "error",
+        signal: AbortSignal.timeout(8_000),
+        headers: {
+          authorization: `Basic ${btoa(`${account}:${token}`)}`,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: "",
+      },
+    );
+    if (!response.ok) return;
+    const payload = (await response.json()) as { sid?: string };
+    if (payload.sid) await rememberRecording(env, id, payload.sid);
+  } catch {
+    // Playback appears once Twilio has a recording. The call itself continues.
   }
 }
 

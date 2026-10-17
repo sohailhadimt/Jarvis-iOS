@@ -42,6 +42,7 @@ final class VoiceMeter: @unchecked Sendable {
     private let lock = NSLock()
     private var storedLevel = 0.0
     private var storedPhase: JarvisPhase = .idle
+    private var storedInterceptor = false
 
     var level: Double {
         get {
@@ -65,6 +66,20 @@ final class VoiceMeter: @unchecked Sendable {
         set {
             lock.lock()
             storedPhase = newValue
+            lock.unlock()
+        }
+    }
+
+    /// Orange ring while JARVIS is answering calls for Sohail.
+    var interceptor: Bool {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedInterceptor
+        }
+        set {
+            lock.lock()
+            storedInterceptor = newValue
             lock.unlock()
         }
     }
