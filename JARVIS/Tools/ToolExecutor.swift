@@ -132,17 +132,17 @@ final class ToolExecutor {
                 try await AppLauncher.open(url)
                 return .result("Asked your '\(s.musicShortcut)' shortcut to play \(q).")
             }
-            return .result("Couldn't find \(q) in the music library. Add a music Shortcut in Settings > Integrations for streaming.")
+            return .result("Couldn't find \(q) in the music library. Add a music Shortcut in Settings > Apps for streaming.")
 
         case "set_timer":
-            guard !s.timerShortcut.isEmpty else { throw ToolFailure("No timer Shortcut set. Add one in Settings > Integrations.") }
+            guard !s.timerShortcut.isEmpty else { throw ToolFailure("No timer Shortcut set. Add one in Settings > Apps.") }
             let secs = Int(a["duration_seconds"]?.double ?? 0)
             guard secs > 0, let url = AppLauncher.shortcutURL(name: s.timerShortcut, input: String(secs)) else { throw ToolFailure("Invalid duration.") }
             try await AppLauncher.open(url)
             return .result("Started the '\(s.timerShortcut)' shortcut for \(secs) seconds.")
 
         case "set_alarm":
-            guard !s.alarmShortcut.isEmpty else { throw ToolFailure("No alarm Shortcut set. Add one in Settings > Integrations.") }
+            guard !s.alarmShortcut.isEmpty else { throw ToolFailure("No alarm Shortcut set. Add one in Settings > Apps.") }
             guard let time = arg("time"), let url = AppLauncher.shortcutURL(name: s.alarmShortcut, input: time) else { throw ToolFailure("Invalid time.") }
             try await AppLauncher.open(url)
             return .result("Started the '\(s.alarmShortcut)' shortcut for \(time).")
@@ -289,7 +289,7 @@ final class ToolExecutor {
     private func webhookAction(task: String?, urlString: String, key: KeychainKey, label: String, note: String) throws -> ToolOutcome {
         guard let task else { throw ToolFailure("What's the task?") }
         guard let url = URL(string: urlString), url.scheme == "https" || url.scheme == "http" else {
-            throw ToolFailure("The webhook URL in Settings > Integrations is invalid.")
+            throw ToolFailure("The webhook URL in Settings > Apps is invalid.")
         }
         let secret = KeychainStore.get(key)
         return .confirm(PendingAction(summary: "Send this task to \(label): \"\(task)\"?") {

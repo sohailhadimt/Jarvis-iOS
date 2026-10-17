@@ -78,16 +78,17 @@ Other settings:
 
 The control is in the Action Button's **Controls** list.
 
-1. Run the app and start a session once, then allow **Microphone** and **Speech Recognition**. iOS can only show those prompts while JARVIS is on screen, so the first session has to start from the app (hold the mic, tap Converse, or use the Talk to JARVIS shortcut below).
-2. Open the iPhone **Settings > Action Button**, swipe to **Controls**, tap the control, and search **JARVIS**.
-3. Press the Action Button. JARVIS starts in the Dynamic Island (Listening, then Thinking, then Responding) and does not open the app. Press the Action Button again to end it. The red stop button on the Live Activity ends it too.
+1. Run the app and start a session once, then allow **Microphone** and **Speech Recognition**. iOS can only show those prompts while JARVIS is on screen, so the first session has to start from the app (hold the mic, tap Converse, or say the phrase below).
+2. Say **Hey Siri, JARVIS** or **Hey Siri, Talk to JARVIS**. JARVIS opens and starts listening.
+3. Open the iPhone **Settings > Action Button**, swipe to **Controls**, tap the control, and search **Talk to JARVIS**. Pressing the Action Button uses that same intent: the app opens straight into listening.
+4. The **JARVIS** toggle is still there. It starts a session in the Dynamic Island without opening the app. Press it again to end that session. The red stop button on the Live Activity ends it too.
 
-**Talk to JARVIS** is still a shortcut: Settings > Action Button > Shortcut > Choose a Shortcut > JARVIS > Talk to JARVIS. That one opens the app and starts listening. You can also say "Hey Siri, Talk to JARVIS" or "Hey Siri, Toggle JARVIS".
+You can also say "Hey Siri, Toggle JARVIS". Lock Screen widgets (circular, rectangular, inline) open listening when tapped. The Home Screen widget still opens StandBy.
 
 ## 8. StandBy
 
 - **In-app StandBy view:** put the phone on charge and turn it sideways (landscape) with JARVIS open. The screen goes black with a large orb. Tap the orb to talk, or tap ∞ for a continuous conversation. You can turn this off in Appearance.
-- **iOS StandBy widget:** iOS StandBy (charging, landscape, locked) only shows **widgets and Live Activities**, not full apps. To add the widget: lock the phone, put it on charge in landscape, long-press the StandBy widget stack, tap **+**, and add **JARVIS**. Tapping it opens the in-app StandBy view. The same widget can also go on the Lock Screen (circular, rectangular, or inline) and the Home Screen.
+- **iOS StandBy widget:** iOS StandBy (charging, landscape, locked) only shows **widgets and Live Activities**, not full apps. To add the widget: lock the phone, put it on charge in landscape, long-press the StandBy widget stack, tap **+**, and add **JARVIS**. On the Home Screen, tapping it opens the in-app StandBy view. On the Lock Screen, tapping the circular, rectangular, or inline widget opens JARVIS listening. Control Center has **Talk to JARVIS** (opens listening) and **JARVIS** (Dynamic Island toggle). Both need iOS 18.
 
 ## 9. Talking to other apps (tools)
 
@@ -151,10 +152,11 @@ Each one is only asked for the first time a feature needs it. You can change the
 
 ## 10. What iOS limits (please read)
 
-- **Background microphone:** iOS lets the app keep listening only while its audio session is active and a Live Activity is showing. That covers a session started from the app or from the Action Button control. If iOS ends the session (for example a phone call, or another app taking over the audio), press the Action Button again. iOS does not allow an always-on "Hey JARVIS" wake word for third-party apps.
-- **First Action Button press:** the control cannot show the microphone or speech permission prompts. Start a session in the app once and allow both. After that, the control can listen without bringing the app forward. Live Activities must also be allowed for JARVIS.
+- **Background work stays on the Cloudflare Worker.** Tasks, call screening, question timeouts, and problem-call checks run on the worker cron, which keeps going when the phone is locked. The iPhone only wakes JARVIS into listening and shows status. It does not run that queue.
+- **Background microphone:** iOS lets the app keep listening only while its audio session is active and a Live Activity is showing. That covers a session started from the app or from the JARVIS toggle. If iOS ends the session (for example a phone call, or another app taking over the audio), press the Action Button again. iOS does not allow an always-on "Hey JARVIS" wake word for third-party apps. "Hey Siri, JARVIS" is the system shortcut that opens listening.
+- **First Action Button press:** the control cannot show the microphone or speech permission prompts. Start a session in the app once and allow both. After that, the JARVIS toggle can listen without bringing the app forward. Talk to JARVIS opens the app. Live Activities must also be allowed for JARVIS, unless you turn the Live Activity switch off in JARVIS settings.
 - **Speech recognition** uses Groq Whisper when a Groq API key is saved. Otherwise it runs on-device when your iPhone supports it for English (UK). If on-device recognition isn't available, Apple's servers are used.
-- **The Live Activity** updates when the state changes (Listening, Thinking, Responding), not 60 times a second. The animated orb is only inside the app, because widgets cannot animate continuously. The Dynamic Island shows a still teal orb, the status, and the latest reply.
+- **The Live Activity** is optional (Settings > Always available). It updates when the state changes (Listening, Thinking, Responding, or an active call), not 60 times a second. The animated orb is only inside the app, because widgets cannot animate continuously. The Dynamic Island shows a still teal orb, the status, an active call when one is open, and the latest reply.
 - **Live Activities** last up to 8 hours on screen.
 
 ### Things that would need a newer SDK, or don't exist publicly

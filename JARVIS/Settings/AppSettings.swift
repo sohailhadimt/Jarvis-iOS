@@ -156,6 +156,8 @@ final class AppSettings {
     static let shared = AppSettings()
     static let modelSuggestions = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
     static let defaultGeminiModel = "gemini-3.8-flash"
+    /// Live worker. A blank saved URL uses this; a typed URL is kept.
+    static let defaultCloudBaseURL = "https://jarvis-backend.jarvis-hadi.workers.dev"
     static let retiredGeminiModel = "gemini-2.5-flash"
     static let defaultGroqModel = "llama-3.3-70b-versatile"
     /// Fastest free models for spoken chit-chat. Tool turns keep the selected model.
@@ -200,12 +202,25 @@ final class AppSettings {
     var startWithVoice: Bool { didSet { d.set(startWithVoice, forKey: "startWithVoice") } }
     /// When on, an in-app voice session keeps listening after the app leaves the screen.
     var backgroundConversations: Bool { didSet { d.set(backgroundConversations, forKey: "backgroundConversations") } }
+    /// Lock Screen and Dynamic Island status. Off leaves those surfaces blank. The worker still runs tasks.
+    var liveActivityEnabled: Bool { didSet { d.set(liveActivityEnabled, forKey: "liveActivityEnabled") } }
     /// BCP-47 locale for on-device speech recognition.
     var speechLocale: String { didSet { d.set(speechLocale, forKey: "speechLocale") } }
     /// Full-screen captions start on when a voice session opens.
     var captionsDefault: Bool { didSet { d.set(captionsDefault, forKey: "captionsDefault") } }
-    /// 0 waits about 700ms of silence. 1 ends a turn after about 500ms.
+    /// 0 waits about 700ms of silence. 1 ends a turn after about 500ms. Barge-in only.
     var vadSensitivity: Double { didSet { d.set(vadSensitivity, forKey: "vadSensitivity") } }
+    /// Seconds of quiet after the latest words before a turn ends. Default is 1.75.
+    var endpointSilence: Double {
+        didSet {
+            let clamped = min(3, max(1, endpointSilence))
+            if clamped != endpointSilence {
+                endpointSilence = clamped
+                return
+            }
+            d.set(clamped, forKey: "endpointSilence")
+        }
+    }
     /// When on, and a voice print is saved, only that speaker reaches speech recognition.
     var voiceMatchEnabled: Bool { didSet { d.set(voiceMatchEnabled, forKey: "voiceMatchEnabled") } }
     var voiceMatchSensitivity: VoiceMatchSensitivity {
@@ -232,6 +247,17 @@ final class AppSettings {
     var orbTintHex: String { didSet { persistTint() } }
     var orbTintAmount: Double { didSet { persistTint() } }
     var appearancePreset: String { didSet { d.set(appearancePreset, forKey: "appearancePreset") } }
+    /// First-run sheet has been finished or skipped.
+    var onboarded: Bool { didSet { d.set(onboarded, forKey: "onboarded") } }
+    /// Face ID or the device passcode covers the home screen after leaving the app.
+    var privacyLock: Bool { didSet { d.set(privacyLock, forKey: "privacyLock") } }
+    var bootChime: Bool { didSet { d.set(bootChime, forKey: "bootChime") } }
+    var hapticsEnabled: Bool { didSet { d.set(hapticsEnabled, forKey: "hapticsEnabled") } }
+    var glanceEnabled: Bool { didSet { d.set(glanceEnabled, forKey: "glanceEnabled") } }
+    /// Local reminder. The worker's own routine stays off until it is enabled in Agents.
+    var briefingEnabled: Bool { didSet { d.set(briefingEnabled, forKey: "briefingEnabled") } }
+    var briefingHour: Int { didSet { d.set(briefingHour, forKey: "briefingHour") } }
+    var briefingMinute: Int { didSet { d.set(briefingMinute, forKey: "briefingMinute") } }
 
     var primaryColor: Color { Color(hex: primaryHex) }
     var accentColor: Color { Color(hex: accentHex) }
@@ -289,9 +315,12 @@ final class AppSettings {
         }
         startWithVoice = d.object(forKey: "startWithVoice") as? Bool ?? false
         backgroundConversations = d.object(forKey: "backgroundConversations") as? Bool ?? false
+        liveActivityEnabled = d.object(forKey: "liveActivityEnabled") as? Bool ?? true
         speechLocale = d.string(forKey: "speechLocale") ?? "en-GB"
         captionsDefault = d.object(forKey: "captionsDefault") as? Bool ?? true
         vadSensitivity = d.object(forKey: "vadSensitivity") as? Double ?? 0.5
+        let storedPause = d.object(forKey: "endpointSilence") as? Double ?? 1.75
+        endpointSilence = min(3, max(1, storedPause))
         voiceMatchEnabled = d.object(forKey: "voiceMatchEnabled") as? Bool ?? false
         voiceMatchSensitivity = VoiceMatchSensitivity(rawValue: d.string(forKey: "voiceMatchSensitivity") ?? "") ?? .balanced
         voiceMatchPrompted = d.object(forKey: "voiceMatchPrompted") as? Bool ?? false
@@ -305,7 +334,8 @@ final class AppSettings {
         agentWebhookURL = d.string(forKey: "agentWebhookURL") ?? ""
         agentWebhookName = d.string(forKey: "agentWebhookName") ?? "your agent"
         grokBotWebhookURL = d.string(forKey: "grokBotWebhookURL") ?? ""
-        cloudBaseURL = d.string(forKey: "cloudBaseURL") ?? ""
+        let storedCloud = d.string(forKey: "cloudBaseURL")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        cloudBaseURL = storedCloud.isEmpty ? Self.defaultCloudBaseURL : storedCloud
         let resolvedPrimary = Self.replacingFactoryDefault(d.string(forKey: SharedConfig.Key.primaryHex),
                                                           previous: ["00D8FFFF", "00D8FF"],
                                                           fallback: Theme.defaultPrimaryHex)
@@ -317,6 +347,14 @@ final class AppSettings {
         orbTintHex = d.string(forKey: "orbTintHex") ?? "4BA8EEFF"
         orbTintAmount = d.object(forKey: "orbTintAmount") as? Double ?? 0
         appearancePreset = d.string(forKey: "appearancePreset") ?? AppearancePreset.sky.rawValue
+        onboarded = d.object(forKey: "onboarded") as? Bool ?? false
+        privacyLock = d.object(forKey: "privacyLock") as? Bool ?? false
+        bootChime = d.object(forKey: "bootChime") as? Bool ?? true
+        hapticsEnabled = d.object(forKey: "hapticsEnabled") as? Bool ?? true
+        glanceEnabled = d.object(forKey: "glanceEnabled") as? Bool ?? true
+        briefingEnabled = d.object(forKey: "briefingEnabled") as? Bool ?? true
+        briefingHour = d.object(forKey: "briefingHour") as? Int ?? 7
+        briefingMinute = d.object(forKey: "briefingMinute") as? Int ?? 30
         SharedConfig.defaults.set(orbTintHex, forKey: SharedConfig.Key.orbTintHex)
         SharedConfig.defaults.set(orbTintAmount, forKey: SharedConfig.Key.orbTintAmount)
         // didSet does not run during init, so write a migrated factory colour through explicitly.

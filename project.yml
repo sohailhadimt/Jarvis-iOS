@@ -44,7 +44,8 @@ targets:
         CFBundleDisplayName: JARVIS
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         ITSAppUsesNonExemptEncryption: false
-        UILaunchScreen: {}
+        UILaunchScreen:
+          UIColorName: LaunchBackground
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations:
@@ -54,11 +55,15 @@ targets:
         UIRequiresFullScreen: true
         UIBackgroundModes:
           - audio
+          - remote-notification
+        NSFaceIDUsageDescription: "JARVIS uses Face ID to unlock the home screen."
         NSMicrophoneUsageDescription: "JARVIS listens to your voice so it can answer your questions."
         NSCameraUsageDescription: "JARVIS uses the camera when you ask what it sees."
         NSPhotoLibraryUsageDescription: "JARVIS attaches a photo when you ask about it."
         NSPhotoLibraryAddUsageDescription: "JARVIS saves pictures it makes into your photo library."
         NSSpeechRecognitionUsageDescription: "JARVIS converts your speech to text on your iPhone so it can understand you."
+        NSLocationWhenInUseUsageDescription: "JARVIS uses your location while the app is open, so the weather and places near you are about where you actually are."
+        NSMotionUsageDescription: "JARVIS checks whether you are driving so a call from me stays short."
         NSContactsUsageDescription: "JARVIS looks up contacts when you ask it to call, FaceTime or message someone."
         NSCalendarsFullAccessUsageDescription: "JARVIS reads and edits your calendar events when you ask it to."
         NSRemindersFullAccessUsageDescription: "JARVIS reads, creates and completes reminders when you ask it to."

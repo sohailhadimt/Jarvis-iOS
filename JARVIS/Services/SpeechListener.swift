@@ -1,8 +1,9 @@
 import AVFoundation
 import Foundation
+import os
 import Speech
 
-enum ListenerError: LocalizedError {
+enum ListenerError: LocalizedError, Equatable {
     case unavailable, noInput, timedOut
     var errorDescription: String? {
         switch self {
@@ -10,6 +11,32 @@ enum ListenerError: LocalizedError {
         case .noInput: "No microphone input is available."
         case .timedOut: "On-device speech recognition took too long."
         }
+    }
+}
+
+enum SpeechLocales {
+    /// First recogniser that can run: saved locale, British English, US English, then the phone locale.
+    nonisolated static func recognizer(preferred: String) -> SFSpeechRecognizer? {
+        var seen = Set<String>()
+        let identifiers = [preferred, "en-GB", "en-US", Locale.current.identifier]
+        for identifier in identifiers where seen.insert(identifier).inserted {
+            if let recognizer = SFSpeechRecognizer(locale: Locale(identifier: identifier)), recognizer.isAvailable {
+                return recognizer
+            }
+        }
+        if let recognizer = SFSpeechRecognizer(), recognizer.isAvailable {
+            return recognizer
+        }
+        return nil
+    }
+
+    /// True when an on-device model is missing or rejected. "No speech" stays on device.
+    nonisolated static func shouldLeaveOnDevice(_ error: any Error) -> Bool {
+        let ns = error as NSError
+        if ns.code == 1110 || ns.code == 203 { return false }
+        let lower = ns.localizedDescription.lowercased()
+        if lower.contains("no speech") || lower.contains("cancel") { return false }
+        return true
     }
 }
 
@@ -22,6 +49,8 @@ final class SpeechListener {
     var onError: ((any Error) -> Void)?
 
     let gate = SpeakerGate()
+    private let log = Logger(subsystem: "com.sohail.jarvis", category: "speech")
+    private var allowServerRecognition = false
     private var recognizer: SFSpeechRecognizer? = SFSpeechRecognizer(locale: Locale(identifier: "en-GB")) ?? SFSpeechRecognizer()
     private var engine: AVAudioEngine?
     private var request: SFSpeechAudioBufferRecognitionRequest?
@@ -49,18 +78,23 @@ final class SpeechListener {
         try installTap(AudioTaps.silentTap(), bufferSize: 1024)
     }
 
+    /// Next listen tries the on-device model again. A failed model stays on the server for this session.
+    func resetOnDevicePreference() {
+        allowServerRecognition = false
+    }
+
     func start() throws {
         endRecognition()
         discardWriter()
         lastCaptureFailure = nil
-        let locale = Locale(identifier: AppSettings.shared.speechLocale)
-        recognizer = SFSpeechRecognizer(locale: locale) ?? SFSpeechRecognizer()
-        guard let recognizer, recognizer.isAvailable else { throw ListenerError.unavailable }
+        recognizer = SpeechLocales.recognizer(preferred: AppSettings.shared.speechLocale)
+        guard let recognizer else { throw ListenerError.unavailable }
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.addsPunctuation = true
-        if recognizer.supportsOnDeviceRecognition {
+        let forcedOnDevice = !allowServerRecognition && recognizer.supportsOnDeviceRecognition
+        if forcedOnDevice {
             request.requiresOnDeviceRecognition = true
         }
 
@@ -76,6 +110,10 @@ final class SpeechListener {
         let handler: @Sendable (String?, Bool, (any Error)?) -> Void = { [weak self] text, isFinal, error in
             Task { @MainActor in
                 guard let self, self.generation == gen else { return }
+                if let error, text == nil, forcedOnDevice, SpeechLocales.shouldLeaveOnDevice(error) {
+                    self.allowServerRecognition = true
+                    self.log.error("on-device speech failed; leaving it for this session")
+                }
                 if let text { self.onTranscript?(text, isFinal) }
                 if let error, text == nil { self.onError?(error) }
             }

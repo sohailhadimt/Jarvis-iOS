@@ -30,8 +30,12 @@ private let sessionLog = Logger(subsystem: "com.sohail.jarvis", category: "sessi
 final class AssistantEngine {
     static let shared = AssistantEngine()
 
-    private(set) var phase: JarvisPhase = .idle
-    private(set) var level: Double = 0
+    private(set) var phase: JarvisPhase = .idle {
+        didSet { VoiceMeter.shared.phase = phase }
+    }
+    private(set) var level: Double = 0 {
+        didSet { VoiceMeter.shared.level = level }
+    }
     private(set) var transcript = ""
     private(set) var reply = ""
     private(set) var isSessionActive = false
@@ -46,6 +50,28 @@ final class AssistantEngine {
     private(set) var briefChoices: [CallChoice] = []
     /// A briefed call waiting for a spoken or tapped yes. Other approvals stay tap-only.
     private(set) var pendingCallBrief: PendingCallBrief?
+    /// The inbound call JARVIS is screening, when one is live.
+    private(set) var inboundCall: PhoneCallRecord?
+    /// A question from a live call that needs Sohail's answer.
+    private(set) var pendingQuestion: CallQuestion?
+    /// True while that answer is being sent, so a second tap does not send it twice.
+    private(set) var relayingAnswer = false
+    /// Latest problem JARVIS reported, when one is waiting in the app.
+    private(set) var ownerAlert: OwnerAlert?
+    /// Calls shown as cards on the home screen.
+    private(set) var deskCalls: [StoredCall] = []
+    /// True while a spoken away order is still in force.
+    private(set) var awayActive = false
+    var interceptor: Bool { inboundCall != nil || awayActive }
+    var ringLabel: String? {
+        if deskCalls.contains(where: { CallDeskStage.of($0) == .dialing }) { return "DIALING" }
+        if inboundCall != nil || deskCalls.contains(where: { CallDeskStage.of($0) == .live }) { return "ON THE CALL" }
+        switch phase {
+        case .listening: return "LISTENING"
+        case .speaking: return "SPEAKING"
+        default: return nil
+        }
+    }
     /// Bumped when the on-phone call log changes.
     private(set) var callLogTick: Int = 0
     var hasContactChoices: Bool { !callChoices.isEmpty || !briefChoices.isEmpty }
@@ -79,6 +105,12 @@ final class AssistantEngine {
     @ObservationIgnored private var pendingAction: PendingAction?
     @ObservationIgnored private var heldBrief = ""
     @ObservationIgnored private var callWatch: Task<Void, Never>?
+    @ObservationIgnored private var screenWatch: Task<Void, Never>?
+    @ObservationIgnored private var inboundIDs: Set<String> = []
+    /// Call id whose Live Activity the user dismissed. A new call clears it.
+    @ObservationIgnored private var dismissedCallActivityID: String?
+    @ObservationIgnored private var heardQuestions: Set<String> = []
+    @ObservationIgnored private var remindedQuestions: Set<String> = []
     @ObservationIgnored private var silenceTask: Task<Void, Never>?
     @ObservationIgnored private var turnTask: Task<Void, Never>?
     @ObservationIgnored private var pushToTalkHeld = false
@@ -104,18 +136,25 @@ final class AssistantEngine {
     @ObservationIgnored private var turnAssistantStored = false
     /// Smoothed mic level used only to detect the end of a Groq recording.
     @ObservationIgnored private var captureMeter = 0.0
+    /// Partials in the current utterance. The first one must not end the turn.
+    @ObservationIgnored private var partialCount = 0
+    @ObservationIgnored private var lastPartial = ""
+    @ObservationIgnored private var utteranceStarted: Date?
+    @ObservationIgnored private var endpointArmed = false
+    /// One extra recognition pass after the recogniser closes, so a pause can still grow.
+    @ObservationIgnored private var heldListen = false
+    /// Speech must last this long before silence is allowed to end it.
+    private let minimumUtteranceSeconds: Double = 0.8
     /// Sentences still being spoken for the current streamed reply. Cancelled on barge-in.
     @ObservationIgnored private var spokenQueue: SpokenQueue?
     /// Enrolment owns the microphone. Wake and hands-free listening stay down until it finishes.
     @ObservationIgnored private var enrollmentHold = false
     @ObservationIgnored private var resumeSessionAfterEnrollment = false
 
-    /// Silence that ends a turn. Sensitivity 0 waits 700ms; 1 waits 500ms.
-    private var silenceTimeout: Duration {
-        let sensitivity: Double = min(1.0, max(0.0, AppSettings.shared.vadSensitivity))
-        let span: Double = sensitivity * 200.0
-        let milliseconds: Double = 700.0 - span
-        return .milliseconds(Int(milliseconds))
+    /// Quiet after the latest partial. Settings, clamped to 1–3 seconds. Default 1.75.
+    private var endpointPause: Duration {
+        let seconds = min(3, max(1, AppSettings.shared.endpointSilence))
+        return .milliseconds(Int((seconds * 1000).rounded()))
     }
 
     /// off → connecting → listening ↔ userSpeaking → thinking → aiSpeaking → listening.
@@ -195,11 +234,20 @@ final class AssistantEngine {
                 return
             }
             stopWake()
+            output.yieldMicrophone()
             do {
                 try listener.start()
             } catch {
                 isDictating = false
-                errorMessage = error.localizedDescription
+                reply = ""
+                if let listenerError = error as? ListenerError, listenerError == .noInput {
+                    errorMessage = JarvisLines.voiceUnavailable
+                } else if error is ListenerError {
+                    errorMessage = JarvisLines.speechUnavailable
+                } else {
+                    errorMessage = JarvisLines.explain(error)
+                }
+                sessionLog.error("dictation failed: \(error.localizedDescription, privacy: .public)")
                 refreshWake()
             }
         }
@@ -242,12 +290,14 @@ final class AssistantEngine {
         listener.holdEngine = true
         publishControlState()
 
-        let activityOK = LiveActivityManager.shared.start(state: activityState)
+        let activityOK = beginLiveActivity()
         let inBackground = UIApplication.shared.applicationState != .active
         if !activityOK && inBackground {
             // Activating the mic with no Live Activity makes AudioRecordingIntent kill the process.
             sessionLog.error("Live Activity missing in background; not activating the microphone")
-            errorMessage = "Turn on Live Activities for JARVIS so the Action Button can listen in the Dynamic Island."
+            if AppSettings.shared.liveActivityEnabled {
+                errorMessage = "Turn on Live Activities for JARVIS so the Action Button can listen in the Dynamic Island."
+            }
             await endSession(reason: "live-activity-unavailable")
             return .needsForeground
         }
@@ -273,11 +323,12 @@ final class AssistantEngine {
         }
 
         if !LiveActivityManager.shared.isRunning {
-            _ = LiveActivityManager.shared.start(state: activityState)
+            _ = beginLiveActivity()
         }
         groqTranscriptionBroken = false
         fileCaptureBroken = false
         listenRetries = 0
+        listener.resetOnDevicePreference()
         interrupt()
         beginListening(manual: false)
         if !listener.isEngineRunning {
@@ -294,6 +345,7 @@ final class AssistantEngine {
     }
 
     func endSession(reason: String = "toggle-off") async {
+        let wasSession = isSessionActive
         sessionEpoch += 1
         sessionLog.info("endSession \(reason, privacy: .public)")
         VoiceSession.shared.exiting = true
@@ -310,10 +362,15 @@ final class AssistantEngine {
         userIsSpeaking = false
         phase = .idle
         level = 0
+        if !wasSession, let id = activeCallID() {
+            dismissedCallActivityID = id
+        }
         await LiveActivityManager.shared.end(finalState: activityState)
+        refreshCallActivity()
         publishControlState()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         audioConfigured = false
+        listener.resetOnDevicePreference()
         refreshWake()
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(160))
@@ -419,6 +476,14 @@ final class AssistantEngine {
     func ask(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        if !Reachability.shared.online {
+            OfflineQueue.shared.enqueue(trimmed)
+            errorMessage = "I'm offline, sir. I'll send that when the line is back."
+            reply = ""
+            phase = .idle
+            level = 0
+            return
+        }
         LatencyLog.beginTurn("text-turn")
         Task {
             let session = AVAudioSession.sharedInstance()
@@ -459,31 +524,36 @@ final class AssistantEngine {
 
     // MARK: Internals
 
+    private func hearingAllowed() -> Bool {
+        AudioTaps.speechAuthorizationStatus() == .authorized
+            && AVAudioApplication.shared.recordPermission == .granted
+    }
+
+    /// Clears a previous reply so the denied line is what stays on screen.
+    private func showHearingDenied(needsSettings: Bool) {
+        reply = ""
+        errorMessage = needsSettings ? JarvisLines.microphoneDenied : JarvisLines.microphoneClosed
+    }
+
     /// True when the microphone is already allowed and the playAndRecord session is active.
     /// This path does not suspend, so a control's `perform()` can start the engine before it returns.
     private func activateAudioIfAuthorized() -> Bool {
-        guard AudioTaps.speechAuthorizationStatus() == .authorized,
-              AVAudioApplication.shared.recordPermission == .granted else {
-            errorMessage = "JARVIS needs Microphone and Speech Recognition access. Open JARVIS once and allow both."
-            return false
-        }
+        guard hearingAllowed() else { return false }
         return activateAudioSession()
     }
 
     /// Permission prompts only happen in the foreground. A control launch must not `await` before the
     /// Live Activity exists, and must not activate the session when that activity is missing.
     private func activateAudio() async -> Bool {
-        var speech = AudioTaps.speechAuthorizationStatus()
-        var mic = AVAudioApplication.shared.recordPermission
-        if speech != .authorized || mic != .granted {
+        if !hearingAllowed() {
             guard UIApplication.shared.applicationState == .active else {
-                errorMessage = "JARVIS needs Microphone and Speech Recognition access. Open JARVIS once and allow both."
+                showHearingDenied(needsSettings: false)
                 return false
             }
-            speech = await AudioTaps.requestSpeechAuthorization()
+            let speech = await AudioTaps.requestSpeechAuthorization()
             let micGranted = await AVAudioApplication.requestRecordPermission()
             guard speech == .authorized, micGranted else {
-                errorMessage = "JARVIS needs Microphone and Speech Recognition access. Turn them on in iPhone Settings > JARVIS."
+                showHearingDenied(needsSettings: true)
                 return false
             }
         }
@@ -500,22 +570,41 @@ final class AssistantEngine {
                                 options: [.defaultToSpeaker, .allowBluetoothHFP])
     }
 
+    /// Category first, then activate. A session that was interrupted is brought back every listen.
     private func activateAudioSession() -> Bool {
-        if !audioConfigured {
-            do {
-                let session = AVAudioSession.sharedInstance()
-                try Self.configureVoiceSession(session)
-                try session.setActive(true)
-                audioConfigured = true
-                sessionLog.info("AVAudioSession active playAndRecord voiceChat")
-            } catch {
-                errorMessage = "Audio session error: \(error.localizedDescription)"
-                sessionLog.error("AVAudioSession failed: \(error.localizedDescription, privacy: .public)")
-                return false
-            }
+        let session = AVAudioSession.sharedInstance()
+        if applyVoiceSession(session) {
+            return true
         }
-        errorMessage = nil
-        return true
+        sessionLog.error("AVAudioSession failed; retrying after deactivate")
+        try? session.setActive(false, options: .notifyOthersOnDeactivation)
+        audioConfigured = false
+        if applyVoiceSession(session) {
+            return true
+        }
+        errorMessage = JarvisLines.voiceUnavailable
+        reply = ""
+        return false
+    }
+
+    private func applyVoiceSession(_ session: AVAudioSession) -> Bool {
+        do {
+            let categoryReady = audioConfigured && session.category == .playAndRecord && session.mode == .voiceChat
+            if !categoryReady {
+                try Self.configureVoiceSession(session)
+            }
+            try session.setActive(true)
+            audioConfigured = true
+            errorMessage = nil
+            if !categoryReady {
+                sessionLog.info("AVAudioSession active playAndRecord voiceChat")
+            }
+            return true
+        } catch {
+            sessionLog.error("AVAudioSession failed: \(error.localizedDescription, privacy: .public)")
+            audioConfigured = false
+            return false
+        }
     }
 
     private func interrupt() {
@@ -536,8 +625,21 @@ final class AssistantEngine {
         loudFrames = 0
         captureMeter = 0
         captureFile = false
+        partialCount = 0
+        lastPartial = ""
+        utteranceStarted = nil
+        endpointArmed = false
+        heldListen = false
         userIsSpeaking = false
         voiceConnecting = false
+        output.yieldMicrophone()
+        guard activateAudioSession() else {
+            listener.holdEngine = false
+            listener.stop()
+            phase = .idle
+            pushActivity()
+            return
+        }
         if microphoneMuted {
             listener.stop()
             phase = .listening
@@ -558,22 +660,32 @@ final class AssistantEngine {
             }
             phase = .listening
             listenRetries = 0
+            errorMessage = nil
         } catch {
-            errorMessage = error.localizedDescription
             sessionLog.error("beginListening failed: \(error.localizedDescription, privacy: .public)")
-            if isSessionActive {
+            let permanent = error as? ListenerError == .unavailable || error as? ListenerError == .noInput
+            let canRetry = !permanent && isSessionActive && isContinuous && listenRetries < 3
+            if permanent {
+                reply = ""
+                errorMessage = (error as? ListenerError) == .noInput
+                    ? JarvisLines.voiceUnavailable
+                    : JarvisLines.speechUnavailable
+            } else if canRetry {
                 try? listener.keepEngineAlive()
-                if isContinuous, listenRetries < 3 {
-                    listenRetries += 1
-                    let attempt = listenRetries
-                    sessionLog.info("retrying recognition \(attempt)")
-                    Task { @MainActor in
-                        try? await Task.sleep(for: .milliseconds(500))
-                        // A successful start zeroes listenRetries, so this retry does not interrupt it.
-                        guard self.isSessionActive, self.listenRetries == attempt else { return }
-                        self.beginListening(manual: false)
-                    }
+                listenRetries += 1
+                let attempt = listenRetries
+                sessionLog.info("retrying recognition \(attempt)")
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(500))
+                    // A successful start zeroes listenRetries, so this retry does not interrupt it.
+                    guard self.isSessionActive, self.listenRetries == attempt else { return }
+                    self.beginListening(manual: false)
                 }
+            } else if isSessionActive {
+                try? listener.keepEngineAlive()
+                errorMessage = JarvisLines.missedSpeech
+            } else {
+                errorMessage = JarvisLines.explain(error)
             }
             if !isSessionActive || !listener.isEngineRunning {
                 phase = .idle
@@ -643,30 +755,37 @@ final class AssistantEngine {
             return
         }
         guard phase == .listening, pendingAction == nil, !microphoneMuted else { return }
-        transcript = text
-        userIsSpeaking = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        guard !manualTurn else { return }
-        if isFinal {
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty, isSessionActive, isContinuous, !manualTurn {
-                // The recogniser closes an empty utterance on its own. That must not end the session.
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            if isFinal, !transcript.isEmpty {
+                if !endpointArmed { armEndpoint() }
+                holdListen()
+            } else if isFinal, isSessionActive, isContinuous {
                 sessionLog.info("empty recognition result; restarting listen")
                 beginListening(manual: false)
-                return
             }
-            finishUtterance()
             return
         }
-        silenceTask?.cancel()
-        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let changed = trimmed != lastPartial
+        lastPartial = trimmed
+        transcript = trimmed
+        userIsSpeaking = true
+        if utteranceStarted == nil { utteranceStarted = Date() }
+        if changed {
+            partialCount += 1
+            heldListen = false
+        }
+        guard !manualTurn else { return }
+        // The first partial only shows the words. A later partial, or the recogniser closing, arms the pause.
+        if partialCount < 2 && !isFinal {
+            pushActivity()
+            return
+        }
+        if changed || !endpointArmed {
             LatencyLog.noteSpeechEnd()
+            armEndpoint()
         }
-        let timeout = silenceTimeout
-        silenceTask = Task { [weak self] in
-            try? await Task.sleep(for: timeout)
-            guard !Task.isCancelled else { return }
-            self?.finishUtterance()
-        }
+        if isFinal { holdListen() }
         pushActivity()
     }
 
@@ -676,8 +795,11 @@ final class AssistantEngine {
             return
         }
         guard phase == .listening else { return }
-        // Recognition sessions can end (e.g. "no speech detected"); restart in continuous mode.
-        if !transcript.isEmpty { finishUtterance(); return }
+        // A closed recogniser must not cut the sentence off. Silence still ends the turn.
+        if !transcript.isEmpty {
+            if !endpointArmed { armEndpoint() }
+            return
+        }
         if isSessionActive && isContinuous {
             sessionLog.info("recognition ended; restarting listen")
             beginListening(manual: false)
@@ -687,6 +809,42 @@ final class AssistantEngine {
             level = 0
             pushActivity()
             refreshWake()
+        }
+    }
+
+    /// Restarts recognition once without wiping the words already heard, so a pause can still grow.
+    private func holdListen() {
+        guard !heldListen else { return }
+        heldListen = true
+        guard isSessionActive, phase == .listening, !microphoneMuted, !captureFile else { return }
+        do {
+            try listener.start()
+        } catch {
+            sessionLog.error("keepListening failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Adaptive endpoint. Each new partial cancels the previous wait.
+    private func armEndpoint() {
+        endpointArmed = true
+        silenceTask?.cancel()
+        let pause = endpointPause
+        let minimum = minimumUtteranceSeconds
+        silenceTask = Task { [weak self] in
+            try? await Task.sleep(for: pause)
+            guard let self, !Task.isCancelled, self.phase == .listening else { return }
+            let started = self.utteranceStarted ?? Date()
+            let age = Date().timeIntervalSince(started)
+            if age < minimum {
+                let rest = minimum - age
+                try? await Task.sleep(for: .milliseconds(Int((rest * 1000).rounded(.up))))
+                guard !Task.isCancelled, self.phase == .listening else { return }
+            }
+            if !self.captureFile {
+                let trimmed = self.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.count < 2 { return }
+            }
+            self.finishUtterance()
         }
     }
 
@@ -722,8 +880,9 @@ final class AssistantEngine {
             text = try await transcribeCapturedFile(url)
         } catch {
             if Task.isCancelled { return }
-            errorMessage = error.localizedDescription
-            reply = "⚠︎ \(error.localizedDescription)"
+            errorMessage = JarvisLines.explain(error)
+            sessionLog.error("transcription failed: \(error.localizedDescription, privacy: .public)")
+            reply = ""
             afterTurn()
             return
         }
@@ -745,7 +904,6 @@ final class AssistantEngine {
                 if Task.isCancelled { throw error }
                 if Self.isGroqAuthFailure(error) {
                     groqTranscriptionBroken = true
-                    errorMessage = error.localizedDescription
                 }
                 statusLine = "Using on-device speech…"
                 pushActivity()
@@ -923,7 +1081,7 @@ final class AssistantEngine {
         do {
             try await AppLauncher.open(url)
         } catch {
-            await speakLine(error.localizedDescription, userText: name)
+            await speakLine(JarvisLines.explain(error), userText: name)
             afterTurn()
             return
         }
@@ -940,6 +1098,63 @@ final class AssistantEngine {
         recordAssistant(line)
         saveForWidget(transcript: userText, reply: line)
         await say(ResponsesClient.spokenText(line))
+    }
+
+    /// Weather, news, facts and nearby questions are answered on the worker in one spoken line.
+    private func deliverLiveAnswer(userText: String) async -> Bool {
+        guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else { return false }
+        let here = WebKnowledge.needsHere(userText) ? await DeviceLocation.shared.fix() : nil
+        let facts = JarvisStore.allFacts()
+        let system = AppSettings.shared.voicePrompt(facts: facts, question: userText)
+            + " Answer in one or two spoken sentences. Give the fact itself. Do not say you will search or look it up. Do not read URLs or list links."
+        var messages: [[String: String]] = [["role": "system", "content": system]]
+        for turn in conversation.suffix(8) {
+            let role = turn.role == "assistant" ? "assistant" : "user"
+            let content = turn.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !content.isEmpty { messages.append(["role": role, "content": content]) }
+        }
+        messages.append(["role": "user", "content": userText])
+        guard let line = await client.converse(messages: messages, location: here) else { return false }
+        if Self.isSearchPromise(line) { return false }
+        errorMessage = nil
+        citations = []
+        await speakLine(line, userText: userText)
+        guard !Task.isCancelled else { return true }
+        afterTurn()
+        return true
+    }
+
+    /// A short promise to go and search, with no fact in it.
+    private static func isSearchPromise(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count < 140 else { return false }
+        let lower = trimmed.lowercased()
+        let starts = lower.hasPrefix("i'll") || lower.hasPrefix("i will") || lower.hasPrefix("let me")
+            || lower.hasPrefix("i'm going to") || lower.hasPrefix("i am going to")
+        guard starts else { return false }
+        return lower.contains("search") || lower.contains("look that up") || lower.contains("look it up")
+            || lower.contains("look this up") || lower.contains("google")
+    }
+
+    /// On-device keys are optional. The worker holds Gemini and Groq, and a failed turn still gets a spoken line.
+    private func deliverCloudOrFallback(userText: String, system: String, history: [ChatMessage], user: String) async {
+        var messages: [[String: String]] = [["role": "system", "content": system]]
+        for turn in history.suffix(16) {
+            let role = turn.role == "assistant" ? "assistant" : "user"
+            let content = turn.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !content.isEmpty { messages.append(["role": role, "content": content]) }
+        }
+        let asked = user.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !asked.isEmpty { messages.append(["role": "user", "content": asked]) }
+        if JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() {
+            if let line = await client.converse(messages: messages) {
+                errorMessage = nil
+                await speakLine(line, userText: userText)
+                return
+            }
+        }
+        errorMessage = nil
+        await speakLine("I'm here, sir. I couldn't reach my notes just now. Ask me again in a moment.", userText: userText)
     }
 
     /// The Phone app is opening, so the microphone stays off.
@@ -961,10 +1176,39 @@ final class AssistantEngine {
         pushActivity()
 
         // Tool cards stay tap-only. Spoken words do not approve them.
-        if pendingAction != nil { return }
+        if pendingAction != nil {
+            afterTurn()
+            return
+        }
         // A briefed phone call is the one approval that also accepts a spoken yes or no.
         if pendingCallBrief != nil {
             await resolvePendingCallBrief(text)
+            return
+        }
+        if AwayCommand.matches(text) {
+            await applyAway(text)
+            return
+        }
+        if let waiting = deskCalls.first(where: { $0.delegationStatus == "awaiting_decision" }) {
+            await sendDecision(waiting.id, choice: text)
+            await speakLine("Right away, Sir.", userText: text)
+            guard !Task.isCancelled else { return }
+            afterTurn()
+            return
+        }
+        if let question = pendingQuestion {
+            let answer = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !answer.isEmpty else {
+                afterTurn()
+                return
+            }
+            if !relayingAnswer {
+                relayingAnswer = true
+                Task { await self.sendCallAnswer(question, answer) }
+                await speakLine("I'll tell them, sir.", userText: text)
+            }
+            guard !Task.isCancelled else { return }
+            afterTurn()
             return
         }
 
@@ -977,13 +1221,18 @@ final class AssistantEngine {
         if await handleBriefedCall(text) { return }
 
         if let delegation = AgentStore.shared.delegation(in: text) {
-            let ack = "\(delegation.agent.name) is on that."
-            recordAssistant(ack)
-            saveForWidget(transcript: text, reply: ack)
-            await say(ResponsesClient.spokenText(ack))
             let agent = delegation.agent
             let goal = delegation.goal
-            Task { await AgentStore.shared.delegate(agent: agent, goal: goal) }
+            let ack: String
+            if agent.id == "agent_jarvis" {
+                ack = await AgentStore.shared.startMission(goal: goal)
+            } else {
+                ack = "\(agent.name) is on that."
+                Task { await AgentStore.shared.delegate(agent: agent, goal: goal) }
+            }
+            recordAssistant(ack)
+            saveForWidget(transcript: text, reply: ack)
+            await say(ResponsesClient.spokenText(ack), voiceID: agent.voiceID)
             guard !Task.isCancelled else { return }
             afterTurn()
             return
@@ -995,6 +1244,11 @@ final class AssistantEngine {
 
         if wantsCloudTool(text) && CloudMonitor.shared.hasRunningWork {
             cloudExecuting = true
+        }
+        let liveQuestion = WebKnowledge.needsLiveFacts(text) || NewsPulse.wants(text)
+        if liveQuestion, !Self.needsTools(text), !wantsCloudTool(text), !isBriefingRequest(text),
+           !DeepResearch.wants(text), !ImageStudio.wants(text) {
+            if await deliverLiveAnswer(userText: text) { return }
         }
         if NewsPulse.wants(text) {
             await deliverNews(userText: text)
@@ -1025,10 +1279,11 @@ final class AssistantEngine {
             visionJPEG = nil
         }
 
+        let facts = JarvisStore.allFacts()
+        let prior = recordedUser ? Array(conversation.dropLast()) : conversation
+        let history = Array(prior.suffix(16))
+        let cloudSystem = settings.voicePrompt(facts: facts, question: text)
         do {
-            let facts = JarvisStore.allFacts()
-            let prior = recordedUser ? Array(conversation.dropLast()) : conversation
-            let history = Array(prior.suffix(16))
             let produced: Produced
             if let stagedFile {
                 let system = settings.voicePrompt(facts: facts, question: text)
@@ -1084,12 +1339,8 @@ final class AssistantEngine {
             }
         } catch {
             if Task.isCancelled { return }
-            let line = LLMError.short(error)
-            errorMessage = line
-            reply = "⚠︎ \(line)"
-            if let llmError = error as? LLMError, case .missingKey = llmError {
-                isContinuous = false
-            }
+            sessionLog.error("turn failed: \(error.localizedDescription, privacy: .public)")
+            await deliverCloudOrFallback(userText: text, system: cloudSystem, history: history, user: text)
         }
         guard !Task.isCancelled else { return }
         afterTurn()
@@ -1117,11 +1368,11 @@ final class AssistantEngine {
                                 endpoint: LLMEndpoint) async throws -> String {
         let settings = AppSettings.shared
         if endpoint.kind == .openAI, let key = endpoint.apiKey {
-            statusLine = "Searching the web…"
             let answer = try await ResponsesClient.answer(
                 input: history + [user],
                 instructions: system + "\n\nSearch the web when the answer may have changed recently. "
-                    + "Your reply is spoken: 1–3 sentences, no URLs, no markdown.",
+                    + "Reply with the answer itself in one or two spoken sentences. "
+                    + "Do not say you will search or look it up. No URLs, no markdown, no list of links.",
                 model: settings.searchModel, apiKey: key)
             citations = answer.citations
             return answer.text
@@ -1276,7 +1527,7 @@ final class AssistantEngine {
         pendingCallBrief = PendingCallBrief(contactName: name, number: number, brief: brief)
         let spokenBrief = brief.count > 280 ? String(brief.prefix(280)) + "…" : brief
         let who = name == number ? number : name
-        let line = "I'll call \(who) and tell them \(spokenBrief). I'll introduce myself as your AI assistant. Say yes, sir, or no to cancel."
+        let line = "I'll call \(who) and tell them \(spokenBrief). I'll introduce myself as JARVIS, Master Hadi's assistant. Say yes, sir, or no to cancel."
         await speakLine(line, userText: userText)
         afterTurn()
     }
@@ -1338,7 +1589,7 @@ final class AssistantEngine {
             let client = try JarvisCloudAPI.client()
             return await client.placeOutboundCall(to: brief.number, contactName: brief.contactName, brief: brief.brief)
         } catch {
-            return .failed(error.localizedDescription)
+            return .failed(JarvisLines.explain(error))
         }
     }
 
@@ -1358,6 +1609,225 @@ final class AssistantEngine {
         }
     }
 
+    func startScreenWatch() {
+        guard screenWatch == nil else { return }
+        screenWatch = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.pullInbound()
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+    }
+
+    func decideDesk(_ id: String, choice: String) {
+        Task { await self.sendDecision(id, choice: choice) }
+    }
+
+    func playRecording(_ id: String) {
+        Task { await self.playCallRecording(id) }
+    }
+
+    private func refreshDesk() {
+        let now = Date()
+        let rows = CallLogStore.entries().filter { call in
+            let stage = CallDeskStage.of(call)
+            if stage != .ended { return true }
+            if call.delegationStatus == "awaiting_decision" { return true }
+            return now.timeIntervalSince(call.updatedAt) < 60 * 60
+        }
+        deskCalls = Array(rows.prefix(2))
+        VoiceMeter.shared.interceptor = interceptor
+    }
+
+    private func applyAway(_ text: String) async {
+        let active = (try? await JarvisCloudAPI.client().setAway(text)) ?? false
+        awayActive = active
+        VoiceMeter.shared.interceptor = interceptor
+        let line = active ? "I'll answer your calls, Sir." : "I'll leave the phone to you, Sir."
+        recordAssistant(line)
+        await speakLine(line, userText: text)
+        guard !Task.isCancelled else { return }
+        afterTurn()
+    }
+
+    private func sendDecision(_ id: String, choice: String) async {
+        guard let client = try? JarvisCloudAPI.client() else { return }
+        if let call = deskCalls.first(where: { $0.id == id }), call.delegationStatus != "awaiting_decision" {
+            let result = await client.placeOutboundCall(to: call.number, contactName: call.displayName, brief: call.brief)
+            if case .placed(let record) = result {
+                absorb(record, announce: false)
+                Task { await self.pollCall(id: record.id) }
+            }
+            return
+        }
+        guard await client.decideCall(id: id, choice: choice) else { return }
+        if let record = try? await client.outboundCall(id: id) {
+            absorb(record, announce: false)
+        }
+    }
+
+    private func playCallRecording(_ id: String) async {
+        guard let client = try? JarvisCloudAPI.client(), let data = try? await client.recordingData(id: id) else {
+            statusLine = "The recording isn't ready yet, Sir."
+            return
+        }
+        if !CallPlayback.shared.play(data) {
+            statusLine = "I couldn't play that recording, Sir."
+        }
+    }
+
+    func answerPendingQuestion(_ text: String) {
+        guard let question = pendingQuestion, !relayingAnswer else { return }
+        let answer = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !answer.isEmpty else { return }
+        relayingAnswer = true
+        Task { await self.sendCallAnswer(question, answer) }
+    }
+
+    private func sendCallAnswer(_ question: CallQuestion, _ text: String) async {
+        defer { relayingAnswer = false }
+        guard let client = try? JarvisCloudAPI.client() else {
+            errorMessage = "Calling isn't set up yet, sir."
+            return
+        }
+        let result = await client.answerCallQuestion(callId: question.callId, questionId: question.id, text: text)
+        switch result {
+        case .failed(let message), .notSetUp(let message):
+            statusLine = message
+            errorMessage = message
+            if pendingQuestion == nil { pendingQuestion = question }
+        case .done:
+            if pendingQuestion?.id == question.id { pendingQuestion = nil }
+            errorMessage = nil
+        }
+    }
+
+    private func pullQuestions(_ client: CloudClient) async {
+        guard let questions = try? await client.callQuestions() else { return }
+        if let pending = questions.first(where: { $0.status == "pending" }) {
+            if pendingQuestion?.id != pending.id {
+                pendingQuestion = pending
+            }
+            if !heardQuestions.contains(pending.id), await announceQuestion(pending.question) {
+                heardQuestions.insert(pending.id)
+            }
+        } else {
+            pendingQuestion = nil
+        }
+        for row in questions where row.status == "timed_out" && !remindedQuestions.contains(row.id) {
+            if await remindFollowUp(row.question) {
+                remindedQuestions.insert(row.id)
+            }
+        }
+    }
+
+    private func pullOwnerAlerts(_ client: CloudClient) async {
+        guard let alerts = try? await client.ownerAlerts() else { return }
+        ownerAlert = alerts.first { alert in
+            guard let parsed = CloudTime.date(alert.createdAt) else { return false }
+            return Date().timeIntervalSince(parsed) < 12 * 60 * 60
+        }
+    }
+
+    private func announceQuestion(_ question: String) async -> Bool {
+        guard phase == .idle || phase == .listening else { return false }
+        let line = "Sir, they asked: \(question). What should I tell them?"
+        recordAssistant(line)
+        await say(line)
+        guard !Task.isCancelled else { return true }
+        afterTurn()
+        return true
+    }
+
+    private func remindFollowUp(_ question: String) async -> Bool {
+        guard phase == .idle || phase == .listening else { return false }
+        let line = "They asked \(question). I said you would get back to them, sir."
+        recordAssistant(line)
+        await say(line)
+        guard !Task.isCancelled else { return true }
+        afterTurn()
+        return true
+    }
+
+    func decideInbound(_ action: String) {
+        guard let id = inboundCall?.id else { return }
+        Task { await self.sendScreen(id: id, action: action) }
+    }
+
+    func allowInboundPersonal(_ allow: Bool) {
+        guard let id = inboundCall?.id else { return }
+        let note = CallPrivacyStore.note(matching: inboundCall)
+        Task { await self.sendPersonal(id: id, allow: allow, note: note) }
+    }
+
+    private func pullInbound() async {
+        guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else { return }
+        await CallPrivacyStore.syncIfNeeded()
+        await CallDevice.uploadIfNeeded()
+        await pullQuestions(client)
+        await pullOwnerAlerts(client)
+        if let away = try? await client.awayStatus() {
+            awayActive = away.active
+            VoiceMeter.shared.interceptor = interceptor
+        }
+        await DevicePresence.shared.postIfDue()
+        guard let calls = try? await client.activeInboundCalls() else { return }
+        let seen = Set(calls.map(\.id))
+        for record in calls {
+            absorb(record, announce: false)
+            if !inboundIDs.contains(record.id) {
+                inboundIDs.insert(record.id)
+                let name = record.callerName?.isEmpty == false ? (record.callerName ?? "someone") : "someone"
+                Task { await self.announceScreen(name) }
+            }
+        }
+        let gone = inboundIDs.subtracting(seen)
+        for id in gone {
+            inboundIDs.remove(id)
+            if let record = try? await client.outboundCall(id: id) {
+                absorb(record, announce: true)
+            }
+        }
+        inboundCall = calls.first
+        refreshDesk()
+        refreshCallActivity()
+    }
+
+    private func announceScreen(_ name: String) async {
+        guard phase == .idle || phase == .listening else { return }
+        let line = "Sir, \(name) is calling. I'm screening it."
+        recordAssistant(line)
+        saveForWidget(transcript: name, reply: line)
+        await say(line)
+        guard !Task.isCancelled else { return }
+        afterTurn()
+    }
+
+    private func sendScreen(id: String, action: String) async {
+        guard let client = try? JarvisCloudAPI.client() else {
+            errorMessage = "Calling isn't set up yet, sir."
+            return
+        }
+        let result = await client.screenCall(id: id, action: action)
+        await pullInbound()
+        switch result {
+        case .notSetUp(let message), .failed(let message):
+            statusLine = message
+            errorMessage = message
+        case .done:
+            errorMessage = nil
+            if action == "listen" {
+                statusLine = "Live transcript is on this iPhone. Take over rings your mobile."
+            }
+        }
+    }
+
+    private func sendPersonal(id: String, allow: Bool, note: String) async {
+        guard let client = try? JarvisCloudAPI.client() else { return }
+        _ = await client.setCallPersonal(id: id, allow: allow, note: allow ? note : "")
+        await pullInbound()
+    }
+
     private func pullOpenCalls() async {
         guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else { return }
         for row in CallLogStore.openCalls() where row.id.hasPrefix("call_") {
@@ -1374,15 +1844,20 @@ final class AssistantEngine {
         if shouldSpeak { stored.spoken = true }
         CallLogStore.update(stored)
         callLogTick += 1
+        refreshDesk()
+        refreshCallActivity()
         guard shouldSpeak else { return }
-        let name = stored.contactName
+        let name = stored.displayName
         let summary = stored.summary.isEmpty ? stored.detail : stored.summary
         let status = stored.status
-        Task { await self.speakCallReport(name: name, summary: summary, status: status) }
+        let inbound = stored.direction == "inbound"
+        Task { await self.speakCallReport(name: name, summary: summary, status: status, inbound: inbound) }
     }
 
-    private func speakCallReport(name: String, summary: String, status: String) async {
-        let line = CallReport.spoken(name: name, summary: summary, status: status)
+    private func speakCallReport(name: String, summary: String, status: String, inbound: Bool = false) async {
+        let line = inbound
+            ? CallReport.inbound(name: name, summary: summary, status: status)
+            : CallReport.spoken(name: name, summary: summary, status: status)
         for _ in 0..<40 {
             if phase == .idle || phase == .listening { break }
             try? await Task.sleep(for: .milliseconds(500))
@@ -1437,20 +1912,36 @@ final class AssistantEngine {
         statusLine = status == "shortcut-done" ? "Shortcut finished." : "Shortcut didn't complete."
     }
 
-    private func say(_ text: String) async {
+    /// Speaks a finished agent result in that agent's ElevenLabs voice when a session is listening.
+    func speakAgentLine(_ text: String, voiceID: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        guard phase == .listening else {
+            postAgentUpdate(trimmed)
+            return
+        }
+        Task { @MainActor in
+            self.recordAssistant(trimmed)
+            self.saveForWidget(transcript: "Agent", reply: trimmed)
+            await self.say(trimmed, voiceID: voiceID)
+            self.afterTurn()
+        }
+    }
+
+    private func say(_ text: String, voiceID: String = "") async {
         guard !Task.isCancelled else { return }
         utteranceBeingSpoken = text
         output.preparePlayback()
         phase = .speaking
         pushActivity()
-        await speak(text)
+        await speak(text, voiceID: voiceID)
         if !Task.isCancelled {
             spokenSoFar = Self.joinSpoken(spokenSoFar, text)
             utteranceBeingSpoken = ""
         }
     }
 
-    private func speak(_ text: String) async {
+    private func speak(_ text: String, voiceID: String = "") async {
         let monitor = !listener.isEngineRunning && !microphoneMuted
         if listener.isEngineRunning, !microphoneMuted {
             listener.setBargeMonitor(true)
@@ -1461,14 +1952,25 @@ final class AssistantEngine {
             errorMessage = "Add an ElevenLabs key in Settings. ElevenLabs is the only voice."
             return
         }
-        do {
-            try await output.speakElevenLabs(text: text, voiceID: s.voiceID, apiKey: key,
-                                             stability: s.stability, similarity: s.similarity,
-                                             monitorMicrophone: monitor)
-        } catch {
-            if Task.isCancelled { return }
-            errorMessage = "ElevenLabs failed (\(error.localizedDescription))."
+        let voice = voiceID.isEmpty ? s.voiceID : voiceID
+        var last: Error?
+        for attempt in 0..<2 {
+            do {
+                try await output.speakElevenLabs(text: text, voiceID: voice, apiKey: key,
+                                                 stability: s.stability, similarity: s.similarity,
+                                                 monitorMicrophone: monitor)
+                errorMessage = nil
+                return
+            } catch {
+                if Task.isCancelled { return }
+                last = error
+                if attempt == 0 {
+                    try? await Task.sleep(for: .milliseconds(400))
+                }
+            }
         }
+        sessionLog.error("ElevenLabs failed: \(last?.localizedDescription ?? "", privacy: .public)")
+        errorMessage = JarvisLines.voiceFailed
     }
 
     private func noteBarge(_ value: Double) {
@@ -1581,10 +2083,7 @@ final class AssistantEngine {
     /// World headlines from grounded search. "What's been happening" stays on the cloud briefing.
     private func deliverNews(userText: String) async {
         let persona = AppSettings.shared.personality
-        let outcome = await NewsPulse.run(question: userText, persona: persona) { step in
-            self.statusLine = step
-            self.pushActivity()
-        }
+        let outcome = await NewsPulse.run(question: userText, persona: persona) { _ in }
         guard !Task.isCancelled else { return }
         citations = outcome.citations
         statusLine = nil
@@ -1655,14 +2154,22 @@ final class AssistantEngine {
 
     /// Morning and "what's been happening" are read from the stored briefing, then spoken as facts then recommendations.
     private func deliverBriefing(userText: String) async {
-        let spoken: String
-        do {
-            let briefing = try await JarvisCloudAPI.client().briefing()
-            spoken = CloudSpeech.briefing(briefing)
-            await CloudMonitor.shared.refresh()
-        } catch {
-            spoken = error.localizedDescription
-            errorMessage = spoken
+        var spoken = JarvisLines.briefingFailed
+        for attempt in 0..<2 {
+            do {
+                let briefing = try await JarvisCloudAPI.client().briefing()
+                spoken = CloudSpeech.briefing(briefing)
+                await CloudMonitor.shared.refresh()
+                errorMessage = nil
+                break
+            } catch {
+                if Task.isCancelled { return }
+                sessionLog.error("briefing failed: \(error.localizedDescription, privacy: .public)")
+                errorMessage = JarvisLines.briefingFailed
+                if attempt == 0 {
+                    try? await Task.sleep(for: .milliseconds(400))
+                }
+            }
         }
         guard !Task.isCancelled else { return }
         recordAssistant(spoken)
@@ -1762,13 +2269,19 @@ final class AssistantEngine {
     /// Current facts: Gemini Google Search, then free web notes spoken by Groq or the fast model.
     private func answerLive(system: String, history: [ChatMessage], user: ChatMessage,
                             endpoint: LLMEndpoint) async throws -> Produced {
-        statusLine = Self.searchingLine
-        pushActivity()
-        defer {
-            if statusLine == Self.searchingLine { statusLine = nil }
-        }
         let date = Date.now.formatted(date: .complete, time: .shortened)
-        let brief = system + " Today is \(date). Answer from live information. Do not read URLs aloud."
+        var brief = system + " Today is \(date). Answer now in one or two spoken sentences. Give the fact itself. "
+            + "Do not say you will search, look it up, or check. Do not read URLs or list links."
+        if WebKnowledge.needsHere(user.content) {
+            if let here = await DeviceLocation.shared.fix() {
+                brief += " The user is nearby latitude \(String(format: "%.3f", here.lat)), longitude \(String(format: "%.3f", here.lon)). Do not read the coordinates aloud."
+                if let weather = await DeviceLocation.weatherLine(latitude: here.lat, longitude: here.lon) {
+                    brief += " Observed weather: \(weather)."
+                }
+            } else {
+                brief += " Location is not available. If the question needs where the user is, say so in one sentence. Do not invent a city."
+            }
+        }
         if let key = KeychainStore.get(.gemini), !key.isEmpty {
             let models = Self.groundModels()
             var index: Int = 0
@@ -1778,9 +2291,8 @@ final class AssistantEngine {
                     let streamed = try await streamedGrounded(model: model, apiKey: key, system: brief,
                                                              history: history, user: user)
                     let trimmed = streamed.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if trimmed.isEmpty { throw LLMError.emptyReply(provider: "Gemini") }
-                    if statusLine == Self.searchingLine { statusLine = nil }
-                    return Produced(text: streamed.text, spoken: streamed.spoken)
+                    if trimmed.isEmpty || Self.isSearchPromise(trimmed) { throw LLMError.emptyReply(provider: "Gemini") }
+                    return Produced(text: trimmed, spoken: streamed.spoken)
                 } catch {
                     if Task.isCancelled { throw error }
                     let retryOther = Self.groundingRejected(error)
@@ -1790,15 +2302,14 @@ final class AssistantEngine {
             }
         }
         let notes = await FreeWebSearch.gather(query: user.content)
-        mergeCitations(notes.citations)
         let noteBlock = notes.context.isEmpty
             ? "No live notes arrived. If the fact may have changed, say you could not confirm it."
             : "Live notes:\n\(notes.context)\nUse these notes. Do not invent newer numbers."
         let informed = brief + "\n\n" + noteBlock
+            + "\nReply with the answer only. Do not say you will search. Do not list links."
         let speaker = AppSettings.shared.fastGroqEndpoint()
             ?? AppSettings.shared.conversationalEndpoint(from: endpoint)
         let streamed = try await streamedChat(system: informed, history: history, user: user, endpoint: speaker)
-        if statusLine == Self.searchingLine { statusLine = nil }
         return Produced(text: streamed.text, spoken: streamed.spoken)
     }
 
@@ -2313,6 +2824,7 @@ final class AssistantEngine {
 
     private func beginWakeRecognition() {
         guard wakeArmed, !isSessionActive, phase == .idle else { return }
+        output.yieldMicrophone()
         do {
             try listener.start()
             wakeRestarts = 0
@@ -2351,37 +2863,111 @@ final class AssistantEngine {
     /// Groq Whisper is request/response, so silence is detected from the mic level instead of partial transcripts.
     private func noteCaptureLevel() {
         guard captureFile, phase == .listening, !manualTurn else { return }
-        let floor: Double = 0.30
-        let bandFloor: Double = 0.35
+        let enrolled = AppSettings.shared.voiceMatchEnabled && VoiceProfileStore.hasProfile
+        let floor: Double = enrolled ? 0.30 : 0.12
+        let bandFloor: Double = enrolled ? 0.35 : 0.18
         let band: Double = listener.speechBandRatio
         let speakerOK: Bool = listener.allowsUtterance
-        if captureMeter > floor && band >= bandFloor && speakerOK {
+        let speaking = captureMeter > floor && band >= bandFloor && speakerOK
+        if speaking {
+            if utteranceStarted == nil { utteranceStarted = Date() }
             loudFrames += 1
-            // Voice match already required a stretch of speech, so one loud frame can end the turn.
-            let needed: Int = AppSettings.shared.voiceMatchEnabled ? 1 : 3
-            if loudFrames >= needed {
-                heardVoice = true
-                userIsSpeaking = true
-                silenceTask?.cancel()
-                LatencyLog.noteSpeechEnd()
-                let timeout = silenceTimeout
-                silenceTask = Task { [weak self] in
-                    try? await Task.sleep(for: timeout)
-                    guard !Task.isCancelled else { return }
-                    self?.finishUtterance()
-                }
-            }
-        } else if !heardVoice {
+            // The first loud frame is not the end of the sentence.
+            guard loudFrames >= 2 else { return }
+            heardVoice = true
+            userIsSpeaking = true
+            silenceTask?.cancel()
+            endpointArmed = false
+            return
+        }
+        guard heardVoice else {
             loudFrames = 0
+            return
+        }
+        let age = Date().timeIntervalSince(utteranceStarted ?? Date())
+        guard age >= minimumUtteranceSeconds, !endpointArmed else { return }
+        LatencyLog.noteSpeechEnd()
+        armEndpoint()
+    }
+
+    func applyLiveActivityPreference() {
+        if !AppSettings.shared.liveActivityEnabled {
+            Task { await LiveActivityManager.shared.end(finalState: self.activityState) }
+            return
+        }
+        if isSessionActive {
+            _ = beginLiveActivity()
+            pushActivity()
+        } else {
+            refreshCallActivity()
         }
     }
 
+    private func beginLiveActivity() -> Bool {
+        guard AppSettings.shared.liveActivityEnabled else { return false }
+        return LiveActivityManager.shared.start(state: activityState)
+    }
+
     private var activityState: JarvisActivityAttributes.ContentState {
-        .init(phase: phase, transcript: String(transcript.suffix(90)), reply: String(reply.prefix(140)))
+        .init(phase: phase, transcript: String(transcript.suffix(90)), reply: String(reply.prefix(140)), callStatus: callActivityLine())
+    }
+
+    private func activeCallID() -> String? {
+        if let inboundCall { return inboundCall.id }
+        return CallLogStore.openCalls().first?.id
+    }
+
+    private func callActivityLine() -> String {
+        if let call = inboundCall {
+            let name = call.callerName?.isEmpty == false ? (call.callerName ?? "Incoming call") : "Incoming call"
+            return "\(name) · \(Self.callPhaseLabel(call.status))"
+        }
+        guard let open = CallLogStore.openCalls().first else { return "" }
+        return "\(open.displayName) · \(open.titleStatus)"
+    }
+
+    private static func callPhaseLabel(_ status: String) -> String {
+        switch status {
+        case "screening": "Screening"
+        case "listening": "Listening"
+        case "handling": "JARVIS handling"
+        case "message": "Taking a message"
+        case "connecting": "Connecting you"
+        case "placing": "Placing"
+        case "ringing": "Ringing"
+        case "in_progress": "On the call"
+        case "wrapping": "Finishing"
+        default: status
+        }
+    }
+
+    /// Shows an active call on the Lock Screen when a voice session is not already up.
+    private func refreshCallActivity() {
+        guard AppSettings.shared.liveActivityEnabled else { return }
+        let id = activeCallID()
+        if id == nil { dismissedCallActivityID = nil }
+        if let id, id == dismissedCallActivityID { return }
+        if isSessionActive {
+            pushActivity()
+            return
+        }
+        let line = callActivityLine()
+        if line.isEmpty {
+            guard LiveActivityManager.shared.isRunning else { return }
+            let state = activityState
+            Task { await LiveActivityManager.shared.end(finalState: state) }
+            return
+        }
+        let state = JarvisActivityAttributes.ContentState(phase: .idle, transcript: "", reply: "", callStatus: line)
+        if LiveActivityManager.shared.isRunning {
+            Task { await LiveActivityManager.shared.update(state) }
+        } else {
+            _ = LiveActivityManager.shared.start(state: state)
+        }
     }
 
     private func pushActivity() {
-        guard isSessionActive else { return }
+        guard AppSettings.shared.liveActivityEnabled, isSessionActive else { return }
         let state = activityState
         Task { await LiveActivityManager.shared.update(state) }
     }

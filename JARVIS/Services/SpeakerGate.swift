@@ -78,9 +78,9 @@ final class SpeakerGate: @unchecked Sendable {
         }
         let lockOn: Bool = enabled && profile != nil
         if !lockOn {
+            // No enrolled print: every buffer is his. A speech-band filter here was dropping the mic.
             lock.unlock()
-            if speechLike { return [buffer] }
-            return []
+            return [buffer]
         }
         if speechLike {
             appendLocked(samples, count: frames, rate: buffer.format.sampleRate)

@@ -131,7 +131,7 @@ struct CloudTaskDetailView: View {
                         CloudNotice(text: "The result summary is the specialist's text. Stored findings are the claims that have sources.")
                     }
                     if let taskError = detail.task.error, !taskError.isEmpty {
-                        CloudNotice(text: taskError)
+                        CloudNotice(text: JarvisLines.explain(taskError))
                     }
                 }
                 Section("Subtasks") {
@@ -150,7 +150,7 @@ struct CloudTaskDetailView: View {
                                 Text(summary).font(.footnote)
                             }
                             if let subError = sub.error, !subError.isEmpty {
-                                CloudNotice(text: subError)
+                                CloudNotice(text: JarvisLines.explain(subError))
                             }
                         }
                     }
@@ -217,7 +217,7 @@ struct CloudTaskDetailView: View {
             detail = try await JarvisCloudAPI.client().task(id: taskID)
             error = nil
         } catch {
-            self.error = error.localizedDescription
+            self.error = JarvisLines.explain(error)
         }
     }
 }
@@ -268,7 +268,7 @@ struct CloudTaskCreateView: View {
                 await CloudMonitor.shared.refresh()
                 dismiss()
             } catch {
-                self.error = error.localizedDescription
+                self.error = JarvisLines.explain(error)
             }
         }
     }
@@ -357,7 +357,7 @@ struct CloudApprovalsView: View {
                     ? "Recorded. An external action was taken."
                     : "Recorded. Nothing was sent."
             } catch {
-                self.error = error.localizedDescription
+                self.error = JarvisLines.explain(error)
             }
         }
     }
@@ -425,7 +425,7 @@ struct CloudMemoryView: View {
             rows = try await JarvisCloudAPI.client().memory(query: trimmed.isEmpty ? nil : trimmed)
             error = nil
         } catch {
-            self.error = error.localizedDescription
+            self.error = JarvisLines.explain(error)
         }
     }
 
@@ -438,7 +438,7 @@ struct CloudMemoryView: View {
             await CloudMonitor.shared.refresh()
             await load()
         } catch {
-            self.error = error.localizedDescription
+            self.error = JarvisLines.explain(error)
         }
     }
 }
@@ -488,7 +488,7 @@ struct CloudMemoryEditor: View {
                 onSaved()
                 dismiss()
             } catch {
-                self.error = error.localizedDescription
+                self.error = JarvisLines.explain(error)
             }
         }
     }
@@ -726,7 +726,7 @@ struct CloudLeadEditor: View {
                 await CloudMonitor.shared.refresh()
                 dismiss()
             } catch {
-                self.error = error.localizedDescription
+                self.error = JarvisLines.explain(error)
             }
         }
     }
@@ -764,7 +764,7 @@ struct CloudBriefingView: View {
                 Section("Facts") {
                     factBlock("Completed", briefing.facts.completedTasks.map(\.goal), empty: "No completed tasks are stored in the window.")
                     factBlock("Failed", briefing.facts.failedTasks.map { task in
-                        task.error.map { "\(task.goal). \($0)" } ?? task.goal
+                        task.error.map { "\(task.goal). \(JarvisLines.explain($0))" } ?? task.goal
                     }, empty: "No failed tasks are stored in the window.")
                     factBlock("Approvals waiting", briefing.facts.pendingApprovals.map(\.summary), empty: "No approvals are waiting.")
                     factBlock("Findings", briefing.facts.results.findings.map { finding in
@@ -839,7 +839,7 @@ struct CloudBriefingView: View {
             briefing = try await JarvisCloudAPI.client().briefing()
             error = nil
         } catch {
-            self.error = error.localizedDescription
+            self.error = JarvisLines.explain(error)
         }
     }
 }

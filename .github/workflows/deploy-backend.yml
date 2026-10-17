@@ -6,6 +6,10 @@ on:
     paths:
       - "backend/**"
       - ".github/workflows/deploy-backend.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/deploy-backend.yml"
   workflow_dispatch:
 
 jobs:
@@ -35,15 +39,237 @@ jobs:
       - name: Test
         run: npx vitest run
 
-      - name: Require a real D1 database id
+      - name: Resolve D1 database
         run: |
-          if grep -q "00000000-0000-0000-0000-000000000000" wrangler.toml; then
-            echo "Replace database_id in backend/wrangler.toml with the id printed by: npx wrangler d1 create jarvis-db"
-            exit 1
-          fi
+          set -euo pipefail
+          node <<'NODE'
+          import { execSync } from "node:child_process";
+          import { readFileSync, writeFileSync } from "node:fs";
+
+          function rowsFrom(raw) {
+            const start = raw.indexOf("[");
+            const objectStart = raw.indexOf("{");
+            const sliceFrom = start === -1 ? objectStart : objectStart === -1 ? start : Math.min(start, objectStart);
+            if (sliceFrom === -1) throw new Error(raw.trim() || "wrangler d1 list returned no JSON");
+            const parsed = JSON.parse(raw.slice(sliceFrom));
+            if (Array.isArray(parsed)) return parsed;
+            if (Array.isArray(parsed.result)) return parsed.result;
+            if (Array.isArray(parsed.d1)) return parsed.d1;
+            return [];
+          }
+
+          function list() {
+            const raw = execSync("npx wrangler d1 list --json", { encoding: "utf8" });
+            return rowsFrom(raw);
+          }
+
+          let rows = list();
+          let row = rows.find((item) => item.name === "jarvis-db");
+          if (!row) {
+            execSync("npx wrangler d1 create jarvis-db", { stdio: "inherit" });
+            rows = list();
+            row = rows.find((item) => item.name === "jarvis-db");
+          }
+          const id = row?.uuid || row?.database_id;
+          if (!id) {
+            console.error("jarvis-db has no id after create.");
+            process.exit(1);
+          }
+          const toml = readFileSync("wrangler.toml", "utf8");
+          const pattern = /database_id\s*=\s*["'][^"']*["']/;
+          if (!pattern.test(toml)) {
+            console.error("wrangler.toml has no database_id line.");
+            process.exit(1);
+          }
+          const next = toml.replace(pattern, `database_id = "${id}"`);
+          writeFileSync("wrangler.toml", next);
+          console.log(`D1 jarvis-db ${id}`);
+          NODE
 
       - name: Apply D1 schema
-        run: npx wrangler d1 execute jarvis-db --remote --file=./schema.sql --yes
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if npx wrangler d1 execute jarvis-db --remote --file=./schema.sql --yes; then
+              exit 0
+            fi
+            echo "schema apply failed (attempt ${attempt}); waiting"
+            sleep 8
+          done
+          exit 1
+
+      - name: Register workers.dev subdomain
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/subdomain"
+          current=$(curl -sS -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" "$api" || true)
+          existing=$(node -e 'let s=""; try { const j=JSON.parse(process.argv[1]); s=j.result&&j.result.subdomain||""; } catch {} if (s) process.stdout.write(s)' "$current")
+          if [ -n "$existing" ]; then
+            echo "workers.dev subdomain is already registered: ${existing}"
+            exit 0
+          fi
+          for candidate in jarvis-hadi sohailhadimt-jarvis jarvis-sohailhadimt; do
+            code=$(curl -sS -o /tmp/workers-subdomain.json -w "%{http_code}" -X PUT \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "$api" \
+              --data "{\"subdomain\":\"${candidate}\"}")
+            if [ "$code" = "200" ]; then
+              echo "Registered workers.dev subdomain: ${candidate}"
+              exit 0
+            fi
+            echo "Subdomain ${candidate} was not accepted (HTTP ${code})."
+          done
+          echo "Could not register a workers.dev subdomain. Open the Workers onboarding page in Cloudflare and choose one, then rerun this workflow."
+          exit 1
 
       - name: Deploy Worker
-        run: npx wrangler deploy
+        run: |
+          set -euo pipefail
+          npx wrangler deploy | tee /tmp/wrangler-deploy.txt
+          clean=$(sed -E 's/\x1B\[[0-9;]*[A-Za-z]//g' /tmp/wrangler-deploy.txt)
+          url=$(printf '%s\n' "$clean" | grep -oE 'https://[A-Za-z0-9.-]+\.workers\.dev' | head -1 || true)
+          if [ -z "$url" ]; then
+            echo "Deploy finished without a workers.dev URL."
+            exit 1
+          fi
+          echo "WORKER_URL=${url}" >> "$GITHUB_ENV"
+          echo "Worker URL: ${url}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set Worker secrets
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          JARVIS_APP_TOKEN: ${{ secrets.JARVIS_APP_TOKEN }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM_NUMBER: ${{ secrets.TWILIO_FROM_NUMBER }}
+          OWNER_PHONE: ${{ secrets.OWNER_PHONE }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          ELEVENLABS_AGENT_ID: ${{ secrets.ELEVENLABS_AGENT_ID }}
+          ELEVENLABS_WEBHOOK_SECRET: ${{ secrets.ELEVENLABS_WEBHOOK_SECRET }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+          APNS_KEY_ID: ${{ secrets.APNS_KEY_ID }}
+          APNS_TEAM_ID: ${{ secrets.APNS_TEAM_ID }}
+          APNS_PRIVATE_KEY: ${{ secrets.APNS_PRIVATE_KEY }}
+          APNS_BUNDLE_ID: ${{ secrets.APNS_BUNDLE_ID }}
+          APNS_ENVIRONMENT: ${{ secrets.APNS_ENVIRONMENT }}
+        run: |
+          set -euo pipefail
+          put_if_present() {
+            local name="$1"
+            local value="${!name-}"
+            if [ -z "$value" ]; then
+              echo "missing $name"
+              return 1
+            fi
+            printf '%s' "$value" | npx wrangler secret put "$name"
+            echo "set $name"
+            return 0
+          }
+          required=(
+            GEMINI_API_KEY
+            GROQ_API_KEY
+            JARVIS_APP_TOKEN
+            TWILIO_ACCOUNT_SID
+            TWILIO_AUTH_TOKEN
+            TWILIO_FROM_NUMBER
+            OWNER_PHONE
+            ELEVENLABS_API_KEY
+            ELEVENLABS_AGENT_ID
+          )
+          optional=(
+            ELEVENLABS_WEBHOOK_SECRET
+            TAVILY_API_KEY
+            BRAVE_API_KEY
+            APNS_KEY_ID
+            APNS_TEAM_ID
+            APNS_PRIVATE_KEY
+            APNS_BUNDLE_ID
+            APNS_ENVIRONMENT
+          )
+          missing_required=()
+          missing_optional=()
+          for name in "${required[@]}"; do
+            if [ -z "${!name-}" ]; then
+              echo "missing $name"
+              missing_required+=("$name")
+            else
+              put_if_present "$name"
+            fi
+          done
+          for name in "${optional[@]}"; do
+            if [ -z "${!name-}" ]; then
+              echo "missing $name"
+              missing_optional+=("$name")
+            else
+              put_if_present "$name"
+            fi
+          done
+          {
+            echo "## Worker secrets"
+            if [ ${#missing_required[@]} -eq 0 ]; then
+              echo "Required secrets were set."
+            else
+              echo "Missing required GitHub secrets (not sent to the worker):"
+              for name in "${missing_required[@]}"; do echo "- \`$name\`"; done
+            fi
+            if [ ${#missing_optional[@]} -gt 0 ]; then
+              echo "Optional secrets not set:"
+              for name in "${missing_optional[@]}"; do echo "- \`$name\`"; done
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Point Twilio voice and SMS webhooks
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TWILIO_ACCOUNT_SID:-}" ] || [ -z "${TWILIO_AUTH_TOKEN:-}" ]; then
+            echo "TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN are required to set the number webhooks."
+            exit 1
+          fi
+          if [ -z "${WORKER_URL:-}" ]; then
+            echo "WORKER_URL is missing, so the Twilio webhooks were not changed."
+            exit 1
+          fi
+          base="${WORKER_URL%/}"
+          voice="${base}/calls/inbound"
+          sms="${base}/calls/sms"
+          # Incoming number for the bought Twilio UK mobile. Not an auth token.
+          sid="PN66046ff3fcdfc8f9aa8ed11811dd9d5d"
+          curl -sS -u "${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}" \
+            -o /tmp/twilio-number.json \
+            -X POST "https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/IncomingPhoneNumbers/${sid}.json" \
+            --data-urlencode "VoiceUrl=${voice}" \
+            --data-urlencode "VoiceMethod=POST" \
+            --data-urlencode "SmsUrl=${sms}" \
+            --data-urlencode "SmsMethod=POST"
+          EXPECT_VOICE="$voice" EXPECT_SMS="$sms" node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          const body = JSON.parse(readFileSync("/tmp/twilio-number.json", "utf8"));
+          if (body.code || !body.sid) {
+            console.error(body.message || "Twilio did not update the number.");
+            process.exit(1);
+          }
+          const voice = body.voice_url || "";
+          const sms = body.sms_url || "";
+          if (voice !== process.env.EXPECT_VOICE || sms !== process.env.EXPECT_SMS) {
+            console.error("Twilio saved different webhook URLs than this deploy.");
+            process.exit(1);
+          }
+          if (body.voice_method !== "POST" || body.sms_method !== "POST") {
+            console.error("Twilio did not keep POST for voice and SMS.");
+            process.exit(1);
+          }
+          console.log(`Twilio ${body.sid}`);
+          console.log(`Voice POST ${voice}`);
+          console.log(`SMS POST ${sms}`);
+          NODE
+          {
+            echo "## Twilio webhooks"
+            echo "- Voice POST \`${voice}\`"
+            echo "- SMS POST \`${sms}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

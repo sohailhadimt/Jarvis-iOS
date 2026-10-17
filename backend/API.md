@@ -1,6 +1,6 @@
 # JARVIS backend API
 
-Base URL after deploy: `https://jarvis-backend.<subdomain>.workers.dev`
+Base URL: `https://jarvis-backend.jarvis-hadi.workers.dev`
 
 All JSON. Timestamps are UTC ISO-8601 (`2026-10-15T02:00:00.000Z`). Unknown fields on input are ignored. The server never sends email, publishes a site, or takes payment. `external_actions` on health is `false`, and approval responses include `"external_action_taken": false`.
 
@@ -547,19 +547,25 @@ Update a row. Omitted fields stay as they are. You cannot clear `source_urls`.
 
 ## Named agents
 
-`GET /agents` returns `{ "agents": [] }` and seeds J.A.R.V.I.S., E.D.I.T.H., U.L.T.R.O.N., and F.R.I.D.A.Y. when they are missing.
+`GET /agents` returns `{ "agents": [] }` and seeds J.A.R.V.I.S. (chief of staff), E.D.I.T.H. (research), U.L.T.R.O.N. (sales), and F.R.I.D.A.Y. (builder). Each agent includes `tools`, `voice_id`, and `voice_name`. A built-in agent whose instructions are still the original text is updated to the current role. Edited instructions are left as they are.
 
-`POST /agents` creates one. Body: `name`, `role`, `instructions`, optional `avatar` and `color_hex`. `201` `{ "agent": {} }`.
+`POST /agents` creates one. Body: `name`, `role`, `instructions`, optional `avatar`, `color_hex`, `tools`, `voice_id`, and `voice_name`. `201` `{ "agent": {} }`. `POST /agents/:id` updates those fields. `DELETE /agents/:id` removes the agent and its thread.
 
-`POST /agents/:id` updates name, role, instructions, memory, avatar, or color. `DELETE /agents/:id` removes the agent and its thread.
+`voice_id` is an ElevenLabs voice id stored for the iPhone. It is not a secret. Leave it empty to use the phone's JARVIS voice.
 
 `GET /agents/:id/messages` and `POST /agents/:id/messages` with `{ "author", "role", "text" }` are that agent's thread.
 
-`POST /agent-tasks` with `{ "agent_id", "goal", "id?" }` queues work. `GET /agent-tasks` lists it. Status is `queued`, `working`, `done`, or `needs_approval`. The cron tick runs one queued task through Gemini. Sending, publishing, or spending becomes `needs_approval` and an approval row. Nothing is sent.
+`POST /agent-tasks` with `{ "agent_id", "goal", "id?" }` queues work. `GET /agent-tasks` lists it. Status is `queued`, `working`, `done`, or `needs_approval`. Each cron tick runs up to three named-agent steps (one model call each, Gemini then Groq). A step can search, open a page, save a finding, draft a document, store a reminder, or queue an approval. Sending, publishing, spending, or placing a call becomes `needs_approval`. Nothing is sent or dialled.
 
-`POST /agent-tasks/:id/approve` and `POST /agent-tasks/:id/decline` mark the draft done and return `external_action_taken: false`. Approving or rejecting the matching row in `/approvals` does the same and still does not send, publish, or pay.
+`POST /agent-tasks/:id/approve` and `POST /agent-tasks/:id/decline` mark the draft done and return `external_action_taken: false`. Approving or rejecting the matching row in `/approvals` does the same and still does not send, publish, pay, or dial.
 
-`GET /group` and `POST /group` with `{ "author", "text" }` are the shared room.
+`POST /missions` with `{ "goal" }` asks JARVIS for a JSON plan and queues one task per assignment. `GET /missions` lists them. `GET /missions/:id` includes the specialist tasks and, when they have all finished, a report that quotes their results. The report does not add facts.
+
+`GET /routines` lists scheduled jobs, including the daily briefing (`30 7 * * *` UTC), the reminder sweep (`0 18 * * *` UTC), and the Monday pipeline monitor (`0 9 * * 1` UTC). They are off until `POST /routines/:id` with `{ "enabled": true }`. Enabling one creates a mission on the next matching cron tick. It does not send or spend.
+
+`GET /rooms` lists rooms. Project Money is `room_project_money`. `GET /group` and `POST /group` are that room. A user message that contains `@EDITH`, `@ULTRON`, `@FRIDAY`, or `@JARVIS` queues that agent. One agent may mention one other agent. A second hop does not queue anyone else.
+
+`GET /reminders` lists open reminders stored by the reminder tool. It does not write to the iPhone calendar.
 
 ## Outbound calls
 
@@ -585,6 +591,12 @@ The call record has `id`, `contact_name`, `to`, `brief`, `status` (`placing`, `r
 
 `GET /calls/:id` refreshes the transcript from ElevenLabs when a conversation id is known. `GET /calls` lists the latest 50.
 
-Twilio's voice webhook is `POST /calls/voice/:id`. The status webhook is `POST /calls/twilio-status/:id`. Both require a valid `X-Twilio-Signature` and do not use the app bearer token. The voice webhook registers the call with ElevenLabs Conversational AI and returns that TwiML. The agent's first words are exactly: "Hello, this is Sohail's AI assistant. I'm calling on his behalf."
+Twilio's voice webhook is `POST /calls/voice/:id`. The status webhook is `POST /calls/twilio-status/:id`. Both require a valid `X-Twilio-Signature` and do not use the app bearer token. The voice webhook registers the call with ElevenLabs Conversational AI and returns that TwiML. An outbound call's first words are: "Hello, this is JARVIS, Master Hadi's personal assistant. Master Hadi has asked me to tell you" followed by the brief.
+
+`POST /calls/inbound` is the Twilio voice webhook for forwarded calls. `POST /calls/sms` reads CONNECT, HANDLE, MESSAGE, DECLINE, ALLOW, or DENY. `GET /calls/active`, `POST /calls/:id/screen`, `POST /calls/:id/personal`, `POST /calls/device`, and `POST /calls/permissions` use the app bearer token. Personal details are denied unless a saved permission or a live approval allows them. Put-through, SMS, and problem calls use the mobile saved from Calling settings when that field has been saved. Otherwise they use the `OWNER_PHONE` worker secret. Set that secret at deploy (`npx wrangler secret put OWNER_PHONE`). The number is not in the repo, and the secret is not returned to the app. The iPhone field starts empty and is kept in the Keychain. APNs secrets are `APNS_KEY_ID`, `APNS_TEAM_ID`, and `APNS_PRIVATE_KEY`. None of these values are returned to the app except the Twilio number, which Settings needs for the forwarding codes.
 
 `POST /calls/elevenlabs` is the optional post-call webhook. It updates a call only when `user_id` or `conversation_id` matches a row this worker created. Set `ELEVENLABS_WEBHOOK_SECRET` to require the `ElevenLabs-Signature` header (`t=<unix>,v0=<hex hmac>` of `timestamp.body`).
+
+If the other person asks something outside the brief, the agent says "One moment please." `GET /calls/questions` lists questions still waiting, and any that timed out in the last hour. `POST /calls/:id/answer` with `{ "question_id", "text" }` speaks that answer on the live call. The wait is 30 to 45 seconds (`question_timeout_seconds`, default 40). On timeout the agent says it will find out and call back, and a follow-up task is stored.
+
+`GET /calls/settings` and `POST /calls/settings` save quiet hours, the daily cap, the urgent-only flag, the question wait, and an optional mobile override. `mobile` in that response is only the override saved from the phone. It is empty until then, and it is never the `OWNER_PHONE` secret. The number is not hardcoded. `GET /calls/alerts` lists recent problem calls. A failed task, a call that does not connect, or a Twilio balance under 2 can ring that mobile with the ElevenLabs voice. Press 1 or say "details" for the longer note. Quiet hours (Europe/London, default 22:00–08:00) and the daily cap (default 3, maximum 5, 0 means push only) send a push notification instead. A reply spoken on that call is saved as a completed task.

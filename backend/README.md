@@ -2,11 +2,13 @@
 
 This is the autonomous backend for JARVIS. It runs on the **Cloudflare Workers free plan**: a Worker, one D1 database (SQLite), and a cron trigger every 5 minutes. It does not need a paid Cloudflare product, a server, or a credit card.
 
-The iOS app is separate. This folder is the only part you deploy here.
+The iOS app is separate. This folder is the only part you deploy here. Phone wake features (Siri, the Action Button, Lock Screen widgets) only open listening on the iPhone. Task steps, screening timeouts, and problem-call checks stay on this worker's cron, including while the phone is locked.
 
 ## What it does
 
 You send a goal. JARVIS (the chief of staff) breaks it into subtasks and hands each one to a specialist: research, lead generation, sales, outreach, marketing, website, analytics, admin, automation, or quality control.
+
+The named team is the same idea with its own roster. EDITH researches, ULTRON drafts sales and strategy, and FRIDAY drafts pages, code, and schedules. Project Money (`/group`) is the room where they compare notes. `POST /missions` makes JARVIS assign the work. Up to three of those steps run on each cron tick. Send, spend, publish, and call stay drafts until you approve them. The daily briefing, reminder sweep, and pipeline monitor are scheduled jobs and stay off until you enable them.
 
 Specialists can search the web, read a page, save a finding, save a sales prospect, and draft a proposal, an outreach email, or website HTML. **They cannot send email, publish a site, or pay anyone.** Those actions are drafts plus an approval. Approving a row records your decision. It still does not send anything.
 
@@ -58,7 +60,7 @@ npx wrangler d1 create jarvis-db
 
 The command prints a `database_id`. Open `wrangler.toml` and replace `00000000-0000-0000-0000-000000000000` with that id. The binding name stays `DB` and the database name stays `jarvis-db`.
 
-The database id is not a secret. Commit the updated `wrangler.toml` so GitHub Actions can deploy.
+The database id is not a secret. You can commit it. GitHub Actions does not need that commit: the deploy workflow looks up `jarvis-db` by name, creates it when it is missing, and writes the id into `wrangler.toml` for that run.
 
 ## 4. Apply the schema
 
@@ -101,10 +103,19 @@ npx wrangler secret put ELEVENLABS_API_KEY
 npx wrangler secret put ELEVENLABS_AGENT_ID
 ```
 
-`TWILIO_FROM_NUMBER` stays unset until the UK number is purchased and compliance has cleared. Optional, for the post-call webhook:
+When those values are GitHub Actions secrets, the deploy workflow runs `wrangler secret put` for each one that is present and skips the rest. It never prints the values. Optional, for the post-call webhook:
 
 ```bash
 npx wrangler secret put ELEVENLABS_WEBHOOK_SECRET
+```
+
+Inbound screening, after the number exists. These stay empty until you are ready. `OWNER_PHONE` is your own mobile, in E.164. Put-through, take-over, the SMS fallback, and problem calls ring that number. Set it when you deploy. Do not commit it. The same number can also be typed later in the app under Calling. That copy stays in the iPhone Keychain and, once you tap save, overrides the secret. Push needs an APNs auth key and the Push capability on the App ID.
+
+```bash
+npx wrangler secret put OWNER_PHONE
+npx wrangler secret put APNS_KEY_ID
+npx wrangler secret put APNS_TEAM_ID
+npx wrangler secret put APNS_PRIVATE_KEY
 ```
 
 Until those five calling secrets are set, `GET /calls/config` reports `"message": "Calling not set up."` and `POST /calls` does not dial.
@@ -123,10 +134,10 @@ Use the same value in the app. For local dev, copy `.dev.vars.example` to `.dev.
 npx wrangler deploy
 ```
 
-Wrangler prints a URL like `https://jarvis-backend.<your-subdomain>.workers.dev`. Check it:
+The live worker is `https://jarvis-backend.jarvis-hadi.workers.dev`. Check it:
 
 ```bash
-curl https://jarvis-backend.<your-subdomain>.workers.dev/health
+curl https://jarvis-backend.jarvis-hadi.workers.dev/health
 ```
 
 You want `"ok": true` and `"db": "ok"`. Then, with your token:
@@ -135,7 +146,7 @@ You want `"ok": true` and `"db": "ok"`. Then, with your token:
 curl -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"goal":"Find one Kent security company with a public website and save it only if you have the page URL."}' \
-  https://jarvis-backend.<your-subdomain>.workers.dev/tasks
+  https://jarvis-backend.jarvis-hadi.workers.dev/tasks
 ```
 
 Poll `GET /tasks/:id`. The first planning step starts immediately. Further steps wait for the next 5-minute cron. The endpoint shapes are in [API.md](API.md).
@@ -154,7 +165,7 @@ Create the token at [dash.cloudflare.com/profile/api-tokens](https://dash.cloudf
 - Permissions: **Account → Workers Scripts → Edit**, **Account → D1 → Edit**
 - Account resources: your account
 
-`.github/workflows/deploy-backend.yml` runs when `backend/` changes on `main`. It typechecks, tests, applies `schema.sql`, and deploys. Until the two secrets exist and `database_id` in `wrangler.toml` is real, that workflow fails on purpose.
+`.github/workflows/deploy-backend.yml` runs when `backend/` changes on `main` or on a pull request, and when started by hand. It typechecks, tests, creates or reuses the D1 database `jarvis-db`, applies `schema.sql`, deploys, then copies worker secrets from GitHub when those secrets exist. `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are required. A missing Twilio, Gemini, Groq, ElevenLabs, or app-token secret is skipped and listed in the job summary.
 
 ## Nightly lead research
 
@@ -174,15 +185,35 @@ Saying "call Sam and tell them the meeting moved" in the app looks up Sam, then 
 
 The worker places the call with the Twilio Calls API and, when Twilio requests TwiML, registers it with ElevenLabs Conversational AI (`POST /v1/convai/twilio/register-call`). ElevenLabs speaks with the agent's voice and streams audio with Twilio. The worker does not bridge the audio itself.
 
-Every call starts with: "Hello, this is Sohail's AI assistant. I'm calling on his behalf."
+Every outbound call starts with: "Hello, this is JARVIS, Master Hadi's personal assistant. Master Hadi has asked me to tell you …" and then the message. JARVIS listens, stays inside the brief, and the summary comes back to the iPhone.
 
-On the ElevenLabs agent:
+If the other person asks something outside the brief, JARVIS says "One moment please" and the question is pushed to the iPhone. A typed or spoken reply is relayed. If nobody answers within the configured 30 to 45 seconds, JARVIS says he will find out and call back, and a follow-up task is left for Sohail.
 
-- Set the voice input and output format to μ-law 8000 Hz.
-- In Security, allow overriding the first message and the system prompt. The worker sends both on each call. You can also set the agent's first message to `{{opening_line}}` and mention `{{contact_name}}` and `{{brief}}` in its prompt.
-- Optional post-call webhook: `https://<your-worker>/calls/elevenlabs`.
+JARVIS can also ring `OWNER_PHONE` when a task fails, a call does not connect, or the Twilio balance is low. A number saved from Calling settings on the iPhone is used instead when one is set. That call uses the ElevenLabs voice, with a short summary and a way to press 1 or say "details". Quiet hours and a daily cap (three by default) keep it inside the balance. Outside those limits he sends a push notification instead.
 
-The number is not purchased yet, and this worker is not deployed yet. Nothing in the app can dial until the secrets above exist and the worker is deployed. Apply `schema.sql` so the `outbound_calls` table exists before the first real call.
+On the ElevenLabs agent, telephony needs μ-law 8000 Hz in both directions. Otherwise `register-call` rejects the hand-off and the caller hears the British Polly fallback instead of JARVIS. The first call asks ElevenLabs to set that audio format, to set the voice to George (`JBFqnCBsd6RMkjVDRZzb`, the same voice as the iPhone), and to allow per-call overrides of the first message, system prompt, language, and voice. The API key has to be allowed to edit the agent. The worker does not replace the agent's prompt text.
+
+If that update is refused, set the same four things yourself:
+
+- Voice: output format μ-law 8000 Hz, and the voice George.
+- Advanced: input format μ-law 8000 Hz.
+- Security: allow overriding the first message, the system prompt, the language, and the voice.
+
+You can also set the agent's first message to `{{opening_line}}` and mention `{{contact_name}}` and `{{brief}}` in its prompt. Inbound calls still send those variables when overrides are off.
+
+Leave the Twilio number's voice webhook on this worker. Importing the number into the ElevenLabs dashboard replaces that webhook. Optional post-call webhook: `https://<your-worker>/calls/elevenlabs`.
+
+Apply `schema.sql` so the call tables exist before the first real call.
+
+## Inbound screening
+
+An iPhone cannot intercept a normal carrier call. Forward the mobile to the Twilio number with the GSM codes shown in Settings. The deploy workflow sets number `PN66046ff3fcdfc8f9aa8ed11811dd9d5d` so voice is `POST https://jarvis-backend.jarvis-hadi.workers.dev/calls/inbound` and SMS is `POST https://jarvis-backend.jarvis-hadi.workers.dev/calls/sms`. Running the workflow again sets the same URLs.
+
+JARVIS answers: "Hello, you've reached Master Hadi's phone, this is JARVIS his personal assistant. This call may be handled by AI. Who's calling and how can I help?"
+
+The app shows Put me through, Let JARVIS handle it, Take a message, and Decline. Put me through uses Twilio `<Dial>` to the mobile saved in Calling settings, or to `OWNER_PHONE` when that field is empty. Take over moves the caller into a conference and rings that same mobile, which drops the AI. Listen-in on the iPhone is the live transcript. In-app muted audio needs the Twilio Voice SDK, which is not linked in this build.
+
+Schedule, location, and other personal details are denied unless that person is allowed in Settings or you approve the live prompt. Push uses `APNS_KEY_ID`, `APNS_TEAM_ID`, and `APNS_PRIVATE_KEY` when the App ID has Push Notifications. Otherwise the worker texts that same mobile.
 
 ## ASG context the model is given
 
