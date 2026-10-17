@@ -467,7 +467,7 @@ final class AppSettings {
     }
 
     /// Spoken chit-chat uses the editable personality, and still asks for a short reply.
-    func voicePrompt(facts: [MemoryFact]) -> String {
+    func voicePrompt(facts: [MemoryFact], question: String = "") -> String {
         var parts: [String] = [personality]
         let extra = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
         if !extra.isEmpty {
@@ -476,7 +476,7 @@ final class AppSettings {
             parts.append("Also: \(clipped)")
         }
         parts.append("Spoken reply: one to three sentences unless asked for more. No markdown, lists or emojis.")
-        let kept = Array(facts.prefix(3))
+        let kept = MemoryRank.relevant(facts, to: question, limit: 4)
         if !kept.isEmpty {
             let joined = kept.map(\.text).joined(separator: "; ")
             parts.append("Known: \(joined)")
@@ -487,11 +487,12 @@ final class AppSettings {
         return parts.joined(separator: " ")
     }
 
-    func systemPrompt(facts: [MemoryFact]) -> String {
+    func systemPrompt(facts: [MemoryFact], question: String = "") -> String {
         var parts = [personality]
         if !instructions.isEmpty { parts.append("Instructions:\n" + instructions) }
-        if !facts.isEmpty {
-            parts.append("Things you know about the user:\n" + facts.map { "- \($0.text)" }.joined(separator: "\n"))
+        let kept = MemoryRank.relevant(facts, to: question, limit: 8)
+        if !kept.isEmpty {
+            parts.append("Things you know about the user:\n" + kept.map { "- \($0.text)" }.joined(separator: "\n"))
         }
         if autoRemember {
             parts.append("If the user tells you a lasting personal fact or preference worth remembering, add a separate final line "

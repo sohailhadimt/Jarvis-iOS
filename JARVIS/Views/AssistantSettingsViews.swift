@@ -65,16 +65,15 @@ struct MemorySettingsView: View {
             Section {
                 Toggle("Let JARVIS save facts automatically", isOn: $settings.autoRemember)
             } footer: {
-                Text("When on, the assistant may add a hidden line \"REMEMBER: …\" to a reply; that fact is saved here.")
+                Text("Facts are saved on this iPhone. When JARVIS Cloud is configured, new facts are copied there as well. Edits and deletes here stay on the phone.")
             }
             Section("Add a fact") {
                 HStack {
-                    TextField("e.g. I live in Manchester", text: $newFact)
+                    TextField("e.g. I live in Kent", text: $newFact)
                     Button("Add") {
                         let t = newFact.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !t.isEmpty else { return }
-                        context.insert(MemoryFact(text: t))
-                        try? context.save()
+                        AssistantEngine.shared.rememberFacts([t])
                         newFact = ""
                     }
                     .disabled(newFact.trimmingCharacters(in: .whitespaces).isEmpty)

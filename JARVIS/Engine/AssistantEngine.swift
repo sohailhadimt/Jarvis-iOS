@@ -923,7 +923,7 @@ final class AssistantEngine {
             let history = Array(prior.suffix(16))
             let produced: Produced
             if let visionJPEG {
-                let system = settings.voicePrompt(facts: facts)
+                let system = settings.voicePrompt(facts: facts, question: text)
                 produced = try await answerVision(jpeg: visionJPEG, system: system, history: history, user: userMessage)
             } else {
                 let endpoint = try settings.resolvedEndpoint()
@@ -932,7 +932,7 @@ final class AssistantEngine {
                 }
                 let streamTalk = shouldStreamConversation(text)
                 let primary = streamTalk ? settings.conversationalEndpoint(from: endpoint) : endpoint
-                let system = streamTalk ? settings.voicePrompt(facts: facts) : settings.systemPrompt(facts: facts)
+                let system = streamTalk ? settings.voicePrompt(facts: facts, question: text) : settings.systemPrompt(facts: facts, question: text)
                 let groq = streamTalk ? settings.fastGroqEndpoint() : settings.groqEndpoint()
                 produced = try await ModelFallback.run(
                     primary: primary,
@@ -956,8 +956,10 @@ final class AssistantEngine {
             if citations.isEmpty { citations = tools.lastCitations }
             let parsed = MemoryParser.extract(from: raw)
             if settings.autoRemember {
-                JarvisStore.add(parsed.facts)
-                await rememberOnCloud(parsed.facts)
+                rememberFacts(parsed.facts)
+                let userLine = text
+                let replyLine = parsed.cleaned
+                Task { await self.learn(user: userLine, reply: replyLine) }
             }
             let shown = parsed.cleaned.isEmpty ? "Noted, sir." : parsed.cleaned
             recordAssistant(shown)
@@ -1259,6 +1261,52 @@ final class AssistantEngine {
             "approval", "pipeline", "briefing", "mrr", "lead",
         ]
         return needles.contains { lower.contains($0) }
+    }
+
+    /// Saves on this iPhone first. A copy is sent to JARVIS Cloud only after that write, and only when cloud is configured.
+    func rememberFacts(_ facts: [String]) {
+        let saved = JarvisStore.add(facts)
+        guard !saved.isEmpty else { return }
+        Task { await self.rememberOnCloud(saved) }
+    }
+
+    /// A second, quiet pass for durable facts the spoken reply did not mark.
+    private func learn(user: String, reply: String) async {
+        let trimmed = user.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.worthRemembering(trimmed) else { return }
+        guard let endpoint = try? AppSettings.shared.resolvedEndpoint() else { return }
+        let fast = AppSettings.shared.conversationalEndpoint(from: endpoint)
+        let system = """
+        Extract durable facts the user stated about themselves: name, preferences, people, places, work, habits. \
+        Ignore questions, one-off requests, weather, news, and the assistant's guesses. \
+        Reply with one line per fact in the exact form REMEMBER: fact \
+        or a single line NONE. No other text.
+        """
+        let note = "User: \(trimmed)\nAssistant: \(reply)"
+        let messages = [
+            ChatMessage(role: "system", content: system),
+            ChatMessage(role: "user", content: note),
+        ]
+        let temperature: Double = 0
+        let raw: String
+        do {
+            raw = try await LLMClient.complete(messages: messages, endpoint: fast, temperature: temperature)
+        } catch {
+            return
+        }
+        let found = MemoryParser.extract(from: raw).facts.filter { fact in
+            let lower = fact.lowercased()
+            return lower != "none" && fact.count <= 180
+        }
+        let capped = Array(found.prefix(3))
+        rememberFacts(capped)
+    }
+
+    private static func worthRemembering(_ text: String) -> Bool {
+        if text.count < 12 { return false }
+        let lower = text.lowercased()
+        let signals = ["i ", "i'm", "i’m", "i am", "my ", "i like", "i prefer", "i hate", "i live", "i work", "call me", "remember "]
+        return signals.contains { lower.contains($0) }
     }
 
     /// Local REMEMBER lines stay on the phone. When the cloud is configured, the same facts are stored there too.

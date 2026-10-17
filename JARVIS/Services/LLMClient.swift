@@ -187,7 +187,7 @@ enum LLMClient {
         let choices: [Choice]
     }
 
-    static func complete(messages: [ChatMessage], endpoint: LLMEndpoint) async throws -> String {
+    static func complete(messages: [ChatMessage], endpoint: LLMEndpoint, temperature: Double = 0.7) async throws -> String {
         var request = URLRequest(url: endpoint.url)
         request.httpMethod = "POST"
         request.timeoutInterval = 60
@@ -195,7 +195,7 @@ enum LLMClient {
         if let key = endpoint.apiKey, !key.isEmpty {
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         }
-        request.httpBody = try JSONEncoder().encode(Request(model: endpoint.model, messages: messages, temperature: 0.7))
+        request.httpBody = try JSONEncoder().encode(Request(model: endpoint.model, messages: messages, temperature: temperature))
 
         let data: Data
         let response: URLResponse
