@@ -132,10 +132,10 @@ Use the same value in the app. For local dev, copy `.dev.vars.example` to `.dev.
 npx wrangler deploy
 ```
 
-Wrangler prints a URL like `https://jarvis-backend.<your-subdomain>.workers.dev`. Check it:
+The live worker is `https://jarvis-backend.jarvis-hadi.workers.dev`. Check it:
 
 ```bash
-curl https://jarvis-backend.<your-subdomain>.workers.dev/health
+curl https://jarvis-backend.jarvis-hadi.workers.dev/health
 ```
 
 You want `"ok": true` and `"db": "ok"`. Then, with your token:
@@ -144,7 +144,7 @@ You want `"ok": true` and `"db": "ok"`. Then, with your token:
 curl -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"goal":"Find one Kent security company with a public website and save it only if you have the page URL."}' \
-  https://jarvis-backend.<your-subdomain>.workers.dev/tasks
+  https://jarvis-backend.jarvis-hadi.workers.dev/tasks
 ```
 
 Poll `GET /tasks/:id`. The first planning step starts immediately. Further steps wait for the next 5-minute cron. The endpoint shapes are in [API.md](API.md).
@@ -199,7 +199,7 @@ The number is not purchased yet, and this worker is not deployed yet. Nothing in
 
 ## Inbound screening
 
-An iPhone cannot intercept a normal carrier call. Forward the mobile to the Twilio number with the GSM codes shown in Settings. The deploy workflow sets that number's voice webhook to `POST /calls/inbound` and its SMS webhook to `POST /calls/sms` on the live worker. Running the workflow again sets the same URLs.
+An iPhone cannot intercept a normal carrier call. Forward the mobile to the Twilio number with the GSM codes shown in Settings. The deploy workflow sets number `PN66046ff3fcdfc8f9aa8ed11811dd9d5d` so voice is `POST https://jarvis-backend.jarvis-hadi.workers.dev/calls/inbound` and SMS is `POST https://jarvis-backend.jarvis-hadi.workers.dev/calls/sms`. Running the workflow again sets the same URLs.
 
 JARVIS answers: "Hello, you've reached Master Hadi's phone, this is JARVIS his personal assistant. This call may be handled by AI. Who's calling and how can I help?"
 

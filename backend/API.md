@@ -1,6 +1,6 @@
 # JARVIS backend API
 
-Base URL after deploy: `https://jarvis-backend.<subdomain>.workers.dev`
+Base URL: `https://jarvis-backend.jarvis-hadi.workers.dev`
 
 All JSON. Timestamps are UTC ISO-8601 (`2026-10-15T02:00:00.000Z`). Unknown fields on input are ignored. The server never sends email, publishes a site, or takes payment. `external_actions` on health is `false`, and approval responses include `"external_action_taken": false`.
 

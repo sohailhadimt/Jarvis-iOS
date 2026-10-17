@@ -156,6 +156,8 @@ final class AppSettings {
     static let shared = AppSettings()
     static let modelSuggestions = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
     static let defaultGeminiModel = "gemini-3.8-flash"
+    /// Live worker. A blank saved URL uses this; a typed URL is kept.
+    static let defaultCloudBaseURL = "https://jarvis-backend.jarvis-hadi.workers.dev"
     static let retiredGeminiModel = "gemini-2.5-flash"
     static let defaultGroqModel = "llama-3.3-70b-versatile"
     /// Fastest free models for spoken chit-chat. Tool turns keep the selected model.
@@ -308,7 +310,8 @@ final class AppSettings {
         agentWebhookURL = d.string(forKey: "agentWebhookURL") ?? ""
         agentWebhookName = d.string(forKey: "agentWebhookName") ?? "your agent"
         grokBotWebhookURL = d.string(forKey: "grokBotWebhookURL") ?? ""
-        cloudBaseURL = d.string(forKey: "cloudBaseURL") ?? ""
+        let storedCloud = d.string(forKey: "cloudBaseURL")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        cloudBaseURL = storedCloud.isEmpty ? Self.defaultCloudBaseURL : storedCloud
         let resolvedPrimary = Self.replacingFactoryDefault(d.string(forKey: SharedConfig.Key.primaryHex),
                                                           previous: ["00D8FFFF", "00D8FF"],
                                                           fallback: Theme.defaultPrimaryHex)
