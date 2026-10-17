@@ -217,6 +217,9 @@ struct MessageList: View {
     private func bubble(_ turn: VoiceTurn) -> some View {
         let mine = turn.role == "user"
         return VStack(alignment: mine ? .trailing : .leading, spacing: 2) {
+            if !mine, !turn.reasoning.isEmpty {
+                ReasoningNote(text: turn.reasoning)
+            }
             Text(turn.text)
                 .font(.body)
                 .foregroundStyle(mine ? Color.primary : Color.primary.opacity(0.9))
@@ -244,6 +247,33 @@ struct MessageList: View {
                 proxy.scrollTo("live", anchor: .bottom)
             }
         }
+    }
+}
+
+struct ReasoningNote: View {
+    var text: String
+
+    var body: some View {
+        DisclosureGroup {
+            Text(text)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } label: {
+            Text(Self.summary(text))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+
+    private static func summary(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return "Reasoning" }
+        let line = trimmed.split(separator: "\n").first.map(String.init) ?? trimmed
+        if line.count <= 72 { return line }
+        return String(line.prefix(72))
     }
 }
 
@@ -503,10 +533,15 @@ struct FullScreenVoiceView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 10) {
                 ForEach(engine.turns) { turn in
-                    Text(turn.text)
-                        .font(.callout)
-                        .foregroundStyle(.white.opacity(0.9))
-                        .frame(maxWidth: .infinity, alignment: turn.role == "user" ? .trailing : .leading)
+                    VStack(alignment: turn.role == "user" ? .trailing : .leading, spacing: 4) {
+                        if turn.role != "user", !turn.reasoning.isEmpty {
+                            ReasoningNote(text: turn.reasoning)
+                        }
+                        Text(turn.text)
+                            .font(.callout)
+                            .foregroundStyle(.white.opacity(0.9))
+                    }
+                    .frame(maxWidth: .infinity, alignment: turn.role == "user" ? .trailing : .leading)
                 }
                 if !engine.citations.isEmpty {
                     SourceLinks(citations: engine.citations)

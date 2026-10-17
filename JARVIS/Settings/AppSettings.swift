@@ -134,6 +134,22 @@ enum PersonalityPreset: String, CaseIterable, Identifiable {
     ].joined(separator: " ")
 }
 
+enum ThinkingMode: String, CaseIterable, Identifiable {
+    case off
+    case auto
+    case on
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .off: "Off"
+        case .auto: "Auto"
+        case .on: "On"
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class AppSettings {
@@ -163,6 +179,7 @@ final class AppSettings {
     var personality: String { didSet { d.set(personality, forKey: "personality") } }
     var instructions: String { didSet { d.set(instructions, forKey: "instructions") } }
     var autoRemember: Bool { didSet { d.set(autoRemember, forKey: "autoRemember") } }
+    var thinkingMode: ThinkingMode { didSet { d.set(thinkingMode.rawValue, forKey: "thinkingMode") } }
     var provider: LLMProvider { didSet { d.set(provider.rawValue, forKey: "provider") } }
     var openAIModel: String { didSet { d.set(openAIModel, forKey: "openAIModel") } }
     var geminiModel: String { didSet { d.set(geminiModel, forKey: "geminiModel") } }
@@ -232,6 +249,7 @@ final class AppSettings {
         instructions = d.string(forKey: "instructions")
             ?? "Your replies are spoken aloud, so keep them short and conversational. Never use markdown, lists or emojis."
         autoRemember = d.object(forKey: "autoRemember") as? Bool ?? true
+        thinkingMode = ThinkingMode(rawValue: d.string(forKey: "thinkingMode") ?? "") ?? .auto
         let storedProvider = d.string(forKey: "provider")
         var resolvedProvider = LLMProvider(rawValue: storedProvider ?? "") ?? .gemini
         // Fresh installs have no provider. An old default of OpenAI with no saved key moves to Gemini.

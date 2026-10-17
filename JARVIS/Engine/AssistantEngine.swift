@@ -5,12 +5,14 @@ struct VoiceTurn: Identifiable, Equatable {
     var role: String
     var text: String
     var truncated: Bool
+    var reasoning: String
 
-    init(role: String, text: String, truncated: Bool = false) {
+    init(role: String, text: String, truncated: Bool = false, reasoning: String = "") {
         id = UUID()
         self.role = role
         self.text = text
         self.truncated = truncated
+        self.reasoning = reasoning
     }
 }
 import AVFoundation
@@ -728,6 +730,13 @@ final class AssistantEngine {
     private struct Produced: Sendable {
         var text: String
         var spoken: Bool
+        var reasoning: String
+
+        init(text: String, spoken: Bool, reasoning: String = "") {
+            self.text = text
+            self.spoken = spoken
+            self.reasoning = reasoning
+        }
     }
 
     /// One model attempt. ModelFallback calls this again after a busy response.
@@ -937,18 +946,22 @@ final class AssistantEngine {
                     statusLine = "Using \(endpoint.providerName) because no \(settings.provider.title) key is saved."
                 }
                 let streamTalk = shouldStreamConversation(text)
-                let primary = streamTalk ? settings.conversationalEndpoint(from: endpoint) : endpoint
                 let system = streamTalk ? settings.voicePrompt(facts: facts, question: text) : settings.systemPrompt(facts: facts, question: text)
-                let groq = streamTalk ? settings.fastGroqEndpoint() : settings.groqEndpoint()
-                produced = try await ModelFallback.run(
-                    primary: primary,
-                    groq: groq,
-                    status: { line in self.applyBusyStatus(line) },
-                    work: { endpoint in
-                        try await self.produce(text: text, endpoint: endpoint, system: system,
-                                               history: history, user: userMessage, streamTalk: streamTalk)
-                    }
-                )
+                if shouldThink(text) {
+                    produced = try await answerThinking(system: system, history: history, user: userMessage)
+                } else {
+                    let primary = streamTalk ? settings.conversationalEndpoint(from: endpoint) : endpoint
+                    let groq = streamTalk ? settings.fastGroqEndpoint() : settings.groqEndpoint()
+                    produced = try await ModelFallback.run(
+                        primary: primary,
+                        groq: groq,
+                        status: { line in self.applyBusyStatus(line) },
+                        work: { endpoint in
+                            try await self.produce(text: text, endpoint: endpoint, system: system,
+                                                   history: history, user: userMessage, streamTalk: streamTalk)
+                        }
+                    )
+                }
             }
             let raw = produced.text
             let alreadySpoken = produced.spoken
@@ -968,7 +981,7 @@ final class AssistantEngine {
                 Task { await self.learn(user: userLine, reply: replyLine) }
             }
             let shown = parsed.cleaned.isEmpty ? "Noted, sir." : parsed.cleaned
-            recordAssistant(shown)
+            recordAssistant(shown, reasoning: produced.reasoning)
             saveForWidget(transcript: text, reply: shown)
             if !alreadySpoken {
                 await say(ResponsesClient.spokenText(shown))
@@ -1185,9 +1198,9 @@ final class AssistantEngine {
         saveForWidget(transcript: "Agent", reply: trimmed)
     }
 
-    private func recordAssistant(_ text: String, truncated: Bool = false) {
+    private func recordAssistant(_ text: String, truncated: Bool = false, reasoning: String = "") {
         conversation.append(ChatMessage(role: "assistant", content: text))
-        turns.append(VoiceTurn(role: "assistant", text: text, truncated: truncated))
+        turns.append(VoiceTurn(role: "assistant", text: text, truncated: truncated, reasoning: reasoning))
         reply = text
         turnAssistantStored = true
     }
@@ -1421,6 +1434,116 @@ final class AssistantEngine {
         let lower = text.lowercased()
         let needles = ["see", "look", "this", "holding", "wearing", "picture", "photo", "camera"]
         return needles.contains { lower.contains($0) }
+    }
+
+    private func shouldThink(_ text: String) -> Bool {
+        let mode = AppSettings.shared.thinkingMode
+        if mode == .off { return false }
+        if mode == .auto, !Self.wantsThinking(text) { return false }
+        if Self.needsTools(text) || wantsCloudTool(text) || WebKnowledge.needsLiveFacts(text) { return false }
+        return true
+    }
+
+    private static func wantsThinking(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let needles = [
+            "explain", "why ", "why?", "how does", "how do ", "compare", "analyse", "analyze",
+            "step by step", "prove", "calculate", "work out", "trade-off", "tradeoff",
+            "strategy", "debug", "what's wrong", "in depth", "think through", "reason about",
+        ]
+        return needles.contains { lower.contains($0) }
+    }
+
+    /// Hard questions. Gemini spends a thinking budget; Groq uses DeepSeek-R1 distill if Gemini cannot.
+    private func answerThinking(system: String, history: [ChatMessage], user: ChatMessage) async throws -> Produced {
+        statusLine = Self.reasoningLine
+        pushActivity()
+        defer {
+            if statusLine == Self.reasoningLine || statusLine == ModelFallback.busyLine {
+                statusLine = nil
+            }
+        }
+        let brief = system + " Reason privately. Speak only the answer, in one to three sentences unless asked for more."
+        if let key = KeychainStore.get(.gemini), !key.isEmpty {
+            let models = Self.groundModels()
+            var last: Error = LLMError.emptyReply(provider: "Gemini")
+            var index: Int = 0
+            while index < models.count {
+                let model = models[index]
+                var attempt: Int = 0
+                var moveOn = false
+                while attempt < 3 {
+                    do {
+                        let box = ReasoningBox()
+                        let stream = GeminiThinking.stream(system: brief, history: history, user: user,
+                                                           model: model, apiKey: key, box: box)
+                        let streamed = try await speakStream(stream, fallback: nil)
+                        let trimmed = streamed.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmed.isEmpty { throw LLMError.emptyReply(provider: "Gemini") }
+                        return Produced(text: streamed.text, spoken: streamed.spoken, reasoning: box.copy())
+                    } catch {
+                        if Task.isCancelled { throw error }
+                        last = error
+                        guard let llm = error as? LLMError else { throw error }
+                        if llm.isBusy {
+                            statusLine = ModelFallback.busyLine
+                            pushActivity()
+                            let shift: Int = attempt
+                            let delay: Int = 400 * (1 << shift)
+                            try await Task.sleep(for: .milliseconds(delay))
+                            attempt += 1
+                            continue
+                        }
+                        if Self.groundingRejected(error) {
+                            moveOn = true
+                            break
+                        }
+                        moveOn = true
+                        break
+                    }
+                }
+                if !moveOn, attempt >= 3 {
+                    index += 1
+                    continue
+                }
+                index += 1
+                if let llm = last as? LLMError, !Self.groundingRejected(llm), !llm.isBusy {
+                    break
+                }
+            }
+        }
+        if let key = KeychainStore.get(.groq), !key.isEmpty {
+            do {
+                let pair = try await GroqThinking.collect(system: brief, history: history, user: user, apiKey: key)
+                let stream = Self.once(pair.answer)
+                let streamed = try await speakStream(stream, fallback: nil)
+                return Produced(text: streamed.text, spoken: streamed.spoken, reasoning: pair.reasoning)
+            } catch {
+                if Task.isCancelled { throw error }
+                if let llm = error as? LLMError, case .http(let code, _, _) = llm, code == 404 || code == 400 {
+                    // The distill model can be retired. A normal reply is better than silence.
+                } else if let llm = error as? LLMError, llm.isBusy {
+                    throw error
+                } else {
+                    throw error
+                }
+            }
+        }
+        guard let endpoint = try? AppSettings.shared.resolvedEndpoint() else {
+            throw LLMError.missingKey("Gemini")
+        }
+        let fast = AppSettings.shared.conversationalEndpoint(from: endpoint)
+        let streamed = try await streamedChat(system: brief, history: history, user: user, endpoint: fast)
+        return Produced(text: streamed.text, spoken: streamed.spoken)
+    }
+
+    private static let reasoningLine = "Reasoning…"
+
+    private static func once(_ text: String) -> AsyncThrowingStream<GroundedDelta, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(GroundedDelta(text: text, citations: []))
+            continuation.finish()
+        }
     }
 
     /// Gemini sees one JPEG and answers in the same voice as a spoken turn.

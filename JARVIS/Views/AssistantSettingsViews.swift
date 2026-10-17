@@ -30,6 +30,15 @@ struct PersonalitySettingsView: View {
             } footer: {
                 Text("This personality is used for spoken replies and for tool turns. Spoken answers stay to one to three sentences unless you ask for more.")
             }
+            Section {
+                Picker("Hard questions", selection: $settings.thinkingMode) {
+                    ForEach(ThinkingMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+            } footer: {
+                Text("Auto reasons through harder questions. On does it for every ordinary reply. The reasoning stays collapsed on screen and is not spoken. Gemini uses a thinking budget. If Gemini cannot, Groq uses DeepSeek-R1 distill.")
+            }
         }
         .navigationTitle("Personality")
         .toolbar(.visible, for: .navigationBar)
