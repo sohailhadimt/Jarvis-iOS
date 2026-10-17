@@ -1,4 +1,5 @@
 import AVFoundation
+import EventKit
 import SwiftUI
 
 /// First launch. Skipping still leaves JARVIS usable on this iPhone.
@@ -131,6 +132,7 @@ struct FirstRunView: View {
     private func advance() {
         JarvisHaptics.tap()
         if page == 1 { Task { await allowMicrophone() } }
+        if page == 3 { Task { await allowCalendar() } }
         if page < 4 {
             withAnimation(.easeOut(duration: 0.25)) { page += 1 }
         } else {
@@ -142,6 +144,13 @@ struct FirstRunView: View {
         _ = await AudioTaps.requestSpeechAuthorization()
         _ = await AVAudioApplication.requestRecordPermission()
         micReady = true
+    }
+
+    private func allowCalendar() async {
+        let store = EKEventStore()
+        if #available(iOS 17.0, *) {
+            _ = try? await store.requestFullAccessToEvents()
+        }
     }
 
     private func finish() {
