@@ -91,6 +91,24 @@ npx wrangler secret put TAVILY_API_KEY
 npx wrangler secret put BRAVE_API_KEY
 ```
 
+Phone calls, once the UK number exists. The auth token is a worker secret. It is not written into the repo and it is not put in the iOS app.
+
+```bash
+npx wrangler secret put TWILIO_ACCOUNT_SID
+npx wrangler secret put TWILIO_AUTH_TOKEN
+npx wrangler secret put TWILIO_FROM_NUMBER
+npx wrangler secret put ELEVENLABS_API_KEY
+npx wrangler secret put ELEVENLABS_AGENT_ID
+```
+
+`TWILIO_FROM_NUMBER` stays unset until the UK number is purchased and compliance has cleared. Optional, for the post-call webhook:
+
+```bash
+npx wrangler secret put ELEVENLABS_WEBHOOK_SECRET
+```
+
+Until those five calling secrets are set, `GET /calls/config` reports `"message": "Calling not set up."` and `POST /calls` does not dial.
+
 Paste the key when prompted, then press Enter. `JARVIS_APP_TOKEN` is the bearer token the iOS app will send. Generate one with:
 
 ```bash
@@ -149,6 +167,22 @@ npx wrangler d1 execute jarvis-db --remote --command "UPDATE scheduled_jobs SET 
 It then creates one task each day at 02:00 UTC, on the 5-minute tick that matches that minute. The goal tells the specialists to save a prospect only when they have a source URL.
 
 You can also pass `schedule` on `POST /tasks`. That runs the goal once now and creates an enabled scheduled job for later. Cron fields are numeric, five fields, UTC. Example: `"0 2 * * *"`.
+
+## Outbound phone calls
+
+Saying "call Sam and tell them the meeting moved" in the app looks up Sam, then waits for a spoken or tapped yes. The app asks this worker to dial. Twilio and ElevenLabs credentials stay here.
+
+The worker places the call with the Twilio Calls API and, when Twilio requests TwiML, registers it with ElevenLabs Conversational AI (`POST /v1/convai/twilio/register-call`). ElevenLabs speaks with the agent's voice and streams audio with Twilio. The worker does not bridge the audio itself.
+
+Every call starts with: "Hello, this is Sohail's AI assistant. I'm calling on his behalf."
+
+On the ElevenLabs agent:
+
+- Set the voice input and output format to μ-law 8000 Hz.
+- In Security, allow overriding the first message and the system prompt. The worker sends both on each call. You can also set the agent's first message to `{{opening_line}}` and mention `{{contact_name}}` and `{{brief}}` in its prompt.
+- Optional post-call webhook: `https://<your-worker>/calls/elevenlabs`.
+
+The number is not purchased yet, and this worker is not deployed yet. Nothing in the app can dial until the secrets above exist and the worker is deployed. Apply `schema.sql` so the `outbound_calls` table exists before the first real call.
 
 ## ASG context the model is given
 

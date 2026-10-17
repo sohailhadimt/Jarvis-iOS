@@ -218,3 +218,21 @@ CREATE TABLE IF NOT EXISTS group_messages (
 
 CREATE INDEX IF NOT EXISTS idx_persona_messages_agent ON persona_messages (agent_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_persona_tasks_status ON persona_tasks (status, created_at);
+
+-- Outbound AI calls. The Twilio token never lives in this file.
+CREATE TABLE IF NOT EXISTS outbound_calls (
+  id TEXT PRIMARY KEY,
+  contact_name TEXT NOT NULL,
+  to_number TEXT NOT NULL,
+  brief TEXT NOT NULL,
+  status TEXT NOT NULL,
+  twilio_sid TEXT,
+  conversation_id TEXT,
+  transcript_json TEXT NOT NULL DEFAULT '[]',
+  summary TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_outbound_calls_created ON outbound_calls (created_at);

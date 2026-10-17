@@ -6,7 +6,7 @@ All JSON. Timestamps are UTC ISO-8601 (`2026-10-15T02:00:00.000Z`). Unknown fiel
 
 ## Auth
 
-Every route except `GET /health` requires:
+Every route except `GET /health` and the Twilio and ElevenLabs call webhooks requires:
 
 ```http
 Authorization: Bearer <JARVIS_APP_TOKEN>
@@ -543,7 +543,7 @@ Update a row. Omitted fields stay as they are. You cannot clear `source_urls`.
 4. A subtask that calls `request_approval` moves to `awaiting_approval` and stops. The task does too, once nothing else is still running.
 5. `quality_control` runs last when the plan includes it. A final message containing `"pass": false` fails the task. Missing a pass/fail object still completes the task, and `result_summary` says the verdict was missing.
 6. Rate limits and upstream errors are written to `progress` and retried with backoff (about 5 minutes, then 15). After the attempt budget, the subtask and the task are `failed` with the real error string.
-7. Nothing in this version leaves Cloudflare except reads (model APIs, search, and page fetches) and the JSON this API returns to the app.
+7. Task and agent routes never send email, publish a site, or take payment. Outbound phone calls are separate: `POST /calls` asks Twilio to dial, and ElevenLabs speaks on that call. That path stays off until the calling secrets are set, and the app shows "Calling not set up" until then.
 
 ## Named agents
 
@@ -560,3 +560,31 @@ Update a row. Omitted fields stay as they are. You cannot clear `source_urls`.
 `POST /agent-tasks/:id/approve` and `POST /agent-tasks/:id/decline` mark the draft done and return `external_action_taken: false`. Approving or rejecting the matching row in `/approvals` does the same and still does not send, publish, or pay.
 
 `GET /group` and `POST /group` with `{ "author", "text" }` are the shared room.
+
+## Outbound calls
+
+The iOS app never holds the Twilio auth token. These routes run on the worker. `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`, `ELEVENLABS_API_KEY`, and `ELEVENLABS_AGENT_ID` are wrangler secrets. Until every one of them is set, calling is not configured.
+
+`GET /calls/config` (bearer token) returns:
+
+```json
+{ "configured": false, "message": "Calling not set up.", "missing": ["TWILIO_FROM_NUMBER"] }
+```
+
+`missing` lists secret names only. Values are never returned.
+
+`POST /calls` body:
+
+```json
+{ "to": "+447700900123", "contact_name": "Ada", "brief": "The meeting moved to four." }
+```
+
+`201` `{ "configured": true, "call": {} }` after Twilio accepts the call. `503` with `calling_not_configured` when a secret is missing. The worker does not call Twilio in that case. `400` for a bad number, including 999, 112, and 911.
+
+The call record has `id`, `contact_name`, `to`, `brief`, `status` (`placing`, `ringing`, `in_progress`, `wrapping`, `completed`, `failed`), `transcript` (`role` is `assistant` or `them`), `summary`, `error`, `created_at`, `updated_at`. It does not include the Twilio sid or any secret.
+
+`GET /calls/:id` refreshes the transcript from ElevenLabs when a conversation id is known. `GET /calls` lists the latest 50.
+
+Twilio's voice webhook is `POST /calls/voice/:id`. The status webhook is `POST /calls/twilio-status/:id`. Both require a valid `X-Twilio-Signature` and do not use the app bearer token. The voice webhook registers the call with ElevenLabs Conversational AI and returns that TwiML. The agent's first words are exactly: "Hello, this is Sohail's AI assistant. I'm calling on his behalf."
+
+`POST /calls/elevenlabs` is the optional post-call webhook. It updates a call only when `user_id` or `conversation_id` matches a row this worker created. Set `ELEVENLABS_WEBHOOK_SECRET` to require the `ElevenLabs-Signature` header (`t=<unix>,v0=<hex hmac>` of `timestamp.body`).

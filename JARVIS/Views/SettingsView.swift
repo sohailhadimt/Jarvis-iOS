@@ -20,6 +20,7 @@ struct SettingsView: View {
                 NavigationLink { IntegrationsSettingsView() } label: { Label("Integrations & Task agent", systemImage: "square.grid.3x3") }
                 NavigationLink { APIKeysSettingsView() } label: { Label("API Keys & Provider", systemImage: "key") }
                 NavigationLink { CloudSettingsView() } label: { Label("JARVIS Cloud", systemImage: "cloud") }
+                NavigationLink { CallingSettingsView() } label: { Label("Calling", systemImage: "phone") }
             }
             Section {
                 Toggle("Wake word", isOn: $settings.wakeWordEnabled)

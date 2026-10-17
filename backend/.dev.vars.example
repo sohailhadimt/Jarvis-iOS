@@ -3,3 +3,11 @@ GROQ_API_KEY=replace-with-free-groq-key
 JARVIS_APP_TOKEN=replace-with-a-long-random-string
 TAVILY_API_KEY=
 BRAVE_API_KEY=
+# Phone calls. Leave these empty in git. Set them with `npx wrangler secret put`.
+# The account SID, auth token, and UK from-number are not stored in the app.
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+TWILIO_FROM_NUMBER=
+ELEVENLABS_API_KEY=
+ELEVENLABS_AGENT_ID=
+ELEVENLABS_WEBHOOK_SECRET=

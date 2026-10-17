@@ -77,6 +77,7 @@ struct HomeView: View {
                     sheetLink("Agents", systemImage: "person.3") { AgentsView() }
                     sheetLink("Conversation", systemImage: "text.bubble") { ReplyDetailView() }
                     sheetLink("News", systemImage: "newspaper") { NewsPulseView() }
+                    sheetLink("Calls", systemImage: "phone") { CallLogView() }
                     sheetLink("Briefing", systemImage: "sun.horizon") { CloudBriefingView() }
                     sheetLink("Tasks", systemImage: "checklist") { CloudTasksView() }
                     sheetLink("Approvals", systemImage: "checkmark.circle") { CloudApprovalsView() }
@@ -284,12 +285,16 @@ struct ApprovalsView: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
+            if engine.pendingCallBrief != nil {
+                CallBriefBar()
+                    .padding(24)
+            }
             if let summary = engine.pendingSummary {
                 ConfirmBar(summary: summary,
                            onConfirm: { engine.confirmPendingAction() },
                            onCancel: { engine.cancelPendingAction() })
                     .padding(24)
-            } else {
+            } else if engine.pendingCallBrief == nil {
                 Text("Nothing is waiting for approval.")
                     .font(.system(size: 15, weight: .light))
                     .foregroundStyle(cyan.opacity(0.8))
@@ -555,6 +560,11 @@ struct TasksView: View {
                     }
                 }
 
+                if engine.pendingCallBrief != nil {
+                    Section("Call") {
+                        CallBriefBar()
+                    }
+                }
                 if let summary = engine.pendingSummary {
                     Section("Confirm") {
                         ConfirmBar(summary: summary,

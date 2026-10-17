@@ -58,6 +58,13 @@ export interface Env {
   TAVILY_API_KEY?: string;
   BRAVE_API_KEY?: string;
   ENVIRONMENT?: string;
+  /** Wrangler secrets. Never written into the repo or the iOS binary. */
+  TWILIO_ACCOUNT_SID?: string;
+  TWILIO_AUTH_TOKEN?: string;
+  TWILIO_FROM_NUMBER?: string;
+  ELEVENLABS_API_KEY?: string;
+  ELEVENLABS_AGENT_ID?: string;
+  ELEVENLABS_WEBHOOK_SECRET?: string;
 }
 
 export interface PlanSubtask {

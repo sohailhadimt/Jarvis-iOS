@@ -1,4 +1,5 @@
 import { authorize } from "./auth";
+import { handleCallApi, handleCallWebhook, isCallWebhook } from "./calls";
 import { buildBriefing } from "./briefing";
 import { computeNextRun, parseCron } from "./cron";
 import {
@@ -56,6 +57,7 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
 
   try {
     if (request.method === "GET" && path === "/health") return health(env);
+    if (isCallWebhook(request.method, path)) return handleCallWebhook(request, env, path);
     const auth = authorize(request, env.JARVIS_APP_TOKEN);
     if (!auth.ok) return auth.response;
 
@@ -83,6 +85,8 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "POST" && parts[0] === "pipeline" && parts[1] && parts.length === 2) {
       return writePipeline(request, env, parts[1]);
     }
+    const callResponse = await handleCallApi(request, env, path);
+    if (callResponse) return callResponse;
     const persona = await routePersona(request, env, path, parts);
     if (persona) return persona;
     return apiError(404, "not_found", `No route for ${request.method} ${path}.`);

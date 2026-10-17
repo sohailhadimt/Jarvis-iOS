@@ -1,7 +1,8 @@
 import Foundation
 
-/// Later hook for a carrier call such as Twilio. It stays off.
-/// Calls on this iPhone still use tel://. Messages and email open for the user to tap Send.
+/// Plain "call X" stays on tel://. This hook stays off.
+/// "call X and tell them Y" is a separate brief: JARVIS asks for a yes, then the worker dials.
+/// Messages and email still open for the user to tap Send.
 enum CarrierCallHook {
     static let enabled = false
 

@@ -740,10 +740,46 @@ struct CloudClient: Sendable {
         return envelope.messages
     }
 
+    func callingConfig() async throws -> CallingConfig {
+        try await sendNoBody(method: "GET", path: "/calls/config")
+    }
+
+    func placeOutboundCall(to number: String, contactName: String, brief: String) async -> CallPlaceResult {
+        let body: [String: Any] = ["to": number, "contact_name": contactName, "brief": brief]
+        let data: Data
+        do {
+            data = try JSONSerialization.data(withJSONObject: body)
+        } catch {
+            return .failed("The call brief could not be sent.")
+        }
+        do {
+            let (payload, status) = try await raw(method: "POST", path: "/calls", authorize: true, body: data, query: [])
+            if status == 503 { return .notSetUp }
+            guard (200..<300).contains(status) else {
+                return .failed(Self.failure(data: payload, status: status).localizedDescription)
+            }
+            let envelope = try JSONDecoder().decode(CallEnvelope.self, from: payload)
+            return .placed(envelope.call)
+        } catch let error as CloudFailure {
+            if case .http(let code, let message) = error, code == 503 || message.contains("Calling not set up") {
+                return .notSetUp
+            }
+            return .failed(error.localizedDescription)
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+    }
+
+    func outboundCall(id: String) async throws -> PhoneCallRecord {
+        let envelope: CallEnvelope = try await sendNoBody(method: "GET", path: "/calls/\(Self.path(id))")
+        return envelope.call
+    }
+
     func postGroupLine(author: String, text: String) async throws {
         let _: AckEnvelope = try await sendJSON(method: "POST", path: "/group", body: ["author": author, "text": text])
     }
 
+    private struct CallEnvelope: Decodable { var call: PhoneCallRecord }
     private struct PersonaListEnvelope: Decodable { var agents: [CloudPersona] }
     private struct PersonaEnvelope: Decodable { var agent: CloudPersona }
     private struct PersonaTaskEnvelope: Decodable { var task: CloudPersonaTask }
@@ -785,6 +821,45 @@ struct CloudPersonaTask: Decodable, Sendable {
         case agentId = "agent_id"
         case approvalSummary = "approval_summary"
     }
+}
+
+struct CallingConfig: Decodable, Sendable {
+    var configured: Bool
+    var message: String
+    var missing: [String]
+}
+
+struct PhoneCallLine: Decodable, Sendable {
+    var role: String
+    var text: String
+}
+
+struct PhoneCallRecord: Decodable, Sendable {
+    var id: String
+    var contactName: String
+    var to: String
+    var brief: String
+    var status: String
+    var transcript: [PhoneCallLine]
+    var summary: String?
+    var error: String?
+    var createdAt: String
+    var updatedAt: String
+
+    var isFinished: Bool { status == "completed" || status == "failed" }
+
+    enum CodingKeys: String, CodingKey {
+        case id, to, brief, status, transcript, summary, error
+        case contactName = "contact_name"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
+enum CallPlaceResult: Sendable {
+    case placed(PhoneCallRecord)
+    case notSetUp
+    case failed(String)
 }
 
 struct CloudGroupLine: Decodable, Sendable {

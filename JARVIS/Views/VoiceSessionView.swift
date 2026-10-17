@@ -47,12 +47,17 @@ struct ChatView: View {
                 statusChip(status)
                     .padding(.bottom, 8)
             }
+            if engine.pendingCallBrief != nil {
+                CallBriefBar()
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
+            }
             if engine.pendingSummary != nil {
                 ApprovalCard()
                     .padding(.horizontal, 16)
                     .padding(.bottom, 8)
             }
-            if !engine.callChoices.isEmpty {
+            if engine.hasContactChoices {
                 CallPicker()
                     .padding(.horizontal, 16)
                     .padding(.bottom, 8)
@@ -492,7 +497,7 @@ struct FullScreenVoiceView: View {
 
     private var detailStack: some View {
         VStack(spacing: 10) {
-            if !engine.callChoices.isEmpty {
+            if engine.hasContactChoices {
                 CallPicker()
             }
             AttachmentChip()
@@ -508,6 +513,10 @@ struct FullScreenVoiceView: View {
             if voice.showTranscript {
                 transcript
                     .frame(maxWidth: 320, maxHeight: 120)
+            }
+            if engine.pendingCallBrief != nil {
+                CallBriefBar()
+                    .frame(maxWidth: 320)
             }
             if engine.pendingSummary != nil {
                 ApprovalCard()
@@ -601,12 +610,17 @@ struct CallPicker: View {
     @Environment(AssistantEngine.self) private var engine
     @Environment(AppSettings.self) private var settings
 
+    private var choices: [CallChoice] {
+        if !engine.briefChoices.isEmpty { return engine.briefChoices }
+        return engine.callChoices
+    }
+
     var body: some View {
-        if engine.callChoices.isEmpty {
+        if choices.isEmpty {
             EmptyView()
         } else {
             VStack(spacing: 8) {
-                ForEach(engine.callChoices) { choice in
+                ForEach(choices) { choice in
                     choiceButton(choice)
                 }
             }
@@ -616,7 +630,11 @@ struct CallPicker: View {
 
     private func choiceButton(_ choice: CallChoice) -> some View {
         Button {
-            engine.placeCall(choice)
+            if engine.briefChoices.isEmpty {
+                engine.placeCall(choice)
+            } else {
+                engine.chooseBriefedContact(choice)
+            }
         } label: {
             HStack(spacing: 8) {
                 Text(choice.name)
@@ -636,7 +654,7 @@ struct CallPicker: View {
             .overlay(Capsule().stroke(settings.accentColor.opacity(0.7), lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Call \(choice.name)")
+        .accessibilityLabel(engine.briefChoices.isEmpty ? "Call \(choice.name)" : "Choose \(choice.name)")
     }
 }
 

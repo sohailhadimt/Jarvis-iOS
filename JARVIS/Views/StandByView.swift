@@ -55,8 +55,11 @@ struct StandByView: View {
         }
         .overlay(alignment: .bottom) {
             VStack(spacing: 8) {
-                if !engine.callChoices.isEmpty {
+                if engine.hasContactChoices {
                     CallPicker()
+                }
+                if engine.pendingCallBrief != nil {
+                    CallBriefBar()
                 }
                 if let summary = engine.pendingSummary {
                     ConfirmBar(summary: summary,

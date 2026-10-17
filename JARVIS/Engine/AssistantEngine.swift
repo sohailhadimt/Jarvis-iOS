@@ -42,6 +42,13 @@ final class AssistantEngine {
     private(set) var pendingSummary: String?
     /// More than one contact matched "call X". A tap or a spoken name places the call.
     private(set) var callChoices: [CallChoice] = []
+    /// Contacts that matched "call X and tell them Y" before the brief is confirmed.
+    private(set) var briefChoices: [CallChoice] = []
+    /// A briefed call waiting for a spoken or tapped yes. Other approvals stay tap-only.
+    private(set) var pendingCallBrief: PendingCallBrief?
+    /// Bumped when the on-phone call log changes.
+    private(set) var callLogTick: Int = 0
+    var hasContactChoices: Bool { !callChoices.isEmpty || !briefChoices.isEmpty }
     /// True for a turn that asks about cloud work while a cloud task is planning or running.
     private(set) var cloudExecuting = false
     private(set) var turns: [VoiceTurn] = []
@@ -70,6 +77,8 @@ final class AssistantEngine {
     @ObservationIgnored private let output = SpeechOutput()
     @ObservationIgnored private let tools = ToolExecutor()
     @ObservationIgnored private var pendingAction: PendingAction?
+    @ObservationIgnored private var heldBrief = ""
+    @ObservationIgnored private var callWatch: Task<Void, Never>?
     @ObservationIgnored private var silenceTask: Task<Void, Never>?
     @ObservationIgnored private var turnTask: Task<Void, Never>?
     @ObservationIgnored private var pushToTalkHeld = false
@@ -845,6 +854,8 @@ final class AssistantEngine {
 
     func placeCall(_ choice: CallChoice) {
         callChoices = []
+        briefChoices = []
+        heldBrief = ""
         interrupt()
         listener.stop()
         turnTask = Task { await self.dialNow(name: choice.name, number: choice.number) }
@@ -871,6 +882,8 @@ final class AssistantEngine {
     private func handleLocalCall(_ text: String) async -> Bool {
         guard let request = LocalCall.parse(text) else { return false }
         callChoices = []
+        briefChoices = []
+        heldBrief = ""
         if let number = request.number {
             await dialNow(name: number, number: number)
             return true
@@ -947,13 +960,21 @@ final class AssistantEngine {
         reply = ""
         pushActivity()
 
-        // Approval is a card. Spoken words do not approve or dismiss it.
+        // Tool cards stay tap-only. Spoken words do not approve them.
         if pendingAction != nil { return }
+        // A briefed phone call is the one approval that also accepts a spoken yes or no.
+        if pendingCallBrief != nil {
+            await resolvePendingCallBrief(text)
+            return
+        }
 
         spokenSoFar = ""
         utteranceBeingSpoken = ""
         turnAssistantStored = false
         let recordedUser = recordUser(text)
+
+        if await resolveBriefChoice(text) { return }
+        if await handleBriefedCall(text) { return }
 
         if let delegation = AgentStore.shared.delegation(in: text) {
             let ack = "\(delegation.agent.name) is on that."
@@ -1138,6 +1159,247 @@ final class AssistantEngine {
         }
         statusLine = nil
         return "I'm afraid that took more steps than I'm allowed, sir."
+    }
+
+    // MARK: Briefed calls
+
+    func chooseBriefedContact(_ choice: CallChoice) {
+        let brief = heldBrief
+        guard !brief.isEmpty else { return }
+        interrupt()
+        listener.stop()
+        turnTask = Task {
+            _ = self.recordUser(choice.name)
+            await self.offerBrief(name: choice.name, number: choice.number, brief: brief, userText: choice.name)
+        }
+    }
+
+    func approvePendingCall() {
+        guard pendingCallBrief != nil else { return }
+        interrupt()
+        listener.stop()
+        turnTask = Task { await self.placeApprovedCall(userText: "yes") }
+    }
+
+    func declinePendingCall() {
+        guard pendingCallBrief != nil else { return }
+        interrupt()
+        listener.stop()
+        turnTask = Task { await self.declineApprovedCall(userText: "no") }
+    }
+
+    func refreshOpenCalls() {
+        Task { await self.pullOpenCalls() }
+    }
+
+    private func resolvePendingCallBrief(_ text: String) async {
+        if CallApproval.isYes(text) {
+            await placeApprovedCall(userText: text)
+            return
+        }
+        if CallApproval.isNo(text) {
+            await declineApprovedCall(userText: text)
+            return
+        }
+        let name = pendingCallBrief?.contactName ?? "them"
+        _ = recordUser(text)
+        await speakLine("Say yes to call \(name), sir, or no to cancel.", userText: text)
+        afterTurn()
+    }
+
+    private func resolveBriefChoice(_ text: String) async -> Bool {
+        guard !briefChoices.isEmpty else { return false }
+        if CallApproval.isNo(text) {
+            briefChoices = []
+            heldBrief = ""
+            await speakLine("Cancelled, sir.", userText: text)
+            afterTurn()
+            return true
+        }
+        if let choice = ContactDirectory.shared.pick(text, from: briefChoices) {
+            await offerBrief(name: choice.name, number: choice.number, brief: heldBrief, userText: text)
+            return true
+        }
+        let names = briefChoices.map(\.name).joined(separator: ", ")
+        await speakLine("Which one? \(names)", userText: text)
+        afterTurn()
+        return true
+    }
+
+    /// "call X and tell them Y" is confirmed here. It does not open tel://.
+    private func handleBriefedCall(_ text: String) async -> Bool {
+        guard let request = BriefedCall.parse(text) else { return false }
+        callChoices = []
+        briefChoices = []
+        pendingCallBrief = nil
+        if request.brief.isEmpty {
+            await speakLine("What should I tell them, sir?", userText: text)
+            afterTurn()
+            return true
+        }
+        if let number = BriefedCall.phoneNumber(request.who) {
+            await offerBrief(name: number, number: number, brief: request.brief, userText: text)
+            return true
+        }
+        let granted = await ContactDirectory.shared.ensureLoaded()
+        guard granted else {
+            await speakLine("Contacts access is off. Enable it in iPhone Settings > JARVIS > Contacts.", userText: text)
+            afterTurn()
+            return true
+        }
+        switch ContactDirectory.shared.lookup(request.who) {
+        case .dial(let name, let number):
+            await offerBrief(name: name, number: number, brief: request.brief, userText: text)
+        case .choose(let choices):
+            briefChoices = choices
+            heldBrief = request.brief
+            let names = choices.map(\.name).joined(separator: ", ")
+            await speakLine("Which \(request.who)? \(names)", userText: text)
+            afterTurn()
+        case .missing:
+            await speakLine("I don't have a number for \(request.who).", userText: text)
+            afterTurn()
+        }
+        return true
+    }
+
+    private func offerBrief(name: String, number: String, brief: String, userText: String) async {
+        briefChoices = []
+        callChoices = []
+        heldBrief = ""
+        if BriefedCall.isEmergency(number) {
+            pendingCallBrief = nil
+            await speakLine("I won't place that call from here, sir. A plain call still uses your iPhone.", userText: userText)
+            afterTurn()
+            return
+        }
+        pendingCallBrief = PendingCallBrief(contactName: name, number: number, brief: brief)
+        let spokenBrief = brief.count > 280 ? String(brief.prefix(280)) + "…" : brief
+        let who = name == number ? number : name
+        let line = "I'll call \(who) and tell them \(spokenBrief). I'll introduce myself as your AI assistant. Say yes, sir, or no to cancel."
+        await speakLine(line, userText: userText)
+        afterTurn()
+    }
+
+    private func placeApprovedCall(userText: String) async {
+        guard let brief = pendingCallBrief else { return }
+        pendingCallBrief = nil
+        briefChoices = []
+        heldBrief = ""
+        _ = recordUser(userText)
+        phase = .thinking
+        statusLine = "Placing the call…"
+        pushActivity()
+        let outcome = await placeBrief(brief)
+        statusLine = nil
+        switch outcome {
+        case .notSetUp:
+            CallLogStore.add(StoredCall.local(
+                name: brief.contactName, number: brief.number, brief: brief.brief,
+                status: "not_set_up", detail: "Calling not set up.", spoken: true))
+            callLogTick += 1
+            await speakLine("Calling isn't set up yet, sir. The UK number and the worker secrets still need to be added.", userText: userText)
+        case .failed(let message):
+            let detail = message.count > 180 ? String(message.prefix(180)) : message
+            CallLogStore.add(StoredCall.local(
+                name: brief.contactName, number: brief.number, brief: brief.brief,
+                status: "failed", detail: detail, spoken: true))
+            callLogTick += 1
+            await speakLine("I couldn't place that call, sir. \(detail)", userText: userText)
+        case .placed(let record):
+            CallLogStore.update(StoredCall.fromServer(record, spoken: false))
+            callLogTick += 1
+            await speakLine("Ringing \(brief.contactName) now, sir. I'll tell you what they said when the call ends.", userText: userText)
+            afterTurn()
+            watchCall(id: record.id)
+            return
+        }
+        guard !Task.isCancelled else { return }
+        afterTurn()
+    }
+
+    private func declineApprovedCall(userText: String) async {
+        guard let brief = pendingCallBrief else { return }
+        pendingCallBrief = nil
+        briefChoices = []
+        heldBrief = ""
+        _ = recordUser(userText)
+        CallLogStore.add(StoredCall.local(
+            name: brief.contactName, number: brief.number, brief: brief.brief,
+            status: "cancelled", detail: "", spoken: true))
+        callLogTick += 1
+        await speakLine("Cancelled, sir. I won't call \(brief.contactName).", userText: userText)
+        afterTurn()
+    }
+
+    private func placeBrief(_ brief: PendingCallBrief) async -> CallPlaceResult {
+        guard JarvisCloud.isConfigured else { return .notSetUp }
+        do {
+            let client = try JarvisCloudAPI.client()
+            return await client.placeOutboundCall(to: brief.number, contactName: brief.contactName, brief: brief.brief)
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+    }
+
+    private func watchCall(id: String) {
+        callWatch?.cancel()
+        callWatch = Task { await self.pollCall(id: id) }
+    }
+
+    private func pollCall(id: String) async {
+        for _ in 0..<120 {
+            try? await Task.sleep(for: .seconds(4))
+            if Task.isCancelled { return }
+            guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else { return }
+            guard let record = try? await client.outboundCall(id: id) else { continue }
+            absorb(record, announce: true)
+            if record.isFinished { return }
+        }
+    }
+
+    private func pullOpenCalls() async {
+        guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else { return }
+        for row in CallLogStore.openCalls() where row.id.hasPrefix("call_") {
+            guard let record = try? await client.outboundCall(id: row.id) else { continue }
+            absorb(record, announce: true)
+        }
+    }
+
+    private func absorb(_ record: PhoneCallRecord, announce: Bool) {
+        let existing = CallLogStore.entries().first { $0.id == record.id }
+        var stored = StoredCall.fromServer(record, spoken: existing?.spoken ?? false)
+        if existing?.spoken == true { stored.spoken = true }
+        let shouldSpeak = announce && record.isFinished && !stored.spoken
+        if shouldSpeak { stored.spoken = true }
+        CallLogStore.update(stored)
+        callLogTick += 1
+        guard shouldSpeak else { return }
+        let name = stored.contactName
+        let summary = stored.summary.isEmpty ? stored.detail : stored.summary
+        let status = stored.status
+        Task { await self.speakCallReport(name: name, summary: summary, status: status) }
+    }
+
+    private func speakCallReport(name: String, summary: String, status: String) async {
+        let line = CallReport.spoken(name: name, summary: summary, status: status)
+        for _ in 0..<40 {
+            if phase == .idle || phase == .listening { break }
+            try? await Task.sleep(for: .milliseconds(500))
+            if Task.isCancelled { return }
+        }
+        recordAssistant(line)
+        saveForWidget(transcript: name, reply: line)
+        await say(line)
+        if Task.isCancelled { return }
+        if isSessionActive && isContinuous {
+            beginListening(manual: false)
+        } else {
+            phase = .idle
+            level = 0
+            pushActivity()
+            refreshWake()
+        }
     }
 
     // MARK: Confirmation

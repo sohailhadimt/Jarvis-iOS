@@ -287,6 +287,11 @@ struct CloudApprovalsView: View {
 
     var body: some View {
         List {
+            if engine.pendingCallBrief != nil {
+                Section("Call") {
+                    CallBriefBar()
+                }
+            }
             if let summary = engine.pendingSummary {
                 Section("On this iPhone") {
                     ConfirmBar(summary: summary,
