@@ -167,6 +167,7 @@ struct FirstRunView: View {
         settings.briefingMinute = minute
         settings.glanceEnabled = true
         settings.onboarded = true
+        DeviceLocation.shared.prepare()
         BriefingClock.schedule()
         JarvisHaptics.success()
         onFinish()

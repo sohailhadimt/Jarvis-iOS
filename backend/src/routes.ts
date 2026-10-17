@@ -2,8 +2,9 @@ import { authorize } from "./auth";
 import { handleCallApi, handleCallWebhook, isCallWebhook } from "./calls";
 import { handleOwnerWebhook, isOwnerWebhook, rememberOrigin, routeOwnerApi } from "./owner-alert";
 import { routeRelay } from "./relay";
-import { handleScreenWebhook, isScreenWebhook, routeScreeningApi } from "./screening";
+import { handleScreenWebhook, inboundFallbackResponse, isScreenWebhook, routeScreeningApi } from "./screening";
 import { buildBriefing } from "./briefing";
+import { chatResponse } from "./llm";
 import { computeNextRun, parseCron } from "./cron";
 import {
   dbAll,
@@ -68,6 +69,7 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     ctx.waitUntil(rememberOrigin(env, url.origin));
 
     const parts = path.split("/").filter(Boolean);
+    if (request.method === "POST" && path === "/chat") return chatResponse(request, env);
     if (request.method === "POST" && path === "/tasks") return createTask(request, env, ctx);
     if (request.method === "GET" && path === "/tasks") return listTasks(env, url);
     if (request.method === "GET" && parts[0] === "tasks" && parts[1] && parts.length === 2) return getTask(env, parts[1]);
@@ -105,6 +107,7 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
   } catch (err) {
     const message = err instanceof Error ? err.message : "Request failed.";
     console.error("jarvis request failed", message);
+    if (request.method === "POST" && path === "/calls/inbound") return inboundFallbackResponse();
     return apiError(500, "internal", message);
   }
 }

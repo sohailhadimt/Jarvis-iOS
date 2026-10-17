@@ -52,18 +52,27 @@ enum GroqTranscription {
     }
 }
 
-/// On-device Apple Speech for a recorded file. Used when Groq Whisper is unavailable or fails.
+/// Apple Speech for a recorded file. Used when Groq Whisper is unavailable or fails.
 enum AppleFileTranscriber {
     static func transcribe(_ url: URL) async throws -> String {
+        do {
+            return try await run(url, requireOnDevice: true)
+        } catch ListenerError.timedOut {
+            throw ListenerError.timedOut
+        } catch {
+            return try await run(url, requireOnDevice: false)
+        }
+    }
+
+    private static func run(_ url: URL, requireOnDevice: Bool) async throws -> String {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, any Error>) in
-            guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-GB")) ?? SFSpeechRecognizer(),
-                  recognizer.isAvailable else {
+            guard let recognizer = SpeechLocales.recognizer(preferred: "en-GB") else {
                 cont.resume(throwing: ListenerError.unavailable)
                 return
             }
             let request = SFSpeechURLRecognitionRequest(url: url)
             request.shouldReportPartialResults = false
-            if recognizer.supportsOnDeviceRecognition {
+            if requireOnDevice, recognizer.supportsOnDeviceRecognition {
                 request.requiresOnDeviceRecognition = true
             }
             let box = SpeechResumeBox(cont)

@@ -10,8 +10,9 @@ enum WebKnowledge {
     static func needsLiveFacts(_ text: String) -> Bool {
         let lower = text.lowercased()
         let needles = [
-            "news", "headline", "headlines",
-            "weather", "forecast",
+            "news", "headline", "headlines", "what's happening", "whats happening",
+            "weather", "forecast", "raining", "temperature",
+            "near me", "nearby", "around here", "closest", "nearest", "where can i", "open now",
             "price of", "prices", "how much", "stock price", "share price", "exchange rate", "bitcoin",
             "sports", "football", "cricket", "tennis", "premier league", "champions league",
             "score", "fixture", "who won", "who plays",
@@ -22,6 +23,16 @@ enum WebKnowledge {
             "when is", "when does", "when did", "what year", "which year",
             "prime minister", "president", "election",
             "opening hours", "what happened",
+        ]
+        return needles.contains { lower.contains($0) }
+    }
+
+    /// Weather and nearby questions need a when-in-use fix. Other facts do not.
+    static func needsHere(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let needles = [
+            "weather", "forecast", "raining", "temperature", "umbrella",
+            "near me", "nearby", "around here", "closest", "nearest", "where can i", "open now",
         ]
         return needles.contains { lower.contains($0) }
     }

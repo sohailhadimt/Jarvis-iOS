@@ -64,6 +64,11 @@ enum CloudTime {
     }
 }
 
+struct CloudChatReply: Decodable, Sendable {
+    var ok: Bool
+    var reply: String
+}
+
 struct CloudHealth: Decodable, Sendable {
     var ok: Bool
     var service: String
@@ -527,6 +532,20 @@ private struct ListEnvelope<Item: Decodable>: Decodable {
 struct CloudClient: Sendable {
     var base: URL
     var token: String
+
+    func converse(messages: [[String: String]], location: (lat: Double, lon: Double)? = nil) async -> String? {
+        do {
+            var body: [String: Any] = ["messages": messages]
+            if let location {
+                body["location"] = ["lat": location.lat, "lon": location.lon]
+            }
+            let envelope: CloudChatReply = try await sendJSON(method: "POST", path: "/chat", body: body)
+            let text = envelope.reply.trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? nil : text
+        } catch {
+            return nil
+        }
+    }
 
     func health() async throws -> CloudHealth {
         let (data, status) = try await raw(method: "GET", path: "/health", authorize: false, body: nil, query: [])

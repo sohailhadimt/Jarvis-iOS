@@ -163,12 +163,22 @@ private struct LiveCaption: View {
     @Environment(AppSettings.self) private var settings
 
     var body: some View {
-        if let error = engine.errorMessage, !error.isEmpty {
+        if engine.isSessionActive, engine.phase == .listening {
+            if engine.microphoneMuted {
+                caption("The microphone is muted, sir.", color: Color(hex: "#A39BB4"))
+            } else if let error = engine.errorMessage, !error.isEmpty, engine.transcript.isEmpty {
+                caption(JarvisLines.explain(error), color: Color(hex: "#C9C6D4"))
+            } else if !engine.transcript.isEmpty {
+                caption(engine.transcript, color: Color(hex: "#A39BB4"))
+            } else {
+                caption(JarvisLines.listening, color: Color(hex: "#7EB6FF"))
+            }
+        } else if !engine.reply.isEmpty {
+            caption(engine.reply, color: Color(hex: "#C9C6D4"))
+        } else if let error = engine.errorMessage, !error.isEmpty {
             caption(JarvisLines.explain(error), color: Color(hex: "#C9C6D4"))
         } else if settings.captionsDefault, engine.phase == .listening, !engine.transcript.isEmpty {
             caption(engine.transcript, color: Color(hex: "#A39BB4"))
-        } else if settings.captionsDefault, engine.phase == .speaking || engine.phase == .thinking, !engine.reply.isEmpty {
-            caption(engine.reply, color: Color(hex: "#C9C6D4"))
         }
     }
 
@@ -177,7 +187,7 @@ private struct LiveCaption: View {
             .font(.system(size: 15, weight: .regular))
             .foregroundStyle(color)
             .multilineTextAlignment(.center)
-            .lineLimit(2)
+            .lineLimit(4)
             .padding(.horizontal, 32)
             .padding(.top, 12)
     }
@@ -248,11 +258,11 @@ private struct AskBar: View {
                 .onSubmit(send)
             Button(action: micTapped) {
                 ZStack {
-                    Circle().fill(Color.white.opacity(0.04))
+                    Circle().fill(engine.isSessionActive ? Color(hex: "#2E8BFF").opacity(0.92) : Color.white.opacity(0.04))
                     Circle()
                         .stroke(Color(hex: "#2E8BFF"), lineWidth: 1.5)
                         .shadow(color: Color(hex: "#2E8BFF").opacity(engine.isSessionActive ? 0.95 : 0.75), radius: 6)
-                    Image(systemName: "mic.fill")
+                    Image(systemName: engine.isSessionActive ? "waveform" : "mic.fill")
                         .font(.system(size: 15, weight: .regular))
                         .foregroundStyle(.white)
                 }
@@ -260,6 +270,7 @@ private struct AskBar: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(engine.isSessionActive ? "Stop listening" : "Microphone")
+            .accessibilityValue(engine.phase == .listening ? "Listening" : "")
         }
         .padding(.leading, 16)
         .padding(.trailing, 8)

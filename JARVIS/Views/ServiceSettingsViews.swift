@@ -290,6 +290,10 @@ struct VoicesSettingsView: View {
                     Text("Spanish").tag("es-ES")
                 }
                 VStack(alignment: .leading) {
+                    Text("Pause before I reply \(settings.endpointSilence, format: .number.precision(.fractionLength(1))) s")
+                    Slider(value: $settings.endpointSilence, in: 1...3, step: 0.1)
+                }
+                VStack(alignment: .leading) {
                     Text("VAD sensitivity \(settings.vadSensitivity, format: .number.precision(.fractionLength(2)))")
                     Slider(value: $settings.vadSensitivity, in: 0...1)
                 }
@@ -300,7 +304,7 @@ struct VoicesSettingsView: View {
             } header: {
                 Text("Voice mode")
             } footer: {
-                Text("The home ring brightens with JARVIS's voice and, more gently, with the microphone. Start with voice opens listening as soon as JARVIS is on screen. Lines under the greeting show the live turn. VAD sensitivity changes how quickly silence ends your turn; higher is about 500ms and lower is about 700ms. The Action Button session is unaffected.")
+                Text("The home ring brightens with JARVIS's voice and, more gently, with the microphone. Start with voice opens listening as soon as JARVIS is on screen. Lines under the greeting show the live turn. Pause before I reply is how long quiet must last after you stop talking. VAD sensitivity only changes how easily a word interrupts JARVIS while he is speaking. The Action Button session is unaffected.")
             }
             Section("Selected: \(settings.voiceName)") {
                 VStack(alignment: .leading) {

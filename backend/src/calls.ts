@@ -287,6 +287,41 @@ export async function twilioSignatureValid(
   return timingEqual(expected, provided.trim());
 }
 
+const PUBLIC_VOICE_HOST = "jarvis-backend.jarvis-hadi.workers.dev";
+
+/** URLs Twilio may have signed. The auth token still has to match; this only covers host and scheme differences. */
+export function twilioSignedUrls(request: Request): string[] {
+  const current = new URL(request.url);
+  const path = current.pathname || "/";
+  const search = current.search;
+  const hosts = new Set<string>([current.host, PUBLIC_VOICE_HOST]);
+  const forwarded = request.headers.get("x-forwarded-host");
+  if (forwarded) hosts.add(forwarded.split(",")[0].trim());
+  const urls = new Set<string>([request.url]);
+  for (const host of hosts) {
+    if (!host) continue;
+    for (const proto of ["https", "http"]) {
+      urls.add(`${proto}://${host}${path}${search}`);
+      urls.add(`${proto}://${host}${path}`);
+      if (path.length > 1 && !path.endsWith("/")) {
+        urls.add(`${proto}://${host}${path}/${search === "" ? "" : search}`);
+        urls.add(`${proto}://${host}${path}/`);
+      }
+    }
+  }
+  return [...urls];
+}
+
+export async function twilioRequestSigned(request: Request, params: Record<string, string>, token: string): Promise<boolean> {
+  const provided = request.headers.get("X-Twilio-Signature");
+  const secret = token.trim();
+  if (!provided || !secret) return false;
+  for (const url of twilioSignedUrls(request)) {
+    if (await twilioSignatureValid(url, params, secret, provided)) return true;
+  }
+  return false;
+}
+
 export function isCallWebhook(method: string, path: string): boolean {
   if (method !== "POST") return false;
   if (path === "/calls/elevenlabs") return true;
@@ -478,10 +513,10 @@ async function getCall(env: Env, id: string, url: URL): Promise<Response> {
 async function voiceWebhook(request: Request, env: Env, id: string): Promise<Response> {
   const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
   const params = await formParams(request);
-  const valid = await twilioSignatureValid(request.url, params, token, request.headers.get("X-Twilio-Signature"));
+  const valid = await twilioRequestSigned(request, params, token);
   if (!valid) return xml(sayAndHangup("Hello, this is JARVIS, Master Hadi's personal assistant. This call could not be verified. Goodbye."), 403);
   const row = await loadCall(env, id);
-  if (!row) return xml(sayAndHangup("Hello, this is JARVIS, Master Hadi's personal assistant. I'm sorry, this call is not set up. Goodbye."), 404);
+  if (!row) return xml(sayAndHangup("Hello, this is JARVIS, Master Hadi's personal assistant. I'm sorry, this call is not set up. Goodbye."), 200);
   const mode = new URL(request.url).searchParams.get("mode");
   const screen = await loadScreen(env, id);
   let relayAnswer: string | null = null;
@@ -521,7 +556,7 @@ async function voiceWebhook(request: Request, env: Env, id: string): Promise<Res
     const response = await fetch("https://api.elevenlabs.io/v1/convai/twilio/register-call", {
       method: "POST",
       redirect: "error",
-      signal: AbortSignal.timeout(20_000),
+      signal: AbortSignal.timeout(8_000),
       headers: {
         "xi-api-key": (env.ELEVENLABS_API_KEY ?? "").trim(),
         "content-type": "application/json",
@@ -533,7 +568,7 @@ async function voiceWebhook(request: Request, env: Env, id: string): Promise<Res
       const reason = safeError(text || "ElevenLabs could not start the call.");
       await updateCall(env, id, { status: "failed", error: reason });
       reportCallFailure(env, row, reason);
-      return xml(sayAndHangup("Hello, this is JARVIS, Master Hadi's personal assistant. I'm sorry, I can't continue this call right now. Goodbye."), 502);
+      return xml(sayAndHangup("Hello, this is JARVIS, Master Hadi's personal assistant. I'm sorry, I can't continue this call right now. Goodbye."), 200);
     }
     const conversationId =
       conversationIdFromTwiml(text) ||
@@ -548,14 +583,14 @@ async function voiceWebhook(request: Request, env: Env, id: string): Promise<Res
     const reason = safeError(err instanceof Error ? err.message : "ElevenLabs could not be reached.");
     await updateCall(env, id, { status: "failed", error: reason });
     reportCallFailure(env, row, reason);
-    return xml(sayAndHangup("Hello, this is JARVIS, Master Hadi's personal assistant. I'm sorry, I can't continue this call right now. Goodbye."), 502);
+    return xml(sayAndHangup("Hello, this is JARVIS, Master Hadi's personal assistant. I'm sorry, I can't continue this call right now. Goodbye."), 200);
   }
 }
 
 async function twilioStatusWebhook(request: Request, env: Env, id: string): Promise<Response> {
   const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
   const params = await formParams(request);
-  const valid = await twilioSignatureValid(request.url, params, token, request.headers.get("X-Twilio-Signature"));
+  const valid = await twilioRequestSigned(request, params, token);
   if (!valid) return json({ ok: false }, 403);
   const row = await loadCall(env, id);
   if (!row) return json({ ok: false }, 404);

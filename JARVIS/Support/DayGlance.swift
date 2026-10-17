@@ -36,26 +36,14 @@ final class DayGlance {
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: cacheAtKey)
     }
 
-    /// Maidstone, Kent. No key. A failure leaves the greeting alone.
+    /// A recent fix when location is allowed. Otherwise Maidstone, Kent. No key.
     private static func weather() async -> String? {
-        var parts = URLComponents(string: "https://api.open-meteo.com/v1/forecast")
-        parts?.queryItems = [
-            URLQueryItem(name: "latitude", value: "51.27"),
-            URLQueryItem(name: "longitude", value: "0.52"),
-            URLQueryItem(name: "current", value: "temperature_2m,weather_code"),
-            URLQueryItem(name: "timezone", value: "Europe/London"),
-        ]
-        guard let url = parts?.url else { return nil }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 6
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let current = json["current"] as? [String: Any],
-              let temp = current["temperature_2m"] as? Double else { return nil }
-        let code = current["weather_code"] as? Int ?? 0
-        let rounded = Int(temp.rounded())
-        return "\(rounded)° and \(word(for: code)) in Kent"
+        let spot = DeviceLocation.shared.cached()
+        let latitude = spot?.lat ?? 51.27
+        let longitude = spot?.lon ?? 0.52
+        let place = spot == nil ? "in Kent" : "here"
+        guard let line = await DeviceLocation.weatherLine(latitude: latitude, longitude: longitude) else { return nil }
+        return "\(line) \(place)"
     }
 
     private static func agenda() -> String? {
@@ -68,19 +56,5 @@ final class DayGlance {
         let title = (next.title ?? "something").trimmingCharacters(in: .whitespacesAndNewlines)
         let time = next.startDate.formatted(date: .omitted, time: .shortened)
         return "Next, \(time) \(title)"
-    }
-
-    private static func word(for code: Int) -> String {
-        switch code {
-        case 0: "clear"
-        case 1, 2: "fair"
-        case 3: "cloudy"
-        case 45, 48: "foggy"
-        case 51, 53, 55, 56, 57: "drizzle"
-        case 61, 63, 65, 80, 81, 82: "rain"
-        case 71, 73, 75, 77, 85, 86: "snow"
-        case 95, 96, 99: "storms"
-        default: "unsettled"
-        }
     }
 }

@@ -77,6 +77,12 @@ final class SpeechOutput: NSObject {
         sharedPlayer = player
     }
 
+    /// Stops playback taps before the listener installs its own. The ring reads VoiceMeter and never taps the mic.
+    func yieldMicrophone() {
+        removeSharedLevelTap()
+        releasePrivateEngine()
+    }
+
     /// Opens the playback engine while listening so the first sentence does not pay startup cost.
     func prewarm() {
         if sharedPlayer?.engine?.isRunning == true {
@@ -253,6 +259,7 @@ final class SpeechOutput: NSObject {
         engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil,
                                         block: AudioTaps.levelTap(levelHandler))
         mixerTapInstalled = true
+        // Input tap is barge-in only, and only on this playback engine when the listener is not running.
         if monitoring {
             let bargeHandler: @Sendable (Float) -> Void = { [weak self] rms in
                 let value = AudioTaps.normalized(rms)

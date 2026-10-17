@@ -208,8 +208,19 @@ final class AppSettings {
     var speechLocale: String { didSet { d.set(speechLocale, forKey: "speechLocale") } }
     /// Full-screen captions start on when a voice session opens.
     var captionsDefault: Bool { didSet { d.set(captionsDefault, forKey: "captionsDefault") } }
-    /// 0 waits about 700ms of silence. 1 ends a turn after about 500ms.
+    /// 0 waits about 700ms of silence. 1 ends a turn after about 500ms. Barge-in only.
     var vadSensitivity: Double { didSet { d.set(vadSensitivity, forKey: "vadSensitivity") } }
+    /// Seconds of quiet after the latest words before a turn ends. Default is 1.75.
+    var endpointSilence: Double {
+        didSet {
+            let clamped = min(3, max(1, endpointSilence))
+            if clamped != endpointSilence {
+                endpointSilence = clamped
+                return
+            }
+            d.set(clamped, forKey: "endpointSilence")
+        }
+    }
     /// When on, and a voice print is saved, only that speaker reaches speech recognition.
     var voiceMatchEnabled: Bool { didSet { d.set(voiceMatchEnabled, forKey: "voiceMatchEnabled") } }
     var voiceMatchSensitivity: VoiceMatchSensitivity {
@@ -308,6 +319,8 @@ final class AppSettings {
         speechLocale = d.string(forKey: "speechLocale") ?? "en-GB"
         captionsDefault = d.object(forKey: "captionsDefault") as? Bool ?? true
         vadSensitivity = d.object(forKey: "vadSensitivity") as? Double ?? 0.5
+        let storedPause = d.object(forKey: "endpointSilence") as? Double ?? 1.75
+        endpointSilence = min(3, max(1, storedPause))
         voiceMatchEnabled = d.object(forKey: "voiceMatchEnabled") as? Bool ?? false
         voiceMatchSensitivity = VoiceMatchSensitivity(rawValue: d.string(forKey: "voiceMatchSensitivity") ?? "") ?? .balanced
         voiceMatchPrompted = d.object(forKey: "voiceMatchPrompted") as? Bool ?? false

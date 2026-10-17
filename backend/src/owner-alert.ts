@@ -1,5 +1,5 @@
 import { dbAll, dbFirst, dbRun, getState, setState } from "./db";
-import { conversationIdFromTwiml, safeError, toE164, twilioSignatureValid, type CallLine } from "./calls";
+import { conversationIdFromTwiml, safeError, toE164, twilioRequestSigned, type CallLine } from "./calls";
 import { apiError, isRecord, json, newId, nowIso } from "./http";
 import { pushNotice } from "./screening";
 import type { Env } from "./types";
@@ -192,7 +192,7 @@ export async function sweepOwner(env: Env): Promise<void> {
 export async function handleOwnerWebhook(request: Request, env: Env, path: string): Promise<Response> {
   const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
   const params = await formParams(request);
-  const valid = await twilioSignatureValid(request.url, params, token, request.headers.get("X-Twilio-Signature"));
+  const valid = await twilioRequestSigned(request, params, token);
   if (!valid) return xml("<Response><Hangup/></Response>", 403);
   const parts = path.split("/").filter(Boolean);
   const id = parts[2] ?? "";

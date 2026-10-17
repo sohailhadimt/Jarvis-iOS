@@ -1,6 +1,10 @@
 import { getState, setState } from "./db";
+import { isRecord, json } from "./http";
+import { gatherLive, readFix, spokenAnswer } from "./live-answer";
 import type { Env } from "./types";
 import { GEMINI_MODEL, GEMINI_URL, GROQ_MODEL, GROQ_URL, LIMITS } from "./types";
+
+export const CHAT_FALLBACK = "I'm here, sir. I couldn't reach my notes just now. Ask me again in a moment.";
 
 export interface ToolCall {
   id: string;
@@ -102,6 +106,59 @@ export async function completeChat(
     code: "not_configured",
     message: "No LLM key is configured. Set the Worker secret GEMINI_API_KEY or GROQ_API_KEY.",
   };
+}
+
+export async function chatResponse(request: Request, env: Env): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ ok: false, reply: CHAT_FALLBACK, provider: null });
+  }
+  if (!isRecord(body) || !Array.isArray(body.messages)) {
+    return json({ ok: false, reply: CHAT_FALLBACK, provider: null });
+  }
+  const messages: ChatMessage[] = [];
+  for (const item of body.messages) {
+    if (!isRecord(item)) continue;
+    const role = item.role;
+    if (role !== "system" && role !== "user" && role !== "assistant") continue;
+    const content = typeof item.content === "string" ? item.content.trim().slice(0, 4000) : "";
+    if (!content) continue;
+    messages.push({ role, content });
+    if (messages.length >= 20) break;
+  }
+  if (!messages.some((message) => message.role === "user")) {
+    return json({ ok: false, reply: CHAT_FALLBACK, provider: null });
+  }
+  const question = [...messages].reverse().find((message) => message.role === "user")?.content ?? "";
+  const live = await gatherLive(env, question, readFix(body.location));
+  if (live?.reply) {
+    return json({ ok: true, reply: live.reply, provider: "gemini" });
+  }
+  let chatMessages = messages;
+  if (live?.notes) {
+    chatMessages = [
+      {
+        role: "system",
+        content:
+          "Use these notes to answer in one or two spoken sentences. Give the fact. Do not say you will search. Do not mention links or URLs.\n" +
+          live.notes,
+      },
+      ...messages,
+    ];
+  }
+  const result = await completeChat(env, chatMessages, null);
+  if (!result.ok) {
+    console.error("chat failed", result.code);
+    return json({ ok: false, reply: CHAT_FALLBACK, provider: null });
+  }
+  const reply = spokenAnswer(result.message.content ?? "");
+  if (!reply) {
+    console.error("chat returned an empty reply", result.provider);
+    return json({ ok: false, reply: CHAT_FALLBACK, provider: result.provider });
+  }
+  return json({ ok: true, reply, provider: result.provider });
 }
 
 async function callProvider(

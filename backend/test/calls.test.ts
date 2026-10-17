@@ -363,4 +363,191 @@ describe("Twilio webhooks", () => {
     expect(await twilioSignatureValid(url, params, "twilio-auth-token-example", signature)).toBe(true);
     expect(await twilioSignatureValid(url, params, "twilio-auth-token-example", "wrong")).toBe(false);
   });
+
+  it("accepts the public inbound URL and takes a message when ElevenLabs fails", async () => {
+    const env = mockEnv("secret-token");
+    env.TWILIO_ACCOUNT_SID = "ACexampleaccountsid000000000000";
+    env.TWILIO_AUTH_TOKEN = "twilio-auth-token-example";
+    env.TWILIO_FROM_NUMBER = "+447700900000";
+    env.ELEVENLABS_API_KEY = "elevenlabs-key-example-value";
+    env.ELEVENLABS_AGENT_ID = "agent_example";
+    const params = { CallSid: "CA123", From: "+447700900123", To: "+447700900000" };
+    const signed = "https://jarvis-backend.jarvis-hadi.workers.dev/calls/inbound";
+    const signature = await twilioSignature(signed, params, "twilio-auth-token-example");
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("upstream failed", { status: 502 })) as typeof fetch;
+    try {
+      const response = await route(
+        new Request("http://internal.local/calls/inbound", {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded", "X-Twilio-Signature": signature },
+          body: new URLSearchParams(params).toString(),
+        }),
+        env,
+        ctx(),
+      );
+      expect(response.status).toBe(200);
+      const xml = await response.text();
+      expect(xml).toContain("<Response>");
+      expect(xml).toContain("<Say");
+      expect(xml).toContain("<Record");
+      expect(xml).not.toContain("twilio-auth-token-example");
+      expect(xml).not.toContain("elevenlabs-key-example-value");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("answers /chat with the worker model and still replies when the model is down", async () => {
+    const env = mockEnv("secret-token");
+    env.GROQ_API_KEY = "groq-key-example-value";
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "Good evening, sir." } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+    try {
+      const ok = await route(
+        request("/chat", {
+          method: "POST",
+          headers: bearer,
+          body: JSON.stringify({ messages: [{ role: "user", content: "Hello" }] }),
+        }),
+        env,
+        ctx(),
+      );
+      expect(ok.status).toBe(200);
+      const answered = (await ok.json()) as { ok: boolean; reply: string };
+      expect(answered.ok).toBe(true);
+      expect(answered.reply).toContain("sir");
+      expect(JSON.stringify(answered)).not.toContain("groq-key-example-value");
+    } finally {
+      globalThis.fetch = original;
+    }
+
+    globalThis.fetch = (async () => new Response("no", { status: 500 })) as typeof fetch;
+    try {
+      const down = await route(
+        request("/chat", {
+          method: "POST",
+          headers: bearer,
+          body: JSON.stringify({ messages: [{ role: "user", content: "Hello" }] }),
+        }),
+        env,
+        ctx(),
+      );
+      expect(down.status).toBe(200);
+      const body = (await down.json()) as { ok: boolean; reply: string };
+      expect(body.ok).toBe(false);
+      expect(body.reply.toLowerCase()).toContain("sir");
+      expect(JSON.stringify(body)).not.toContain("groq-key-example-value");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("answers weather from the forecast and does not promise a search", async () => {
+    const env = mockEnv("secret-token");
+    env.GEMINI_API_KEY = "gemini-key-example-value";
+    const original = globalThis.fetch;
+    const seen: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      seen.push(url);
+      if (url.includes("open-meteo.com")) {
+        return new Response(
+          JSON.stringify({
+            current: { temperature_2m: 11.4, weather_code: 61 },
+            daily: { temperature_2m_max: [14], temperature_2m_min: [6] },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.includes(":generateContent")) {
+        return new Response(
+          JSON.stringify({
+            candidates: [{ content: { parts: [{ text: "It's 11 degrees and raining where you are, sir." }] } }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response("unused", { status: 500 });
+    }) as typeof fetch;
+    try {
+      const response = await route(
+        request("/chat", {
+          method: "POST",
+          headers: bearer,
+          body: JSON.stringify({
+            messages: [{ role: "user", content: "What's the weather near me?" }],
+            location: { lat: 51.27, lon: 0.52 },
+          }),
+        }),
+        env,
+        ctx(),
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { ok: boolean; reply: string };
+      expect(body.ok).toBe(true);
+      expect(body.reply.toLowerCase()).toContain("raining");
+      expect(body.reply.toLowerCase()).not.toContain("i'll search");
+      expect(body.reply).not.toContain("http");
+      expect(JSON.stringify(body)).not.toContain("gemini-key-example-value");
+      expect(seen.some((url) => url.includes("open-meteo.com"))).toBe(true);
+      expect(seen.some((url) => url.includes(":generateContent"))).toBe(true);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("falls back from a search promise to the search notes and still answers", async () => {
+    const env = mockEnv("secret-token");
+    env.GEMINI_API_KEY = "gemini-key-example-value";
+    env.TAVILY_API_KEY = "tavily-key-example-value";
+    env.GROQ_API_KEY = "groq-key-example-value";
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes(":generateContent")) {
+        return new Response(
+          JSON.stringify({ candidates: [{ content: { parts: [{ text: "I'll search for that." }] } }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.includes("api.tavily.com")) {
+        return new Response(
+          JSON.stringify({
+            results: [{ title: "Match", url: "https://example.com/match", content: "Arsenal won two nil." }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ choices: [{ message: { role: "assistant", content: "Arsenal won two nil, sir." } }] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+    try {
+      const response = await route(
+        request("/chat", {
+          method: "POST",
+          headers: bearer,
+          body: JSON.stringify({ messages: [{ role: "user", content: "Who won the match?" }] }),
+        }),
+        env,
+        ctx(),
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { ok: boolean; reply: string };
+      expect(body.ok).toBe(true);
+      expect(body.reply.toLowerCase()).toContain("arsenal");
+      expect(body.reply.toLowerCase()).not.toContain("i'll search");
+      expect(body.reply).not.toContain("http");
+      expect(JSON.stringify(body)).not.toContain("tavily-key-example-value");
+      expect(JSON.stringify(body)).not.toContain("gemini-key-example-value");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
 });

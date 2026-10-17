@@ -9,7 +9,7 @@ import {
   screeningScript,
   smsAction,
   toE164,
-  twilioSignatureValid,
+  twilioRequestSigned,
   type CallLine,
 } from "./calls";
 import { apiError, asString, isRecord, json, newId, nowIso } from "./http";
@@ -23,12 +23,25 @@ export function isScreenWebhook(method: string, path: string): boolean {
   return /^\/calls\/join\/[A-Za-z0-9_]+$/.test(path);
 }
 
+export function inboundFallbackResponse(): Response {
+  return xml(takeMessage(`${INBOUND_GREETING} I'm sorry, I can't continue this call right now. Please leave a message after the tone.`), 200);
+}
+
 export async function handleScreenWebhook(request: Request, env: Env, path: string, ctx: ExecutionContext): Promise<Response> {
   const setup = callingSecrets(env);
   if (!setup.configured) {
+    console.error("inbound call is not configured", setup.missing.join(","));
+    if (path === "/calls/inbound") return xml(takeMessage(`${INBOUND_GREETING} I'm sorry, call screening is not set up. Please leave a message after the tone.`), 200);
     return xml(say(`${INBOUND_GREETING} I'm sorry, call screening is not set up. Goodbye.`), 503);
   }
-  if (path === "/calls/inbound") return inboundCall(request, env, ctx);
+  if (path === "/calls/inbound") {
+    try {
+      return await inboundCall(request, env, ctx);
+    } catch (err) {
+      console.error("inbound call failed", safeError(err instanceof Error ? err.message : "inbound"));
+      return inboundFallbackResponse();
+    }
+  }
   if (path === "/calls/sms") return smsWebhook(request, env);
   const id = path.split("/").pop() ?? "";
   return joinWebhook(request, env, id);
@@ -48,8 +61,12 @@ export async function routeScreeningApi(request: Request, env: Env, path: string
 async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
   const params = await formParams(request);
-  const valid = await twilioSignatureValid(request.url, params, token, request.headers.get("X-Twilio-Signature"));
-  if (!valid) return xml(say("Hello, this is JARVIS, Master Hadi's personal assistant. This call could not be verified. Goodbye."), 403);
+  const valid = await twilioRequestSigned(request, params, token);
+  if (!valid) {
+    const url = new URL(request.url);
+    console.error("inbound signature rejected", JSON.stringify({ host: url.host, path: url.pathname, token: Boolean(token), fields: Object.keys(params).sort().join(",") }));
+    return xml(say("Hello, this is JARVIS, Master Hadi's personal assistant. This call could not be verified. Goodbye."), 403);
+  }
   const caller = toE164(params.From ?? "");
   const ours = toE164(env.TWILIO_FROM_NUMBER ?? "");
   if (!caller || (ours && caller === ours)) return xml("<Response><Hangup/></Response>", 200);
@@ -74,7 +91,6 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
     );
   } catch (err) {
     console.error("inbound call was not stored", safeError(err instanceof Error ? err.message : "insert failed"));
-    return xml(say(`${INBOUND_GREETING} I'm sorry, call screening is not set up. Goodbye.`), 503);
   }
   ctx.waitUntil(notify(env, id, caller, "", ""));
   ctx.waitUntil(learnCaller(env, id, new URL(request.url).origin));
@@ -88,13 +104,14 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
     contact: "Caller",
     brief: "Find out who is calling and why. Do not reveal personal information.",
   });
-  if (!connected.twiml) {
-    await dbRun(env, "UPDATE outbound_calls SET status = 'failed', error = ?, updated_at = ? WHERE id = ?", [
-      connected.error,
+  if (!connected.twiml || !connected.twiml.includes("<Response")) {
+    console.error("inbound elevenlabs failed", connected.error || "response was not TwiML");
+    await dbRun(env, "UPDATE outbound_calls SET status = 'message', error = ?, updated_at = ? WHERE id = ?", [
+      connected.error || "ElevenLabs did not return TwiML.",
       nowIso(),
       id,
     ]).catch(() => undefined);
-    return xml(say(`${INBOUND_GREETING} I'm sorry, I can't continue this call right now. Goodbye.`), 502);
+    return xml(takeMessage(`${INBOUND_GREETING} I'm sorry, I can't continue this call right now. Please leave a message after the tone.`), 200);
   }
   if (connected.conversationId) {
     await dbRun(env, "UPDATE outbound_calls SET conversation_id = ?, status = 'screening', updated_at = ? WHERE id = ?", [
@@ -109,7 +126,7 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
 async function smsWebhook(request: Request, env: Env): Promise<Response> {
   const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
   const params = await formParams(request);
-  const valid = await twilioSignatureValid(request.url, params, token, request.headers.get("X-Twilio-Signature"));
+  const valid = await twilioRequestSigned(request, params, token);
   if (!valid) return xml("<Response></Response>", 403);
   const action = smsAction(params.Body ?? "");
   if (!action) return xml("<Response></Response>", 200);
@@ -136,7 +153,7 @@ async function smsWebhook(request: Request, env: Env): Promise<Response> {
 async function joinWebhook(request: Request, env: Env, id: string): Promise<Response> {
   const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
   const params = await formParams(request);
-  const valid = await twilioSignatureValid(request.url, params, token, request.headers.get("X-Twilio-Signature"));
+  const valid = await twilioRequestSigned(request, params, token);
   if (!valid) return xml(say("This call could not be verified. Goodbye."), 403);
   const muted = new URL(request.url).searchParams.get("muted") === "1";
   const room = `jarvis-${id}`;
@@ -548,7 +565,7 @@ async function registerAgent(
     const response = await fetch("https://api.elevenlabs.io/v1/convai/twilio/register-call", {
       method: "POST",
       redirect: "error",
-      signal: AbortSignal.timeout(20_000),
+      signal: AbortSignal.timeout(8_000),
       headers: {
         "xi-api-key": (env.ELEVENLABS_API_KEY ?? "").trim(),
         "content-type": "application/json",
@@ -650,6 +667,10 @@ function twilioMessage(text: string): string {
 
 function say(line: string): string {
   return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-GB">${escapeXml(line)}</Say><Hangup/></Response>`;
+}
+
+function takeMessage(line: string): string {
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-GB">${escapeXml(line)}</Say><Record maxLength="120" playBeep="true"/><Hangup/></Response>`;
 }
 
 function xml(body: string, status: number): Response {
