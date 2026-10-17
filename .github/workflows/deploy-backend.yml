@@ -76,11 +76,12 @@ jobs:
             process.exit(1);
           }
           const toml = readFileSync("wrangler.toml", "utf8");
-          const next = toml.replace(/database_id = "[^"]*"/, `database_id = "${id}"`);
-          if (next === toml) {
+          const pattern = /database_id\s*=\s*["'][^"']*["']/;
+          if (!pattern.test(toml)) {
             console.error("wrangler.toml has no database_id line.");
             process.exit(1);
           }
+          const next = toml.replace(pattern, `database_id = "${id}"`);
           writeFileSync("wrangler.toml", next);
           console.log(`D1 jarvis-db ${id}`);
           NODE
@@ -126,8 +127,14 @@ jobs:
         run: |
           set -euo pipefail
           npx wrangler deploy | tee /tmp/wrangler-deploy.txt
-          url=$(grep -oE 'https://[A-Za-z0-9.-]+\.workers\.dev' /tmp/wrangler-deploy.txt | head -1 || true)
-          echo "Worker URL: ${url:-unknown}" >> "$GITHUB_STEP_SUMMARY"
+          clean=$(sed -E 's/\x1B\[[0-9;]*[A-Za-z]//g' /tmp/wrangler-deploy.txt)
+          url=$(printf '%s\n' "$clean" | grep -oE 'https://[A-Za-z0-9.-]+\.workers\.dev' | head -1 || true)
+          if [ -z "$url" ]; then
+            echo "Deploy finished without a workers.dev URL."
+            exit 1
+          fi
+          echo "WORKER_URL=${url}" >> "$GITHUB_ENV"
+          echo "Worker URL: ${url}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set Worker secrets
         env:
@@ -202,4 +209,57 @@ jobs:
               echo "Optional secrets not set:"
               for name in "${missing_optional[@]}"; do echo "- \`$name\`"; done
             fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Point Twilio voice and SMS webhooks
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TWILIO_ACCOUNT_SID:-}" ] || [ -z "${TWILIO_AUTH_TOKEN:-}" ]; then
+            echo "TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN are required to set the number webhooks."
+            exit 1
+          fi
+          if [ -z "${WORKER_URL:-}" ]; then
+            echo "WORKER_URL is missing, so the Twilio webhooks were not changed."
+            exit 1
+          fi
+          base="${WORKER_URL%/}"
+          voice="${base}/calls/inbound"
+          sms="${base}/calls/sms"
+          # Incoming number for the bought Twilio UK mobile. Not an auth token.
+          sid="PN66046ff3fcdfc8f9aa8ed11811dd9d5d"
+          curl -sS -u "${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}" \
+            -o /tmp/twilio-number.json \
+            -X POST "https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/IncomingPhoneNumbers/${sid}.json" \
+            --data-urlencode "VoiceUrl=${voice}" \
+            --data-urlencode "VoiceMethod=POST" \
+            --data-urlencode "SmsUrl=${sms}" \
+            --data-urlencode "SmsMethod=POST"
+          EXPECT_VOICE="$voice" EXPECT_SMS="$sms" node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          const body = JSON.parse(readFileSync("/tmp/twilio-number.json", "utf8"));
+          if (body.code || !body.sid) {
+            console.error(body.message || "Twilio did not update the number.");
+            process.exit(1);
+          }
+          const voice = body.voice_url || "";
+          const sms = body.sms_url || "";
+          if (voice !== process.env.EXPECT_VOICE || sms !== process.env.EXPECT_SMS) {
+            console.error("Twilio saved different webhook URLs than this deploy.");
+            process.exit(1);
+          }
+          if (body.voice_method !== "POST" || body.sms_method !== "POST") {
+            console.error("Twilio did not keep POST for voice and SMS.");
+            process.exit(1);
+          }
+          console.log(`Twilio ${body.sid}`);
+          console.log(`Voice POST ${voice}`);
+          console.log(`SMS POST ${sms}`);
+          NODE
+          {
+            echo "## Twilio webhooks"
+            echo "- Voice POST \`${voice}\`"
+            echo "- SMS POST \`${sms}\`"
           } >> "$GITHUB_STEP_SUMMARY"

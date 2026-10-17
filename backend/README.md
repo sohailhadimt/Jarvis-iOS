@@ -199,7 +199,7 @@ The number is not purchased yet, and this worker is not deployed yet. Nothing in
 
 ## Inbound screening
 
-An iPhone cannot intercept a normal carrier call. Forward the mobile to the Twilio number with the GSM codes shown in Settings. Point the number's voice webhook at `POST /calls/inbound` and the SMS webhook at `POST /calls/sms`.
+An iPhone cannot intercept a normal carrier call. Forward the mobile to the Twilio number with the GSM codes shown in Settings. The deploy workflow sets that number's voice webhook to `POST /calls/inbound` and its SMS webhook to `POST /calls/sms` on the live worker. Running the workflow again sets the same URLs.
 
 JARVIS answers: "Hello, you've reached Master Hadi's phone, this is JARVIS his personal assistant. This call may be handled by AI. Who's calling and how can I help?"
 
