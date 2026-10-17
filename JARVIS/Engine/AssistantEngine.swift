@@ -38,6 +38,8 @@ final class AssistantEngine {
     private(set) var citations: [Citation] = []
     private(set) var statusLine: String?
     private(set) var pendingSummary: String?
+    /// More than one contact matched "call X". A tap or a spoken name places the call.
+    private(set) var callChoices: [CallChoice] = []
     /// True for a turn that asks about cloud work while a cloud task is planning or running.
     private(set) var cloudExecuting = false
     private(set) var turns: [VoiceTurn] = []
@@ -112,6 +114,7 @@ final class AssistantEngine {
         output.onBargeIn = { [weak self] in self?.bargeIn() }
         listener.onBargeLevel = { [weak self] value in self?.noteBarge(value) }
         tools.onComposeMessage = { [weak self] draft in self?.messageDraft = draft }
+        ContactDirectory.shared.warm()
     }
 
     // MARK: Session (Action Button / Live Activity)
@@ -704,6 +707,103 @@ final class AssistantEngine {
         }
     }
 
+    func placeCall(_ choice: CallChoice) {
+        callChoices = []
+        interrupt()
+        listener.stop()
+        turnTask = Task { await self.dialNow(name: choice.name, number: choice.number) }
+    }
+
+    /// A spoken pick from the contact list, without another model request.
+    private func resolveCallChoice(_ text: String) async -> Bool {
+        guard !callChoices.isEmpty else { return false }
+        if LocalCall.isCancel(text) {
+            callChoices = []
+            await speakLine("Cancelled.", userText: text)
+            afterTurn()
+            return true
+        }
+        if LocalCall.parse(text) == nil, let choice = ContactDirectory.shared.pick(text, from: callChoices) {
+            callChoices = []
+            await dialNow(name: choice.name, number: choice.number)
+            return true
+        }
+        return false
+    }
+
+    /// "call X" is matched on the cached index and dialled before Gemini is asked.
+    private func handleLocalCall(_ text: String) async -> Bool {
+        guard let request = LocalCall.parse(text) else { return false }
+        callChoices = []
+        if let number = request.number {
+            await dialNow(name: number, number: number)
+            return true
+        }
+        let granted = await ContactDirectory.shared.ensureLoaded()
+        guard granted else {
+            await speakLine("Contacts access is off. Enable it in iPhone Settings > JARVIS > Contacts.", userText: text)
+            afterTurn()
+            return true
+        }
+        switch ContactDirectory.shared.lookup(request.spoken) {
+        case .dial(let name, let number):
+            await dialNow(name: name, number: number)
+            return true
+        case .choose(let choices):
+            callChoices = choices
+            let names = choices.map(\.name).joined(separator: ", ")
+            await speakLine("Which one? \(names)", userText: text)
+            afterTurn()
+            return true
+        case .missing:
+            if AgentStore.shared.agentNamed(request.spoken) != nil { return false }
+            await speakLine("I don't have a number for \(request.spoken).", userText: text)
+            afterTurn()
+            return true
+        }
+    }
+
+    private func dialNow(name: String, number: String) async {
+        callChoices = []
+        let digits = AppLauncher.digits(number)
+        guard !digits.isEmpty, let url = URL(string: "tel://\(digits)") else {
+            await speakLine("That number isn't valid.", userText: name)
+            afterTurn()
+            return
+        }
+        do {
+            try await AppLauncher.open(url)
+        } catch {
+            await speakLine(error.localizedDescription, userText: name)
+            afterTurn()
+            return
+        }
+        let line = "Calling \(name)."
+        reply = line
+        recordAssistant(line)
+        saveForWidget(transcript: transcript, reply: line)
+        await say(line)
+        finishQuietly()
+    }
+
+    private func speakLine(_ line: String, userText: String) async {
+        reply = line
+        recordAssistant(line)
+        saveForWidget(transcript: userText, reply: line)
+        await say(ResponsesClient.spokenText(line))
+    }
+
+    /// The Phone app is opening, so the microphone stays off.
+    private func finishQuietly() {
+        listener.stop()
+        phase = .idle
+        level = 0
+        cloudExecuting = false
+        statusLine = nil
+        pushActivity()
+        refreshWake()
+    }
+
     private func respond(to text: String) async {
         phase = .thinking
         statusLine = nil
@@ -731,6 +831,10 @@ final class AssistantEngine {
             afterTurn()
             return
         }
+
+        if await resolveCallChoice(text) { return }
+        if await handleLocalCall(text) { return }
+        callChoices = []
 
         if wantsCloudTool(text) && CloudMonitor.shared.hasRunningWork {
             cloudExecuting = true

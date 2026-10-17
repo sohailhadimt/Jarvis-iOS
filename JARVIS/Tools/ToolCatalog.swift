@@ -34,11 +34,11 @@ enum ToolCatalog {
     static func definitions(settings: AppSettings, includeWebSearch: Bool) -> [JSONValue] {
         let iso = "Local date-time, ISO 8601, e.g. 2026-10-15T14:30"
         var tools: [JSONValue] = [
-            fn("contacts_search", "Search the user's contacts by name. Returns names, phone numbers and emails.",
+            fn("contacts_search", "Search the user's contacts by name. Returns names and phone numbers.",
                ["query": str("Name or part of a name")], required: ["query"]),
-            fn("call_contact", "Phone call a contact by name (iOS shows a call confirmation).",
+            fn("call_contact", "Phone a contact by name. One match places the call immediately.",
                ["contact_name": str("Contact name")], required: ["contact_name"]),
-            fn("call_number", "Phone call a number (iOS shows a call confirmation).",
+            fn("call_number", "Phone a number immediately.",
                ["phone_number": str("Phone number")], required: ["phone_number"]),
             fn("facetime", "Start a FaceTime video or audio call with a contact name or number/email.",
                ["contact_name": str("Contact name (optional if handle given)"),

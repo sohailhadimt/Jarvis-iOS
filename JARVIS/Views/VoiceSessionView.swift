@@ -52,6 +52,11 @@ struct ChatView: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 8)
             }
+            if !engine.callChoices.isEmpty {
+                CallPicker()
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
+            }
             AgentJobStrip()
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
@@ -354,6 +359,9 @@ struct FullScreenVoiceView: View {
 
     private var detailStack: some View {
         VStack(spacing: 10) {
+            if !engine.callChoices.isEmpty {
+                CallPicker()
+            }
             if let status = engine.statusLine, !status.isEmpty {
                 hudText(status)
             }
@@ -431,6 +439,50 @@ struct FullScreenVoiceView: View {
     private func end() {
         guard engine.isSessionActive else { return }
         Task { await engine.endSession(reason: "end-button") }
+    }
+}
+
+/// Shown only when more than one contact matches. One match never reaches this list.
+struct CallPicker: View {
+    @Environment(AssistantEngine.self) private var engine
+    @Environment(AppSettings.self) private var settings
+
+    var body: some View {
+        if engine.callChoices.isEmpty {
+            EmptyView()
+        } else {
+            VStack(spacing: 8) {
+                ForEach(engine.callChoices) { choice in
+                    choiceButton(choice)
+                }
+            }
+            .frame(maxWidth: 280)
+        }
+    }
+
+    private func choiceButton(_ choice: CallChoice) -> some View {
+        Button {
+            engine.placeCall(choice)
+        } label: {
+            HStack(spacing: 8) {
+                Text(choice.name)
+                    .font(.system(size: 14, weight: .medium, design: .monospaced))
+                    .foregroundStyle(settings.accentColor)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text(choice.subtitle)
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .foregroundStyle(settings.accentColor.opacity(0.75))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity)
+            .frame(height: 40)
+            .background(Color.black, in: Capsule())
+            .overlay(Capsule().stroke(settings.accentColor.opacity(0.7), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Call \(choice.name)")
     }
 }
 

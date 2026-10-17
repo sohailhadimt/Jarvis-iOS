@@ -83,21 +83,12 @@ struct ContactHit: Sendable {
 }
 
 enum ContactsService {
-    nonisolated static func search(_ query: String) async throws -> [ContactHit] {
-        guard await Permissions.contacts() else { throw ToolFailure("Contacts access is off. Enable it in iPhone Settings > JARVIS > Contacts.") }
-        let store = CNContactStore()
-        let keys = [CNContactGivenNameKey, CNContactFamilyNameKey, CNContactNicknameKey, CNContactOrganizationNameKey,
-                    CNContactPhoneNumbersKey, CNContactEmailAddressesKey] as [CNKeyDescriptor]
-        let contacts = try store.unifiedContacts(matching: CNContact.predicateForContacts(matchingName: query), keysToFetch: keys)
-        return contacts.prefix(10).map { c in
-            let name = [c.givenName, c.familyName].filter { !$0.isEmpty }.joined(separator: " ")
-            let phones = c.phoneNumbers.map { lv in
-                (label: CNLabeledValue<CNPhoneNumber>.localizedString(forLabel: lv.label ?? "phone"), number: lv.value.stringValue)
-            }
-            return ContactHit(name: name.isEmpty ? c.organizationName : name,
-                              phones: phones,
-                              emails: c.emailAddresses.map { $0.value as String })
-        }
+    /// Uses the in-memory index. The address book is not queried again for each name.
+    static func search(_ query: String) async throws -> [ContactHit] {
+        let granted = await ContactDirectory.shared.ensureLoaded()
+        guard granted else { throw ToolFailure("Contacts access is off. Enable it in iPhone Settings > JARVIS > Contacts.") }
+        let hits = await ContactDirectory.shared.hits(matching: query)
+        return hits
     }
 }
 

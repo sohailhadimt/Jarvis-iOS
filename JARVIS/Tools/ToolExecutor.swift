@@ -50,10 +50,10 @@ final class ToolExecutor {
 
         case "call_contact", "call_number":
             let (who, number) = try await resolvePhone(name: arg("contact_name"), number: arg("phone_number"))
-            guard let url = URL(string: "tel://\(AppLauncher.digits(number))") else { throw ToolFailure("Invalid number.") }
-            return .confirm(PendingAction(summary: "Call \(who) on \(number)?") {
-                await Self.attempt { try await AppLauncher.open(url); return "Calling \(who). Confirm the call on screen." }
-            })
+            let digits = AppLauncher.digits(number)
+            guard !digits.isEmpty, let url = URL(string: "tel://\(digits)") else { throw ToolFailure("Invalid number.") }
+            try await AppLauncher.open(url)
+            return .result("Calling \(who).")
 
         case "facetime":
             var handle = arg("handle")

@@ -72,6 +72,13 @@ final class AgentStore {
 
     func agent(id: String) -> NamedAgent? { agents.first { $0.id == id } }
 
+    /// Exact squashed name, so a missed contact named Edith can still reach E.D.I.T.H.
+    func agentNamed(_ spoken: String) -> NamedAgent? {
+        let key = Self.squash(spoken)
+        guard key.count >= 4 else { return nil }
+        return agents.first { Self.squash($0.name) == key }
+    }
+
     func saveAgent(_ agent: NamedAgent, isNew: Bool) {
         if let index = agents.firstIndex(where: { $0.id == agent.id }) {
             agents[index] = agent

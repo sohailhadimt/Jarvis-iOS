@@ -55,6 +55,9 @@ struct StandByView: View {
         }
         .overlay(alignment: .bottom) {
             VStack(spacing: 8) {
+                if !engine.callChoices.isEmpty {
+                    CallPicker()
+                }
                 if let summary = engine.pendingSummary {
                     ConfirmBar(summary: summary,
                                onConfirm: { engine.confirmPendingAction() },

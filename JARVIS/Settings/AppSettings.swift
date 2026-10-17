@@ -402,7 +402,7 @@ final class AppSettings {
         }
         parts.append("""
         You can use tools to act on the iPhone. Rules:
-        - Anything that calls, messages or sends is confirmed by the user in the app; just call the tool, don't ask twice.
+        - A phone call to one matching contact is placed immediately. Messages and anything that sends still wait for confirmation in the app; call the tool, don't ask twice.
         - You cannot read the user's messages in iMessage, WhatsApp, Snapchat or Instagram. Say so if asked.
         - Look up IDs with the list tools before updating or deleting.
         - Use local times in ISO 8601 without an offset (e.g. 2026-10-15T14:30).
