@@ -63,6 +63,9 @@ struct ChatView: View {
             AttachmentChip()
                 .padding(.horizontal, 16)
                 .padding(.bottom, 6)
+            GeneratedPreview()
+                .padding(.horizontal, 16)
+                .padding(.bottom, 6)
             composer
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
@@ -493,6 +496,7 @@ struct FullScreenVoiceView: View {
                 CallPicker()
             }
             AttachmentChip()
+            GeneratedPreview()
             if let status = engine.statusLine, !status.isEmpty {
                 hudText(status)
             } else if let note = camera.note, !note.isEmpty {

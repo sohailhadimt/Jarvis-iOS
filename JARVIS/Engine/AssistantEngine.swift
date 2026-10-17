@@ -56,6 +56,8 @@ final class AssistantEngine {
     private(set) var isDictating = false
     /// Name of a photo, PDF or text file waiting for the next question.
     private(set) var attachmentName: String?
+    /// Latest generated picture, shown until the next one or until it is dismissed.
+    private(set) var generatedPreview: Data?
     @ObservationIgnored private var attachmentMime: String?
     @ObservationIgnored private var attachmentData: Data?
     var messageDraft: MessageDraft?
@@ -979,6 +981,10 @@ final class AssistantEngine {
             await deliverResearch(userText: text)
             return
         }
+        if ImageStudio.wants(text) {
+            await deliverImage(userText: text)
+            return
+        }
 
         let settings = AppSettings.shared
         let userMessage = ChatMessage(role: "user", content: text)
@@ -1302,6 +1308,43 @@ final class AssistantEngine {
         let count = Int((Double(words.count) * fraction).rounded(.down))
         guard count > 0 else { return "" }
         return words.prefix(count).joined(separator: " ")
+    }
+
+    func clearGenerated() {
+        generatedPreview = nil
+    }
+
+    /// A picture from Gemini's image model, or Pollinations when that is unavailable. Saved to Photos.
+    private func deliverImage(userText: String) async {
+        statusLine = "Drawing…"
+        pushActivity()
+        let source = takeImageSource()
+        let made = await ImageStudio.make(prompt: userText, sourceJPEG: source)
+        guard !Task.isCancelled else { return }
+        statusLine = nil
+        guard let jpeg = made.jpeg else {
+            let line = source == nil ? "I couldn't make that picture." : "I couldn't edit that photo."
+            recordAssistant(line)
+            saveForWidget(transcript: userText, reply: line)
+            await say(line)
+            guard !Task.isCancelled else { return }
+            afterTurn()
+            return
+        }
+        generatedPreview = jpeg
+        let saved = await PhotoSaver.add(jpeg)
+        let line = saved ? "Done, sir. It's in your photos." : "Done, sir. Photos access is off, so I haven't saved it."
+        recordAssistant(line)
+        saveForWidget(transcript: userText, reply: line)
+        await say(line)
+        guard !Task.isCancelled else { return }
+        afterTurn()
+    }
+
+    private func takeImageSource() -> Data? {
+        guard attachmentMime == "image/jpeg", let data = attachmentData else { return nil }
+        clearAttachment()
+        return data
     }
 
     /// A multi-step search. The full report is saved under Conversation. Only the summary is spoken.

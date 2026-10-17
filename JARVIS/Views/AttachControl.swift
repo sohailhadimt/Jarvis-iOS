@@ -75,6 +75,36 @@ private struct PickedImage: Transferable {
     }
 }
 
+struct GeneratedPreview: View {
+    @Environment(AssistantEngine.self) private var engine
+    @Environment(AppSettings.self) private var settings
+
+    var body: some View {
+        if let data = engine.generatedPreview, let image = UIImage(data: data) {
+            ZStack(alignment: .topTrailing) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 220, maxHeight: 160)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(settings.accentColor.opacity(0.7), lineWidth: 1))
+                Button {
+                    engine.clearGenerated()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(Color.black.opacity(0.65)))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss picture")
+                .padding(4)
+            }
+        }
+    }
+}
+
 struct AttachmentChip: View {
     @Environment(AssistantEngine.self) private var engine
     @Environment(AppSettings.self) private var settings
