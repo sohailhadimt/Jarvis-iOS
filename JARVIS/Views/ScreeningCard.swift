@@ -1,5 +1,59 @@
 import SwiftUI
 
+/// A question from the live call, answered by typing or by the next thing Sohail says.
+struct QuestionCard: View {
+    @Environment(AssistantEngine.self) private var engine
+    @State private var draft = ""
+
+    var body: some View {
+        if let question = engine.pendingQuestion {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("They asked")
+                    .font(.caption.weight(.semibold))
+                Text(question.question)
+                    .font(.subheadline)
+                TextField("What should I tell them?", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                Button("Send answer") {
+                    engine.answerPendingQuestion(draft)
+                    draft = ""
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Text("You can also just say the answer.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        }
+    }
+}
+
+struct OwnerAlertCard: View {
+    @Environment(AssistantEngine.self) private var engine
+
+    var body: some View {
+        if let alert = engine.ownerAlert {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(alert.channel == "call" ? "JARVIS rang you" : "JARVIS needs you")
+                    .font(.caption.weight(.semibold))
+                Text(alert.summary)
+                    .font(.subheadline)
+                if !alert.detail.isEmpty {
+                    Text(alert.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        }
+    }
+}
+
 /// Live inbound call: transcript, the four choices, and a personal-details prompt.
 struct ScreeningCard: View {
     @Environment(AssistantEngine.self) private var engine

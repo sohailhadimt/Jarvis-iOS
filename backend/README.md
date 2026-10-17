@@ -185,6 +185,10 @@ The worker places the call with the Twilio Calls API and, when Twilio requests T
 
 Every outbound call starts with: "Hello, this is JARVIS, Master Hadi's personal assistant. Master Hadi has asked me to tell you …" and then the message. JARVIS listens, stays inside the brief, and the summary comes back to the iPhone.
 
+If the other person asks something outside the brief, JARVIS says "One moment please" and the question is pushed to the iPhone. A typed or spoken reply is relayed. If nobody answers within the configured 30 to 45 seconds, JARVIS says he will find out and call back, and a follow-up task is left for Sohail.
+
+JARVIS can also ring the mobile saved in Settings when a task fails, a call does not connect, or the Twilio balance is low. That call uses the ElevenLabs voice, with a short summary and a way to press 1 or say "details". Quiet hours and a daily cap (three by default) keep it inside the balance. Outside those limits he sends a push notification instead.
+
 On the ElevenLabs agent:
 
 - Set the voice input and output format to μ-law 8000 Hz.

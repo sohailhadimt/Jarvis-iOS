@@ -136,7 +136,7 @@ export function agentScript(contactName: string, brief: string): string {
     "You are JARVIS, Master Hadi's personal assistant, on a live telephone call in the United Kingdom.",
     `Your first spoken words are exactly: "${opening}"`,
     "That opening already delivers his message. Then stop and listen.",
-    "Stay polite. Answer sensibly, and only within the brief. If they ask something the brief does not cover, say you will ask Master Hadi.",
+    "Stay polite. Answer sensibly, and only within the brief. If they ask something the brief does not cover, say exactly: \"One moment please.\" Then wait. Do not guess.",
     "Do not invent prices, times, promises, locations, or personal details.",
     "Never claim to be Master Hadi. You are his AI assistant, and the opening already says so.",
     `You are speaking with ${name}.`,
@@ -154,7 +154,7 @@ export function approvedScreening(note: string): string {
     `Your first spoken words are exactly: "${INBOUND_GREETING}"`,
     "Listen. Stay polite. Learn the caller's name and why they are calling.",
     "This caller is pre-approved. You may share only the notes below. Nothing else.",
-    "If the notes do not contain the answer, say you will ask Master Hadi. Do not invent schedule, location, or personal facts.",
+    "If the notes do not contain the answer, say exactly: \"One moment please.\" Then wait. Do not invent schedule, location, or personal facts.",
     `Approved notes: ${approved || "none"}`,
     "Once you know who is calling and why, tell them you will see if he can take the call, then wait.",
     "British English. Short turns.",
@@ -169,6 +169,7 @@ export function screeningScript(): string {
     "Never reveal Master Hadi's schedule, location, whereabouts, address, phone numbers, email, health, finances, or any other personal information.",
     `If they ask for any of that, say exactly: "${PERSONAL_CHECK}" Then wait. Do not answer the personal question.`,
     "Do not invent facts about him.",
+    "If they ask anything else you cannot answer, say exactly: \"One moment please.\" Then wait.",
     "Once you know who is calling and why, tell them you will see if he can take the call, then wait.",
     "British English. Short turns.",
   ].join("\n");
@@ -185,13 +186,14 @@ export function assistantScript(personalAllowed: boolean, note: string): string 
     lines.push(
       "Personal information is not approved for this caller. Default is deny.",
       "Never reveal his schedule, location, whereabouts, address, phone numbers, email, health, finances, or any other personal detail.",
-      `If they ask, say exactly: "${PERSONAL_CHECK}" Then wait.`,
+      `If they ask for any of that, say exactly: "${PERSONAL_CHECK}" Then wait.`,
+      "If they ask anything else you cannot answer, say exactly: \"One moment please.\" Then wait.",
     );
   } else {
     const approved = clip(note, 1000);
     lines.push(
       "Master Hadi approved sharing only the notes below for this call. Answer only from those notes.",
-      "If the notes do not contain the answer, say you will ask him. Do not add anything else.",
+      "If the notes do not contain the answer, say exactly: \"One moment please.\" Then wait. Do not add anything else.",
       `Approved notes: ${approved || "none"}`,
     );
   }
@@ -314,9 +316,11 @@ export async function handleCallApi(request: Request, env: Env, path: string): P
   return null;
 }
 
-function configResponse(env: Env): Response {
+async function configResponse(env: Env): Promise<Response> {
   const setup = callingSecrets(env);
   const from = toE164(env.TWILIO_FROM_NUMBER ?? "");
+  const { readOwnerMobile } = await import("./owner-alert");
+  const mobile = await readOwnerMobile(env);
   return json({
     configured: setup.configured,
     message: setup.configured ? "Calling is ready." : "Calling not set up.",
@@ -324,7 +328,7 @@ function configResponse(env: Env): Response {
     from_number: from,
     forwarding: from ? forwardingCodes(from) : null,
     screening: {
-      mobile_set: Boolean(toE164(env.SOHAIL_MOBILE_NUMBER ?? "")),
+      mobile_set: Boolean(mobile),
       push: Boolean(env.APNS_KEY_ID?.trim() && env.APNS_TEAM_ID?.trim() && env.APNS_PRIVATE_KEY?.trim()),
       voip: Boolean(env.TWILIO_API_KEY_SID?.trim() && env.TWILIO_API_KEY_SECRET?.trim() && env.TWILIO_VOICE_APP_SID?.trim()),
     },
@@ -431,6 +435,7 @@ async function createCall(request: Request, env: Env): Promise<Response> {
       record.status = "failed";
       record.error = reason;
       await updateCall(env, id, { status: "failed", error: reason });
+      reportCallFailure(env, { id, contact_name: contact }, reason);
       return json({ configured: true, call: publicCall(record) }, 502);
     }
     const parsed = parseJson(text);
@@ -440,6 +445,7 @@ async function createCall(request: Request, env: Env): Promise<Response> {
     record.status = "failed";
     record.error = reason;
     await updateCall(env, id, { status: "failed", error: reason });
+    reportCallFailure(env, { id, contact_name: contact }, reason);
     return json({ configured: true, call: publicCall(record) }, 502);
   }
   record.twilio_sid = twilioSid || null;
@@ -464,6 +470,8 @@ async function getCall(env: Env, id: string, url: URL): Promise<Response> {
   if (url.searchParams.get("refresh") === "0") return json({ call: await presentCall(env, row) });
   const refreshed = await refreshFromElevenLabs(env, row);
   await noteScreenFromTranscript(env, refreshed);
+  void import("./relay").then((mod) => mod.noteQuestion(env, refreshed, url.origin));
+  void import("./owner-alert").then((mod) => mod.noteOwnerReply(env, refreshed));
   return json({ call: await presentCall(env, refreshed) });
 }
 
@@ -476,7 +484,16 @@ async function voiceWebhook(request: Request, env: Env, id: string): Promise<Res
   if (!row) return xml(sayAndHangup("Hello, this is JARVIS, Master Hadi's personal assistant. I'm sorry, this call is not set up. Goodbye."), 404);
   const mode = new URL(request.url).searchParams.get("mode");
   const screen = await loadScreen(env, id);
-  const spoken = scriptForMode(mode, row, screen);
+  let relayAnswer: string | null = null;
+  if (mode === "relay") {
+    const saved = await dbFirst<{ answer: string }>(
+      env,
+      "SELECT answer FROM call_questions WHERE call_id = ? AND status = 'answered' ORDER BY resolved_at DESC LIMIT 1",
+      [id],
+    );
+    relayAnswer = saved?.answer ?? "";
+  }
+  const spoken = scriptForMode(mode, row, screen, relayAnswer);
   const from = params.From || toE164(env.TWILIO_FROM_NUMBER ?? "") || "";
   const to = params.To || row.to;
   const payload = {
@@ -515,6 +532,7 @@ async function voiceWebhook(request: Request, env: Env, id: string): Promise<Res
     if (!response.ok) {
       const reason = safeError(text || "ElevenLabs could not start the call.");
       await updateCall(env, id, { status: "failed", error: reason });
+      reportCallFailure(env, row, reason);
       return xml(sayAndHangup("Hello, this is JARVIS, Master Hadi's personal assistant. I'm sorry, I can't continue this call right now. Goodbye."), 502);
     }
     const conversationId =
@@ -529,6 +547,7 @@ async function voiceWebhook(request: Request, env: Env, id: string): Promise<Res
   } catch (err) {
     const reason = safeError(err instanceof Error ? err.message : "ElevenLabs could not be reached.");
     await updateCall(env, id, { status: "failed", error: reason });
+    reportCallFailure(env, row, reason);
     return xml(sayAndHangup("Hello, this is JARVIS, Master Hadi's personal assistant. I'm sorry, I can't continue this call right now. Goodbye."), 502);
   }
 }
@@ -546,6 +565,7 @@ async function twilioStatusWebhook(request: Request, env: Env, id: string): Prom
   if (mapped === "failed") {
     patch.status = "failed";
     patch.error = params.CallStatus || "failed";
+    reportCallFailure(env, row, params.CallStatus || "failed");
   } else if (mapped === "completed") {
     patch.status = row.conversation_id ? "wrapping" : "completed";
   } else if (row.status !== "completed" && row.status !== "failed") {
@@ -581,7 +601,12 @@ async function elevenLabsWebhook(request: Request, env: Env): Promise<Response> 
     }
   }
   await updateCall(env, row.id, patch);
-  if (read?.lines.length) await noteScreenFromTranscript(env, { ...row, transcript: read.lines });
+  if (read?.lines.length) {
+    const updated = { ...row, transcript: read.lines };
+    await noteScreenFromTranscript(env, updated);
+    void import("./relay").then((mod) => mod.noteQuestion(env, updated, new URL(request.url).origin));
+    void import("./owner-alert").then((mod) => mod.noteOwnerReply(env, updated));
+  }
   return json({ ok: true });
 }
 
@@ -617,6 +642,20 @@ async function refreshFromElevenLabs(env: Env, row: StoredCall): Promise<StoredC
   } catch {
     return row;
   }
+}
+
+function reportCallFailure(env: Env, row: { id: string; contact_name: string }, detail: string): void {
+  if (row.contact_name === "You") return;
+  const who = row.contact_name.trim() || "them";
+  void import("./owner-alert").then((mod) =>
+    mod.reportProblem(env, {
+      sourceId: `call:${row.id}`,
+      kind: "call_failed",
+      urgent: false,
+      summary: `The call to ${who} did not connect.`,
+      detail: detail || "The call failed.",
+    }),
+  );
 }
 
 function mapTwilioStatus(status: string): string | null {
@@ -760,7 +799,21 @@ function scriptForMode(
   mode: string | null,
   row: StoredCall,
   screen: ScreenBits | null,
+  relayAnswer: string | null = null,
 ): { first: string; prompt: string } {
+  if (mode === "relay") {
+    const answer = clip(relayAnswer || "I will check with Master Hadi.", 400);
+    return {
+      first: `Thank you for waiting. ${answer}`,
+      prompt: `Say exactly: "Thank you for waiting. ${answer}" Then listen. Stay inside that answer. Do not add facts.`,
+    };
+  }
+  if (mode === "callback") {
+    return {
+      first: "I'll find out and call you back. Master Hadi will get back to you.",
+      prompt: 'Say exactly: "I will find out and call you back. Master Hadi will get back to you." Then say goodbye.',
+    };
+  }
   if (mode === "handle") {
     return {
       first: "Master Hadi has asked me to keep helping you.",

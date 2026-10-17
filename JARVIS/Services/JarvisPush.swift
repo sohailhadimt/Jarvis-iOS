@@ -13,7 +13,15 @@ final class JarvisPush: NSObject, UIApplicationDelegate, UNUserNotificationCente
             UNNotificationAction(identifier: "decline", title: "Decline", options: [.destructive]),
         ]
         let category = UNNotificationCategory(identifier: "JARVIS_CALL", actions: actions, intentIdentifiers: [], options: [])
-        center.setNotificationCategories([category])
+        let reply = UNTextInputNotificationAction(
+            identifier: "answer",
+            title: "Reply",
+            options: [],
+            textInputButtonTitle: "Send",
+            textInputPlaceholder: "What should I tell them?"
+        )
+        let question = UNNotificationCategory(identifier: "JARVIS_QUESTION", actions: [reply], intentIdentifiers: [], options: [])
+        center.setNotificationCategories([category, question])
         center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in
             DispatchQueue.main.async {
                 application.registerForRemoteNotifications()
@@ -39,6 +47,14 @@ final class JarvisPush: NSObject, UIApplicationDelegate, UNUserNotificationCente
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        let info = response.notification.request.content.userInfo
+        guard let client = try? await MainActor.run(body: { try JarvisCloudAPI.client() }) else { return }
+        if let typed = response as? UNTextInputNotificationResponse,
+           let callId = info["call_id"] as? String,
+           let questionId = info["question_id"] as? String {
+            _ = await client.answerCallQuestion(callId: callId, questionId: questionId, text: typed.userText)
+            return
+        }
         let action: String
         switch response.actionIdentifier {
         case "connect": action = "connect"
@@ -47,9 +63,7 @@ final class JarvisPush: NSObject, UIApplicationDelegate, UNUserNotificationCente
         case "decline": action = "decline"
         default: return
         }
-        let info = response.notification.request.content.userInfo
         guard let id = info["call_id"] as? String else { return }
-        guard let client = try? await MainActor.run(body: { try JarvisCloudAPI.client() }) else { return }
         _ = await client.screenCall(id: id, action: action)
     }
 }

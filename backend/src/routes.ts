@@ -1,5 +1,7 @@
 import { authorize } from "./auth";
 import { handleCallApi, handleCallWebhook, isCallWebhook } from "./calls";
+import { handleOwnerWebhook, isOwnerWebhook, rememberOrigin, routeOwnerApi } from "./owner-alert";
+import { routeRelay } from "./relay";
 import { handleScreenWebhook, isScreenWebhook, routeScreeningApi } from "./screening";
 import { buildBriefing } from "./briefing";
 import { computeNextRun, parseCron } from "./cron";
@@ -58,10 +60,12 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
 
   try {
     if (request.method === "GET" && path === "/health") return health(env);
+    if (isOwnerWebhook(request.method, path)) return handleOwnerWebhook(request, env, path);
     if (isScreenWebhook(request.method, path)) return handleScreenWebhook(request, env, path, ctx);
     if (isCallWebhook(request.method, path)) return handleCallWebhook(request, env, path);
     const auth = authorize(request, env.JARVIS_APP_TOKEN);
     if (!auth.ok) return auth.response;
+    ctx.waitUntil(rememberOrigin(env, url.origin));
 
     const parts = path.split("/").filter(Boolean);
     if (request.method === "POST" && path === "/tasks") return createTask(request, env, ctx);
@@ -87,6 +91,10 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "POST" && parts[0] === "pipeline" && parts[1] && parts.length === 2) {
       return writePipeline(request, env, parts[1]);
     }
+    const owned = await routeOwnerApi(request, env, path);
+    if (owned) return owned;
+    const relayed = await routeRelay(request, env, path);
+    if (relayed) return relayed;
     const screened = await routeScreeningApi(request, env, path);
     if (screened) return screened;
     const callResponse = await handleCallApi(request, env, path);

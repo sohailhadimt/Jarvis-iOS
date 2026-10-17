@@ -14,6 +14,12 @@ struct CallingSettingsView: View {
     @State private var draftName = ""
     @State private var draftPhone = ""
     @State private var draftNote = ""
+    @State private var mobile = ""
+    @State private var quietStart = "22:00"
+    @State private var quietEnd = "08:00"
+    @State private var dailyCap = 3
+    @State private var urgentOnly = false
+    @State private var questionWait = 40
 
     var body: some View {
         Form {
@@ -49,6 +55,21 @@ struct CallingSettingsView: View {
                 Text("Carrier forwarding")
             } footer: {
                 Text("iOS cannot intercept a normal carrier call. Forward your mobile to the Twilio UK number, then JARVIS can answer. Dial the code from the Phone app, or copy it. Cancel with ##002#.")
+            }
+
+            Section {
+                TextField("Your mobile", text: $mobile)
+                    .keyboardType(.phonePad)
+                TextField("Quiet from", text: $quietStart)
+                TextField("Quiet until", text: $quietEnd)
+                Stepper("At most \(dailyCap) problem calls a day", value: $dailyCap, in: 0...5)
+                Toggle("Urgent problems only", isOn: $urgentOnly)
+                Stepper("Wait \(questionWait)s for your answer", value: $questionWait, in: 30...45)
+                Button("Save these limits") { saveLimits() }
+            } header: {
+                Text("Calls to you")
+            } footer: {
+                Text("JARVIS can ring this number about a failed task, a blocked call, or a low Twilio balance. Quiet hours and the daily cap keep that inside the balance. Outside those limits he sends a notification instead. The number is saved from here, not built into the app.")
             }
 
             Section {
@@ -170,6 +191,29 @@ struct CallingSettingsView: View {
         Task { await CallPrivacyStore.syncIfNeeded() }
     }
 
+    private func saveLimits() {
+        let settings = OwnerCallSettings(
+            mobile: mobile.trimmingCharacters(in: .whitespacesAndNewlines),
+            quietStart: quietStart,
+            quietEnd: quietEnd,
+            maxCallsPerDay: dailyCap,
+            urgentOnly: urgentOnly,
+            questionTimeoutSeconds: questionWait
+        )
+        Task {
+            guard let client = try? JarvisCloudAPI.client() else {
+                report = "Calling not set up."
+                return
+            }
+            switch await client.saveOwnerCallSettings(settings) {
+            case .failed(let message), .notSetUp(let message):
+                report = message
+            case .done:
+                report = "Saved. Problem calls use this mobile, with quiet hours and the daily cap."
+            }
+        }
+    }
+
     private func refresh() {
         busy = true
         Task {
@@ -183,6 +227,14 @@ struct CallingSettingsView: View {
                 let config = try await JarvisCloudAPI.client().callingConfig()
                 mobileSet = config.screening?.mobileSet ?? false
                 pushReady = config.screening?.push ?? false
+                if let saved = try? await JarvisCloudAPI.client().ownerCallSettings() {
+                    mobile = saved.mobile
+                    quietStart = saved.quietStart
+                    quietEnd = saved.quietEnd
+                    dailyCap = saved.maxCallsPerDay
+                    urgentOnly = saved.urgentOnly
+                    questionWait = saved.questionTimeoutSeconds
+                }
                 applyNumber(config.fromNumber ?? "")
                 if let forwarding = config.forwarding {
                     codes = forwarding

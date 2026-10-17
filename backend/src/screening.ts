@@ -177,7 +177,8 @@ async function applyDecision(
 ): Promise<{ ok: true; audio: string } | { ok: false; response: Response }> {
   const call = await dbFirst<{ twilio_sid: string | null; status: string }>(env, "SELECT twilio_sid, status FROM outbound_calls WHERE id = ?", [id]);
   if (!call) return { ok: false, response: apiError(404, "not_found", "Call not found.") };
-  const mobile = toE164(env.SOHAIL_MOBILE_NUMBER ?? "");
+  const { readOwnerMobile } = await import("./owner-alert");
+  const mobile = await readOwnerMobile(env);
   const from = toE164(env.TWILIO_FROM_NUMBER ?? "");
   if (action === "listen") {
     await dbRun(env, "UPDATE call_screen SET decision = 'listen' WHERE call_id = ?", [id]).catch(() => undefined);
@@ -191,8 +192,8 @@ async function applyDecision(
         {
           configured: false,
           message: "Calling not set up.",
-          missing: ["SOHAIL_MOBILE_NUMBER"],
-          error: { code: "mobile_not_set", message: "Your real mobile number is not set on the worker." },
+          missing: ["mobile_number"],
+          error: { code: "mobile_not_set", message: "Set your mobile in Calling settings." },
         },
         503,
       ),
@@ -433,12 +434,18 @@ async function notify(env: Env, id: string, phone: string, name: string, reason:
   const who = name || "Someone";
   const why = reason ? ` About: ${reason}` : "";
   const body = `${who} is calling${phone ? ` from ${phone}` : ""}.${why} Reply CONNECT, HANDLE, MESSAGE, or DECLINE.`;
-  const pushed = await pushAlert(env, id, who, body);
+  const pushed = await pushNotice(env, who, body, { call_id: id });
   if (!pushed) await sendSms(env, body);
   await dbRun(env, "UPDATE call_screen SET notified_at = ? WHERE call_id = ?", [nowIso(), id]).catch(() => undefined);
 }
 
-async function pushAlert(env: Env, id: string, title: string, body: string): Promise<boolean> {
+export async function pushNotice(
+  env: Env,
+  title: string,
+  body: string,
+  extra: Record<string, string>,
+  category = "JARVIS_CALL",
+): Promise<boolean> {
   const jwt = await apnsJwt(env);
   if (!jwt) return false;
   let tokens: { token: string }[] = [];
@@ -461,8 +468,8 @@ async function pushAlert(env: Env, id: string, title: string, body: string): Pro
         "apns-priority": "10",
       },
       body: JSON.stringify({
-        aps: { alert: { title, body }, sound: "default", category: "JARVIS_CALL" },
-        call_id: id,
+        aps: { alert: { title, body }, sound: "default", category },
+        ...extra,
       }),
     }).catch(() => null);
     if (response?.ok) ok = true;
@@ -489,7 +496,8 @@ async function apnsJwt(env: Env): Promise<string | null> {
 }
 
 async function sendSms(env: Env, body: string): Promise<void> {
-  const to = toE164(env.SOHAIL_MOBILE_NUMBER ?? "");
+  const { readOwnerMobile } = await import("./owner-alert");
+  const to = await readOwnerMobile(env);
   const from = toE164(env.TWILIO_FROM_NUMBER ?? "");
   const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
   const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();

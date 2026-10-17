@@ -258,6 +258,51 @@ CREATE TABLE IF NOT EXISTS call_devices (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS call_questions (
+  id TEXT PRIMARY KEY,
+  call_id TEXT NOT NULL,
+  question TEXT NOT NULL,
+  status TEXT NOT NULL,
+  answer TEXT NOT NULL DEFAULT '',
+  timeout_seconds INTEGER NOT NULL,
+  asked_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  resolved_at TEXT,
+  origin TEXT NOT NULL DEFAULT '',
+  notified INTEGER NOT NULL DEFAULT 0,
+  follow_up_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_call_questions_status ON call_questions (status, expires_at);
+
+-- Sohail's own mobile and the limits that protect the Twilio balance. The number is saved from Settings.
+CREATE TABLE IF NOT EXISTS call_settings (
+  id TEXT PRIMARY KEY,
+  mobile_number TEXT NOT NULL DEFAULT '',
+  quiet_start TEXT NOT NULL DEFAULT '22:00',
+  quiet_end TEXT NOT NULL DEFAULT '08:00',
+  max_calls_per_day INTEGER NOT NULL DEFAULT 3,
+  urgent_only INTEGER NOT NULL DEFAULT 0,
+  question_timeout_seconds INTEGER NOT NULL DEFAULT 40,
+  worker_origin TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS owner_alerts (
+  id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  detail TEXT NOT NULL,
+  urgent INTEGER NOT NULL DEFAULT 0,
+  channel TEXT NOT NULL,
+  day TEXT NOT NULL,
+  call_id TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_alerts_source ON owner_alerts (source_id);
+
 CREATE TABLE IF NOT EXISTS call_permissions (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,

@@ -50,14 +50,17 @@ enum CloudStage {
 }
 
 enum CloudTime {
-    static func display(_ iso: String?) -> String {
-        guard let iso, !iso.isEmpty else { return "" }
+    static func date(_ iso: String) -> Date? {
         let fractional = ISO8601DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let plain = ISO8601DateFormatter()
         plain.formatOptions = [.withInternetDateTime]
-        let date = fractional.date(from: iso) ?? plain.date(from: iso)
-        return date?.formatted(date: .abbreviated, time: .shortened) ?? iso
+        return fractional.date(from: iso) ?? plain.date(from: iso)
+    }
+
+    static func display(_ iso: String?) -> String {
+        guard let iso, !iso.isEmpty else { return "" }
+        return date(iso)?.formatted(date: .abbreviated, time: .shortened) ?? iso
     }
 }
 
@@ -796,6 +799,35 @@ struct CloudClient: Sendable {
         await postCallAction(path: "/calls/permissions", body: ["rules": rules])
     }
 
+    func callQuestions() async throws -> [CallQuestion] {
+        let envelope: QuestionEnvelope = try await sendNoBody(method: "GET", path: "/calls/questions")
+        return envelope.questions
+    }
+
+    func answerCallQuestion(callId: String, questionId: String, text: String) async -> ScreenResult {
+        await postCallAction(path: "/calls/\(Self.path(callId))/answer", body: ["question_id": questionId, "text": text])
+    }
+
+    func ownerCallSettings() async throws -> OwnerCallSettings {
+        try await sendNoBody(method: "GET", path: "/calls/settings")
+    }
+
+    func saveOwnerCallSettings(_ settings: OwnerCallSettings) async -> ScreenResult {
+        await postCallAction(path: "/calls/settings", body: [
+            "mobile": settings.mobile,
+            "quiet_start": settings.quietStart,
+            "quiet_end": settings.quietEnd,
+            "max_calls_per_day": settings.maxCallsPerDay,
+            "urgent_only": settings.urgentOnly,
+            "question_timeout_seconds": settings.questionTimeoutSeconds,
+        ])
+    }
+
+    func ownerAlerts() async throws -> [OwnerAlert] {
+        let envelope: AlertEnvelope = try await sendNoBody(method: "GET", path: "/calls/alerts")
+        return envelope.alerts
+    }
+
     private func postCallAction(path: String, body: [String: Any]) async -> ScreenResult {
         let data: Data
         do {
@@ -825,6 +857,8 @@ struct CloudClient: Sendable {
 
     private struct CallEnvelope: Decodable { var call: PhoneCallRecord }
     private struct CallListEnvelope: Decodable { var calls: [PhoneCallRecord] }
+    private struct QuestionEnvelope: Decodable { var questions: [CallQuestion] }
+    private struct AlertEnvelope: Decodable { var alerts: [OwnerAlert] }
     private struct ScreenAck: Decodable { var audio: String? }
     private struct PersonaListEnvelope: Decodable { var agents: [CloudPersona] }
     private struct PersonaEnvelope: Decodable { var agent: CloudPersona }
@@ -941,6 +975,51 @@ struct PhoneCallRecord: Decodable, Sendable {
         case callerName = "caller_name"
         case personalAllowed = "personal_allowed"
         case personalRequested = "personal_requested"
+    }
+}
+
+struct CallQuestion: Decodable, Identifiable, Equatable, Sendable {
+    var id: String
+    var callId: String
+    var question: String
+    var status: String
+    var answer: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, question, status, answer
+        case callId = "call_id"
+    }
+}
+
+struct OwnerCallSettings: Codable, Equatable, Sendable {
+    var mobile: String
+    var quietStart: String
+    var quietEnd: String
+    var maxCallsPerDay: Int
+    var urgentOnly: Bool
+    var questionTimeoutSeconds: Int
+
+    enum CodingKeys: String, CodingKey {
+        case mobile
+        case quietStart = "quiet_start"
+        case quietEnd = "quiet_end"
+        case maxCallsPerDay = "max_calls_per_day"
+        case urgentOnly = "urgent_only"
+        case questionTimeoutSeconds = "question_timeout_seconds"
+    }
+}
+
+struct OwnerAlert: Decodable, Identifiable, Equatable, Sendable {
+    var id: String
+    var kind: String
+    var summary: String
+    var detail: String
+    var channel: String
+    var createdAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, summary, detail, channel
+        case createdAt = "created_at"
     }
 }
 

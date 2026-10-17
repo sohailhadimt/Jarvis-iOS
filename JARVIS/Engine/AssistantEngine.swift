@@ -48,6 +48,10 @@ final class AssistantEngine {
     private(set) var pendingCallBrief: PendingCallBrief?
     /// The inbound call JARVIS is screening, when one is live.
     private(set) var inboundCall: PhoneCallRecord?
+    /// A question from a live call that needs Sohail's answer.
+    private(set) var pendingQuestion: CallQuestion?
+    /// Latest problem JARVIS reported, when one is waiting in the app.
+    private(set) var ownerAlert: OwnerAlert?
     /// Bumped when the on-phone call log changes.
     private(set) var callLogTick: Int = 0
     var hasContactChoices: Bool { !callChoices.isEmpty || !briefChoices.isEmpty }
@@ -83,6 +87,8 @@ final class AssistantEngine {
     @ObservationIgnored private var callWatch: Task<Void, Never>?
     @ObservationIgnored private var screenWatch: Task<Void, Never>?
     @ObservationIgnored private var inboundIDs: Set<String> = []
+    @ObservationIgnored private var heardQuestions: Set<String> = []
+    @ObservationIgnored private var remindedQuestions: Set<String> = []
     @ObservationIgnored private var silenceTask: Task<Void, Never>?
     @ObservationIgnored private var turnTask: Task<Void, Never>?
     @ObservationIgnored private var pushToTalkHeld = false
@@ -971,6 +977,14 @@ final class AssistantEngine {
             await resolvePendingCallBrief(text)
             return
         }
+        if let question = pendingQuestion {
+            let answer = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !answer.isEmpty else { return }
+            pendingQuestion = nil
+            Task { await self.sendCallAnswer(question, answer) }
+            await speakLine("I'll tell them, sir.", userText: text)
+            return
+        }
 
         spokenSoFar = ""
         utteranceBeingSpoken = ""
@@ -1372,6 +1386,72 @@ final class AssistantEngine {
         }
     }
 
+    func answerPendingQuestion(_ text: String) {
+        guard let question = pendingQuestion else { return }
+        let answer = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !answer.isEmpty else { return }
+        pendingQuestion = nil
+        Task { await self.sendCallAnswer(question, answer) }
+    }
+
+    private func sendCallAnswer(_ question: CallQuestion, _ text: String) async {
+        guard let client = try? JarvisCloudAPI.client() else { return }
+        let result = await client.answerCallQuestion(callId: question.callId, questionId: question.id, text: text)
+        if case .failed(let message) = result {
+            statusLine = message
+            pendingQuestion = question
+        }
+    }
+
+    private func pullQuestions(_ client: CloudClient) async {
+        guard let questions = try? await client.callQuestions() else { return }
+        if let pending = questions.first(where: { $0.status == "pending" }) {
+            if pendingQuestion?.id != pending.id {
+                pendingQuestion = pending
+            }
+            if !heardQuestions.contains(pending.id), await announceQuestion(pending.question) {
+                heardQuestions.insert(pending.id)
+            }
+        } else {
+            pendingQuestion = nil
+        }
+        for row in questions where row.status == "timed_out" && !remindedQuestions.contains(row.id) {
+            if await remindFollowUp(row.question) {
+                remindedQuestions.insert(row.id)
+            }
+        }
+    }
+
+    private func pullOwnerAlerts(_ client: CloudClient) async {
+        guard let alerts = try? await client.ownerAlerts() else { return }
+        ownerAlert = alerts.first { alert in
+            guard let parsed = CloudTime.date(alert.createdAt) else { return false }
+            return Date().timeIntervalSince(parsed) < 12 * 60 * 60
+        }
+    }
+
+    private func announceQuestion(_ question: String) async -> Bool {
+        guard phase == .idle || phase == .listening else { return false }
+        let line = "Sir, they asked: \(question). What should I tell them?"
+        recordAssistant(line)
+        await say(line)
+        if isSessionActive && isContinuous {
+            beginListening(manual: false)
+        }
+        return true
+    }
+
+    private func remindFollowUp(_ question: String) async -> Bool {
+        guard phase == .idle || phase == .listening else { return false }
+        let line = "They asked \(question). I said you would get back to them, sir."
+        recordAssistant(line)
+        await say(line)
+        if isSessionActive && isContinuous {
+            beginListening(manual: false)
+        }
+        return true
+    }
+
     func decideInbound(_ action: String) {
         guard let id = inboundCall?.id else { return }
         Task { await self.sendScreen(id: id, action: action) }
@@ -1387,6 +1467,8 @@ final class AssistantEngine {
         guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else { return }
         await CallPrivacyStore.syncIfNeeded()
         await CallDevice.uploadIfNeeded()
+        await pullQuestions(client)
+        await pullOwnerAlerts(client)
         guard let calls = try? await client.activeInboundCalls() else { return }
         let seen = Set(calls.map(\.id))
         for record in calls {

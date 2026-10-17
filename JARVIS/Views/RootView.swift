@@ -61,11 +61,19 @@ struct RootView: View {
             startListeningIfRequested()
         }
         .safeAreaInset(edge: .bottom) {
-            if engine.inboundCall != nil {
-                ScreeningCard()
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 8)
+            VStack(spacing: 8) {
+                if engine.ownerAlert != nil {
+                    OwnerAlertCard()
+                }
+                if engine.pendingQuestion != nil {
+                    QuestionCard()
+                }
+                if engine.inboundCall != nil {
+                    ScreeningCard()
+                }
             }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 8)
         }
         .sheet(item: Binding(get: { engine.messageDraft }, set: { engine.messageDraft = $0 })) { draft in
             MessageComposer(draft: draft) { engine.messageDraft = nil }

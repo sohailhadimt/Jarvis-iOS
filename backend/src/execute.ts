@@ -139,6 +139,15 @@ async function planOneTask(env: Env): Promise<boolean> {
       );
       await logProgress(env, task.id, null, "error", error, null);
       await logActivity(env, "orchestrator", "task.plan_failed", task.id, { error: parsed.error });
+      void import("./owner-alert").then((mod) =>
+        mod.reportProblem(env, {
+          sourceId: `task:${task.id}`,
+          kind: "failed_task",
+          urgent: false,
+          summary: "A task failed and needs you.",
+          detail: error,
+        }),
+      );
       return true;
     }
     await dbRun(
@@ -488,6 +497,15 @@ export async function recomputeTaskStatus(env: Env, taskId: string): Promise<voi
       [error, now, taskId],
     );
     await logActivity(env, "orchestrator", "task.failed", taskId, { subtask_id: failed.id, error });
+    void import("./owner-alert").then((mod) =>
+      mod.reportProblem(env, {
+        sourceId: `task:${taskId}`,
+        kind: "failed_task",
+        urgent: false,
+        summary: "A task failed and needs you.",
+        detail: error,
+      }),
+    );
     return;
   }
   if (subs.some((sub) => sub.status === "pending" || sub.status === "running")) {
