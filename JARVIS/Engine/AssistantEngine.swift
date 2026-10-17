@@ -30,8 +30,12 @@ private let sessionLog = Logger(subsystem: "com.sohail.jarvis", category: "sessi
 final class AssistantEngine {
     static let shared = AssistantEngine()
 
-    private(set) var phase: JarvisPhase = .idle
-    private(set) var level: Double = 0
+    private(set) var phase: JarvisPhase = .idle {
+        didSet { VoiceMeter.shared.phase = phase }
+    }
+    private(set) var level: Double = 0 {
+        didSet { VoiceMeter.shared.level = level }
+    }
     private(set) var transcript = ""
     private(set) var reply = ""
     private(set) var isSessionActive = false
@@ -211,7 +215,8 @@ final class AssistantEngine {
                 try listener.start()
             } catch {
                 isDictating = false
-                errorMessage = error.localizedDescription
+                errorMessage = JarvisLines.explain(error)
+                sessionLog.error("dictation failed: \(error.localizedDescription, privacy: .public)")
                 refreshWake()
             }
         }
@@ -528,9 +533,19 @@ final class AssistantEngine {
                 audioConfigured = true
                 sessionLog.info("AVAudioSession active playAndRecord voiceChat")
             } catch {
-                errorMessage = "Audio session error: \(error.localizedDescription)"
                 sessionLog.error("AVAudioSession failed: \(error.localizedDescription, privacy: .public)")
-                return false
+                do {
+                    let session = AVAudioSession.sharedInstance()
+                    try Self.configureVoiceSession(session)
+                    try session.setActive(true)
+                    audioConfigured = true
+                    errorMessage = nil
+                    return true
+                } catch {
+                    errorMessage = JarvisLines.voiceUnavailable
+                    sessionLog.error("AVAudioSession retry failed: \(error.localizedDescription, privacy: .public)")
+                    return false
+                }
             }
         }
         errorMessage = nil
@@ -578,21 +593,24 @@ final class AssistantEngine {
             phase = .listening
             listenRetries = 0
         } catch {
-            errorMessage = error.localizedDescription
             sessionLog.error("beginListening failed: \(error.localizedDescription, privacy: .public)")
-            if isSessionActive {
+            let canRetry = isSessionActive && isContinuous && listenRetries < 3
+            if canRetry {
                 try? listener.keepEngineAlive()
-                if isContinuous, listenRetries < 3 {
-                    listenRetries += 1
-                    let attempt = listenRetries
-                    sessionLog.info("retrying recognition \(attempt)")
-                    Task { @MainActor in
-                        try? await Task.sleep(for: .milliseconds(500))
-                        // A successful start zeroes listenRetries, so this retry does not interrupt it.
-                        guard self.isSessionActive, self.listenRetries == attempt else { return }
-                        self.beginListening(manual: false)
-                    }
+                listenRetries += 1
+                let attempt = listenRetries
+                sessionLog.info("retrying recognition \(attempt)")
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(500))
+                    // A successful start zeroes listenRetries, so this retry does not interrupt it.
+                    guard self.isSessionActive, self.listenRetries == attempt else { return }
+                    self.beginListening(manual: false)
                 }
+            } else if isSessionActive {
+                try? listener.keepEngineAlive()
+                errorMessage = JarvisLines.missedSpeech
+            } else {
+                errorMessage = JarvisLines.explain(error)
             }
             if !isSessionActive || !listener.isEngineRunning {
                 phase = .idle
@@ -741,8 +759,9 @@ final class AssistantEngine {
             text = try await transcribeCapturedFile(url)
         } catch {
             if Task.isCancelled { return }
-            errorMessage = error.localizedDescription
-            reply = "⚠︎ \(error.localizedDescription)"
+            errorMessage = JarvisLines.explain(error)
+            sessionLog.error("transcription failed: \(error.localizedDescription, privacy: .public)")
+            reply = ""
             afterTurn()
             return
         }
@@ -764,7 +783,6 @@ final class AssistantEngine {
                 if Task.isCancelled { throw error }
                 if Self.isGroqAuthFailure(error) {
                     groqTranscriptionBroken = true
-                    errorMessage = error.localizedDescription
                 }
                 statusLine = "Using on-device speech…"
                 pushActivity()
@@ -942,7 +960,7 @@ final class AssistantEngine {
         do {
             try await AppLauncher.open(url)
         } catch {
-            await speakLine(error.localizedDescription, userText: name)
+            await speakLine(JarvisLines.explain(error), userText: name)
             afterTurn()
             return
         }
@@ -1118,7 +1136,8 @@ final class AssistantEngine {
             if Task.isCancelled { return }
             let line = LLMError.short(error)
             errorMessage = line
-            reply = "⚠︎ \(line)"
+            reply = ""
+            sessionLog.error("turn failed: \(error.localizedDescription, privacy: .public)")
             if let llmError = error as? LLMError, case .missingKey = llmError {
                 isContinuous = false
             }
@@ -1370,7 +1389,7 @@ final class AssistantEngine {
             let client = try JarvisCloudAPI.client()
             return await client.placeOutboundCall(to: brief.number, contactName: brief.contactName, brief: brief.brief)
         } catch {
-            return .failed(error.localizedDescription)
+            return .failed(JarvisLines.explain(error))
         }
     }
 
@@ -1658,14 +1677,24 @@ final class AssistantEngine {
             return
         }
         let voice = voiceID.isEmpty ? s.voiceID : voiceID
-        do {
-            try await output.speakElevenLabs(text: text, voiceID: voice, apiKey: key,
-                                             stability: s.stability, similarity: s.similarity,
-                                             monitorMicrophone: monitor)
-        } catch {
-            if Task.isCancelled { return }
-            errorMessage = "ElevenLabs failed (\(error.localizedDescription))."
+        var last: Error?
+        for attempt in 0..<2 {
+            do {
+                try await output.speakElevenLabs(text: text, voiceID: voice, apiKey: key,
+                                                 stability: s.stability, similarity: s.similarity,
+                                                 monitorMicrophone: monitor)
+                errorMessage = nil
+                return
+            } catch {
+                if Task.isCancelled { return }
+                last = error
+                if attempt == 0 {
+                    try? await Task.sleep(for: .milliseconds(400))
+                }
+            }
         }
+        sessionLog.error("ElevenLabs failed: \(last?.localizedDescription ?? "", privacy: .public)")
+        errorMessage = JarvisLines.voiceFailed
     }
 
     private func noteBarge(_ value: Double) {
@@ -1852,14 +1881,22 @@ final class AssistantEngine {
 
     /// Morning and "what's been happening" are read from the stored briefing, then spoken as facts then recommendations.
     private func deliverBriefing(userText: String) async {
-        let spoken: String
-        do {
-            let briefing = try await JarvisCloudAPI.client().briefing()
-            spoken = CloudSpeech.briefing(briefing)
-            await CloudMonitor.shared.refresh()
-        } catch {
-            spoken = error.localizedDescription
-            errorMessage = spoken
+        var spoken = JarvisLines.briefingFailed
+        for attempt in 0..<2 {
+            do {
+                let briefing = try await JarvisCloudAPI.client().briefing()
+                spoken = CloudSpeech.briefing(briefing)
+                await CloudMonitor.shared.refresh()
+                errorMessage = nil
+                break
+            } catch {
+                if Task.isCancelled { return }
+                sessionLog.error("briefing failed: \(error.localizedDescription, privacy: .public)")
+                errorMessage = JarvisLines.briefingFailed
+                if attempt == 0 {
+                    try? await Task.sleep(for: .milliseconds(400))
+                }
+            }
         }
         guard !Task.isCancelled else { return }
         recordAssistant(spoken)

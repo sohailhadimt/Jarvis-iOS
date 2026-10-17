@@ -201,7 +201,7 @@ final class AgentStore {
             save()
             return "I'll plan that and hand it to the team."
         } catch {
-            return error.localizedDescription
+            return JarvisLines.explain(error)
         }
     }
 

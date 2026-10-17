@@ -6,7 +6,7 @@ extension Notification.Name {
     static let jarvisOpenStandBy = Notification.Name("jarvisOpenStandBy")
 }
 
-private enum DrawerRoute: Hashable {
+enum DrawerRoute: Hashable {
     case conversations
     case conversation(UUID)
     case calendar
@@ -24,7 +24,7 @@ private enum DrawerRoute: Hashable {
     case settings
 }
 
-private struct DrawerItem: Identifiable {
+struct DrawerItem: Identifiable {
     var route: DrawerRoute
     var title: String
     var subtitle: String
@@ -32,10 +32,67 @@ private struct DrawerItem: Identifiable {
     var id: String { title }
 }
 
-/// Tracks a horizontal drag without resetting when the drawer offset redraws.
-private final class DrawerPan {
-    var axis = 0
-    var origin: CGFloat = 0
+/// Finger position for the drawer. The home screen does not read `fraction`, so a drag does not rebuild it.
+@MainActor
+@Observable
+final class DrawerModel {
+    var fraction: CGFloat = 0
+    var panning = false
+    var onSelect: ((DrawerRoute?) -> Void)?
+    private var axis = 0
+    private var origin: CGFloat = 0
+
+    static let spring = Animation.spring(duration: 0.42, bounce: 0.05)
+
+    func setOpen(_ open: Bool) {
+        if open {
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        }
+        withAnimation(Self.spring) {
+            fraction = open ? 1 : 0
+        }
+    }
+
+    func drag(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 16, coordinateSpace: .global)
+            .onChanged { value in self.changed(value, width: width) }
+            .onEnded { value in self.ended(value, width: width) }
+    }
+
+    private func changed(_ value: DragGesture.Value, width: CGFloat) {
+        guard width > 1 else { return }
+        let dx = value.translation.width
+        let dy = value.translation.height
+        if axis == 0 {
+            if abs(dx) < 10, abs(dy) < 10 { return }
+            axis = abs(dx) > abs(dy) * 1.15 ? 1 : 2
+            if axis == 1 {
+                origin = fraction
+                panning = true
+                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            }
+        }
+        guard axis == 1 else { return }
+        let next = min(max(origin + dx / width, 0), 1)
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { fraction = next }
+    }
+
+    private func ended(_ value: DragGesture.Value, width: CGFloat) {
+        defer {
+            axis = 0
+            panning = false
+        }
+        guard axis == 1, width > 1 else { return }
+        let flick = value.predictedEndTranslation.width - value.translation.width
+        let projected = origin + value.predictedEndTranslation.width / width
+        let open: Bool
+        if flick > 70 { open = true }
+        else if flick < -70 { open = false }
+        else { open = projected > 0.4 }
+        setOpen(open)
+    }
 }
 
 /// Home screen: navy field, glowing ring, greeting, ask bar, and the side drawer.
@@ -45,15 +102,8 @@ struct JarvisShell: View {
     var openStandBy: () -> Void
 
     @State private var log = ConversationLog.shared
-    @State private var agents = AgentStore.shared
+    @State private var drawer = DrawerModel()
     @State private var route: DrawerRoute?
-    @State private var fraction: CGFloat = 0
-    @State private var pan = DrawerPan()
-    @State private var panning = false
-    @State private var editingPins = false
-    @State private var draft = ""
-    @State private var keyboardOverlap: CGFloat = 0
-    @FocusState private var composerFocused: Bool
 
     private let menu: [DrawerItem] = [
         DrawerItem(route: .conversations, title: "Conversations", subtitle: "Chat history", icon: "bubble.left"),
@@ -79,26 +129,26 @@ struct JarvisShell: View {
                 GeometryReader { geo in
                     let drawerW = geo.size.width * 0.70
                     ZStack(alignment: .leading) {
-                        home(in: geo)
-                        Color.black.opacity(0.5 * fraction)
-                            .ignoresSafeArea()
-                            .allowsHitTesting(!panning && fraction > 0.92)
-                            .onTapGesture { setDrawer(open: false) }
-                        drawer(width: drawerW)
-                            .frame(width: drawerW, height: geo.size.height, alignment: .top)
-                            .background(JarvisBackdrop().ignoresSafeArea())
-                            .offset(x: fraction * drawerW - drawerW)
-                            .shadow(color: .black.opacity(0.45 * fraction), radius: 18, x: 8, y: 0)
+                        HomeScreen(ringPaused: scenePhase != .active || route != nil) {
+                            drawer.setOpen(true)
+                        }
+                        DrawerScrim(model: drawer)
+                        DrawerSlide(model: drawer, width: drawerW, menu: drawerMenu)
                     }
-                    .simultaneousGesture(drag(drawerWidth: drawerW))
-                    .background(keyboardReader)
+                    .simultaneousGesture(drawer.drag(width: drawerW))
                 }
             }
             .navigationDestination(item: $route) { destination($0) }
             .toolbar(.hidden, for: .navigationBar)
         }
         .preferredColorScheme(.dark)
-        .onAppear { log.absorb(engine.turns) }
+        .onAppear {
+            drawer.onSelect = { next in
+                self.route = next
+                self.drawer.setOpen(false)
+            }
+            log.absorb(engine.turns)
+        }
         .onChange(of: engine.turns.count) { _, _ in log.absorb(engine.turns) }
         .onChange(of: engine.phase) { _, phase in
             if phase == .idle || phase == .listening { log.absorb(engine.turns) }
@@ -108,474 +158,8 @@ struct JarvisShell: View {
         }
     }
 
-    private func home(in geo: GeometryProxy) -> some View {
-        VStack(spacing: 0) {
-            topBar
-                .padding(.horizontal, 18)
-                .padding(.top, 6)
-            if keyboardOverlap == 0 {
-                Spacer(minLength: 8)
-                JarvisRing(level: engine.level, phase: engine.phase,
-                           diameter: geo.size.width * 0.65,
-                           paused: scenePhase != .active)
-                greeting
-                    .padding(.top, 18)
-                liveCaption
-                Spacer(minLength: 8)
-            } else {
-                Spacer(minLength: 8)
-            }
-            sessionExtras
-            composer
-                .padding(.horizontal, 16)
-                .padding(.bottom, 12 + keyboardOverlap)
-        }
-        .frame(width: geo.size.width, height: geo.size.height)
-    }
-
-    private var topBar: some View {
-        ZStack {
-            JarvisWordmark()
-            HStack {
-                Button {
-                    composerFocused = false
-                    setDrawer(open: true)
-                } label: {
-                    HamburgerMark()
-                        .frame(width: 44, height: 44, alignment: .leading)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Menu")
-                Spacer()
-            }
-        }
-        .frame(height: 52)
-    }
-
-    private var greeting: some View {
-        VStack(spacing: 6) {
-            TimelineView(.everyMinute) { context in
-                Text(JarvisGreeting.line(at: context.date))
-                    .font(.system(size: 26, weight: .regular))
-                    .foregroundStyle(.white)
-            }
-            Text("What can I do for you?")
-                .font(.system(size: 17, weight: .regular))
-                .foregroundStyle(Color(hex: "#A39BB4"))
-        }
-        .multilineTextAlignment(.center)
-        .frame(maxWidth: .infinity)
-    }
-
-    @ViewBuilder
-    private var liveCaption: some View {
-        if let error = engine.errorMessage, !error.isEmpty {
-            caption(error, color: Color(hex: "#D07070"))
-        } else if engine.phase == .listening, !engine.transcript.isEmpty {
-            caption(engine.transcript, color: Color(hex: "#A39BB4"))
-        } else if engine.phase == .speaking || engine.phase == .thinking, !engine.reply.isEmpty {
-            caption(engine.reply, color: Color(hex: "#C9C6D4"))
-        }
-    }
-
-    private func caption(_ text: String, color: Color) -> some View {
-        Text(text)
-            .font(.system(size: 15, weight: .regular))
-            .foregroundStyle(color)
-            .multilineTextAlignment(.center)
-            .lineLimit(2)
-            .padding(.horizontal, 32)
-            .padding(.top, 10)
-    }
-
-    @ViewBuilder
-    private var sessionExtras: some View {
-        if engine.pendingCallBrief != nil {
-            CallBriefBar()
-                .padding(.horizontal, 16)
-                .padding(.bottom, 8)
-        }
-        if engine.pendingSummary != nil {
-            ApprovalCard()
-                .padding(.horizontal, 16)
-                .padding(.bottom, 8)
-        }
-        if engine.hasContactChoices {
-            CallPicker()
-                .padding(.horizontal, 16)
-                .padding(.bottom, 8)
-        }
-        if engine.attachmentName != nil {
-            AttachmentChip()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-                .padding(.bottom, 6)
-        }
-        if engine.generatedPreview != nil {
-            GeneratedPreview()
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.bottom, 6)
-        }
-        if agents.jobs.contains(where: { $0.status != .done }) {
-            AgentJobStrip()
-                .padding(.horizontal, 12)
-                .padding(.bottom, 4)
-        }
-        if !engine.citations.isEmpty {
-            SourceLinks(citations: engine.citations)
-                .padding(.horizontal, 20)
-                .padding(.bottom, 8)
-        }
-    }
-
-    private var composer: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "waveform")
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(Color(hex: "#4A7FD0"))
-                .frame(width: 22)
-            TextField("", text: $draft, prompt: Text("Ask Jarvis anything...").foregroundStyle(Color(hex: "#8E929C")))
-                .font(.system(size: 16, weight: .regular))
-                .foregroundStyle(.white)
-                .focused($composerFocused)
-                .submitLabel(.send)
-                .textInputAutocapitalization(.sentences)
-                .onSubmit(sendDraft)
-            Button(action: micTapped) {
-                ZStack {
-                    Circle()
-                        .fill(Color.white.opacity(0.04))
-                    Circle()
-                        .stroke(Color(hex: "#2E8BFF"), lineWidth: 1.5)
-                        .shadow(color: Color(hex: "#2E8BFF").opacity(engine.isSessionActive ? 0.95 : 0.75), radius: 6)
-                    Image(systemName: "mic.fill")
-                        .font(.system(size: 15, weight: .regular))
-                        .foregroundStyle(.white)
-                }
-                .frame(width: 36, height: 36)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(engine.isSessionActive ? "Stop listening" : "Microphone")
-        }
-        .padding(.leading, 16)
-        .padding(.trailing, 6)
-        .frame(height: 52)
-        .background(Color(hex: "#0B1220").opacity(0.72), in: Capsule())
-        .overlay(Capsule().stroke(Color(hex: "#2E8BFF").opacity(0.55), lineWidth: 0.8))
-        .shadow(color: Color(hex: "#2E8BFF").opacity(0.28), radius: 8)
-    }
-
-    private var keyboardReader: some View {
-        GeometryReader { proxy in
-            Color.clear
-                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
-                    guard let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
-                    let overlap = max(0, proxy.frame(in: .global).maxY - frame.minY)
-                    let duration = note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
-                    withAnimation(.easeOut(duration: duration)) {
-                        keyboardOverlap = overlap
-                    }
-                }
-        }
-    }
-
-    private func drag(drawerWidth: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 16, coordinateSpace: .global)
-            .onChanged { value in
-                guard drawerWidth > 1 else { return }
-                let dx = value.translation.width
-                let dy = value.translation.height
-                if pan.axis == 0 {
-                    if abs(dx) < 10 && abs(dy) < 10 { return }
-                    pan.axis = abs(dx) > abs(dy) * 1.15 ? 1 : 2
-                    if pan.axis == 1 {
-                        pan.origin = fraction
-                        panning = true
-                        composerFocused = false
-                    }
-                }
-                guard pan.axis == 1 else { return }
-                let next = pan.origin + dx / drawerWidth
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) {
-                    fraction = min(max(next, 0), 1)
-                }
-            }
-            .onEnded { value in
-                defer {
-                    pan.axis = 0
-                    panning = false
-                }
-                guard pan.axis == 1, drawerWidth > 1 else { return }
-                let flick = value.predictedEndTranslation.width - value.translation.width
-                let projected = pan.origin + value.predictedEndTranslation.width / drawerWidth
-                let open: Bool
-                if flick > 70 { open = true }
-                else if flick < -70 { open = false }
-                else { open = projected > 0.4 }
-                setDrawer(open: open)
-            }
-    }
-
-    private func setDrawer(open: Bool) {
-        withAnimation(.spring(response: 0.36, dampingFraction: 0.88)) {
-            fraction = open ? 1 : 0
-        }
-    }
-
-    private func sendDraft() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        draft = ""
-        composerFocused = false
-        engine.ask(text)
-    }
-
-    private func micTapped() {
-        composerFocused = false
-        if engine.isSessionActive {
-            Task { await engine.endSession(reason: "mic-button") }
-        } else {
-            Task { await engine.startSession(continuous: true) }
-        }
-    }
-
-    private func present(_ route: DrawerRoute) {
-        setDrawer(open: false)
-        self.route = route
-    }
-
-    private func drawer(width: CGFloat) -> some View {
-        List {
-            Section {
-                drawerHeader
-                    .drawerRow()
-                menuRow(title: "Home", subtitle: "Main screen", icon: "house", selected: true) {
-                    route = nil
-                    setDrawer(open: false)
-                }
-                .drawerRow()
-                ForEach(menu) { item in
-                    menuRow(title: item.title, subtitle: item.subtitle, icon: item.icon, selected: false) {
-                        present(item.route)
-                    }
-                    .drawerRow()
-                }
-            }
-            Section {
-                drawerDivider
-                HStack {
-                    Text("PINNED")
-                        .font(.system(size: 11, weight: .semibold))
-                        .tracking(1.6)
-                        .foregroundStyle(Color.white.opacity(0.45))
-                    Spacer()
-                    Button(editingPins ? "Done" : "Edit") {
-                        editingPins.toggle()
-                    }
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(Color(hex: "#4A7FD0"))
-                    .buttonStyle(.plain)
-                }
-                .padding(.horizontal, 18)
-                .padding(.top, 8)
-                .padding(.bottom, 4)
-                .drawerRow()
-                if log.pinned.isEmpty {
-                    Text(editingPins ? "Pin a conversation below." : "No pinned conversations.")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Color(hex: "#8E8A99"))
-                        .padding(.horizontal, 18)
-                        .padding(.bottom, 6)
-                        .drawerRow()
-                }
-                ForEach(log.pinned) { convo in
-                    pinnedCard(convo)
-                        .drawerRow()
-                }
-                .onMove { offsets, destination in
-                    log.movePinned(from: offsets, to: destination)
-                }
-            }
-            Section {
-                drawerDivider
-                Text("RECENTS")
-                    .font(.system(size: 11, weight: .semibold))
-                    .tracking(1.6)
-                    .foregroundStyle(Color.white.opacity(0.45))
-                    .padding(.horizontal, 18)
-                    .padding(.top, 8)
-                    .padding(.bottom, 4)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .drawerRow()
-                if log.recents.isEmpty {
-                    Text("No conversations yet.")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Color(hex: "#8E8A99"))
-                        .padding(.horizontal, 18)
-                        .padding(.bottom, 8)
-                        .drawerRow()
-                }
-                ForEach(log.recents) { convo in
-                    recentRow(convo)
-                        .drawerRow()
-                }
-            }
-        }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
-        .scrollIndicators(.hidden)
-        .environment(\.defaultMinListRowHeight, 8)
-        .environment(\.editMode, .constant(editingPins ? .active : .inactive))
-        .frame(width: width)
-    }
-
-    private var drawerDivider: some View {
-        Rectangle()
-            .fill(Color.white.opacity(0.10))
-            .frame(height: 0.5)
-            .padding(.horizontal, 16)
-            .padding(.top, 8)
-            .padding(.bottom, 4)
-            .drawerRow()
-    }
-
-    private var drawerHeader: some View {
-        HStack(alignment: .center, spacing: 12) {
-            JarvisWordmark(alignment: .leading)
-            Spacer(minLength: 8)
-            Button {
-                setDrawer(open: false)
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 13, weight: .light))
-                    .foregroundStyle(Color.white.opacity(0.92))
-                    .frame(width: 32, height: 32)
-                    .overlay(Circle().stroke(Color.white.opacity(0.28), lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Close menu")
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 10)
-    }
-
-    private func menuRow(title: String, subtitle: String, icon: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 14) {
-                Image(systemName: icon)
-                    .font(.system(size: 18, weight: .light))
-                    .foregroundStyle(Color(hex: "#C5D0DE"))
-                    .frame(width: 26)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.system(size: 16, weight: .regular))
-                        .foregroundStyle(.white)
-                    Text(subtitle)
-                        .font(.system(size: 12, weight: .regular))
-                        .foregroundStyle(Color(hex: "#8E8A99"))
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? Color(hex: "#2E8BFF").opacity(0.12) : Color.clear)
-            .overlay(alignment: .leading) {
-                if selected {
-                    Rectangle()
-                        .fill(Color(hex: "#2E8BFF"))
-                        .frame(width: 3)
-                }
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func pinnedCard(_ convo: StoredConversation) -> some View {
-        HStack(spacing: 10) {
-            conversationLabel(convo)
-            if editingPins {
-                Button {
-                    log.setPinned(convo.id, false)
-                } label: {
-                    Image(systemName: "pin.slash")
-                        .font(.system(size: 13, weight: .light))
-                        .foregroundStyle(Color(hex: "#8E8A99"))
-                        .frame(width: 32, height: 32)
-                }
-                .buttonStyle(.borderless)
-                .accessibilityLabel("Unpin")
-            } else {
-                Image(systemName: "pin")
-                    .font(.system(size: 13, weight: .light))
-                    .foregroundStyle(Color(hex: "#8E8A99"))
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 12)
-        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .padding(.horizontal, 14)
-        .padding(.vertical, 4)
-        .contentShape(Rectangle())
-        .onTapGesture { if !editingPins { present(.conversation(convo.id)) } }
-        .contextMenu { conversationMenu(convo) }
-    }
-
-    private func recentRow(_ convo: StoredConversation) -> some View {
-        HStack(spacing: 10) {
-            conversationLabel(convo)
-            if editingPins {
-                Button {
-                    log.setPinned(convo.id, true)
-                } label: {
-                    Image(systemName: "pin")
-                        .font(.system(size: 13, weight: .light))
-                        .foregroundStyle(Color(hex: "#4A7FD0"))
-                        .frame(width: 32, height: 32)
-                }
-                .buttonStyle(.borderless)
-                .accessibilityLabel("Pin")
-            } else {
-                Text(ConversationLog.timeLabel(convo.updatedAt))
-                    .font(.system(size: 12, weight: .regular))
-                    .foregroundStyle(Color(hex: "#8E8A99"))
-                    .monospacedDigit()
-            }
-        }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 11)
-        .contentShape(Rectangle())
-        .onTapGesture { if !editingPins { present(.conversation(convo.id)) } }
-        .contextMenu { conversationMenu(convo) }
-    }
-
-    private func conversationLabel(_ convo: StoredConversation) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: convo.symbol)
-                .font(.system(size: 15, weight: .light))
-                .foregroundStyle(Color(hex: "#C5D0DE"))
-                .frame(width: 22)
-            Text(convo.title)
-                .font(.system(size: 15, weight: .regular))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-            Spacer(minLength: 8)
-        }
-    }
-
-    @ViewBuilder
-    private func conversationMenu(_ convo: StoredConversation) -> some View {
-        Button(convo.pinned ? "Unpin" : "Pin") {
-            log.setPinned(convo.id, !convo.pinned)
-        }
-        Button("Delete", role: .destructive) {
-            log.remove(convo.id)
-        }
+    private var drawerMenu: DrawerMenu {
+        DrawerMenu(model: drawer, items: menu)
     }
 
     @ViewBuilder
@@ -615,7 +199,7 @@ struct JarvisShell: View {
     }
 }
 
-private extension View {
+extension View {
     func drawerRow() -> some View {
         listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
             .listRowSeparator(.hidden)
@@ -647,7 +231,7 @@ struct JarvisBackdrop: View {
     }
 }
 
-private struct JarvisWordmark: View {
+struct JarvisWordmark: View {
     var alignment: HorizontalAlignment = .center
     private let titleSize: CGFloat = 20
     private let subtitleSize: CGFloat = 9
@@ -669,7 +253,7 @@ private struct JarvisWordmark: View {
     }
 }
 
-private struct HamburgerMark: View {
+struct HamburgerMark: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             bar(18)
@@ -684,7 +268,7 @@ private struct HamburgerMark: View {
     }
 }
 
-private enum JarvisGreeting {
+enum JarvisGreeting {
     static func line(at date: Date, name: String = "Sohail") -> String {
         let hour = Calendar.current.component(.hour, from: date)
         let part: String
@@ -696,138 +280,6 @@ private enum JarvisGreeting {
             part = "evening"
         }
         return "Good \(part), \(name)."
-    }
-}
-
-/// Eased 60fps follow of playback level, mic level, or a slow idle breath.
-private final class RingMotion {
-    var value = 0.22
-    var stamp: TimeInterval = 0
-
-    func sample(level: Double, phase: JarvisPhase, now: TimeInterval) -> Double {
-        let dt = stamp == 0 ? 1.0 / 60.0 : min(0.05, max(0.001, now - stamp))
-        stamp = now
-        let clamped = min(1, max(0, level))
-        let target: Double
-        let tau: Double
-        switch phase {
-        case .speaking:
-            target = 0.34 + clamped * 0.66
-            tau = 0.055
-        case .listening:
-            target = 0.18 + clamped * 0.28
-            tau = 0.14
-        case .thinking:
-            target = 0.28 + 0.05 * (0.5 + 0.5 * sin(now * 2.2))
-            tau = 0.18
-        case .idle:
-            target = 0.18 + 0.07 * (0.5 + 0.5 * sin(now * 0.85))
-            tau = 0.45
-        }
-        let alpha = 1 - exp(-dt / tau)
-        value += (target - value) * alpha
-        value = min(1.15, max(0, value))
-        return value
-    }
-}
-
-private struct JarvisRing: View {
-    var level: Double
-    var phase: JarvisPhase
-    var diameter: CGFloat
-    var paused: Bool
-    @State private var motion = RingMotion()
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: paused)) { context in
-            let pulse = motion.sample(level: level, phase: phase, now: context.date.timeIntervalSinceReferenceDate)
-            VStack(spacing: 0) {
-                ring(pulse)
-                floor(pulse)
-                    .padding(.top, 8)
-            }
-        }
-        .accessibilityLabel("JARVIS")
-    }
-
-    private func ring(_ pulse: Double) -> some View {
-        let rim = 2.5 + pulse * 1.8
-        let bloom = Color(hex: "#2E8BFF")
-        return ZStack {
-            Circle()
-                .stroke(bloom.opacity(0.55), lineWidth: 16 + pulse * 22)
-                .blur(radius: 16 + pulse * 14)
-            Circle()
-                .stroke(bloom.opacity(0.9), lineWidth: 7 + pulse * 12)
-                .blur(radius: 7 + pulse * 10)
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [Color(hex: "#070C16"), Color(hex: "#05080F"), Color(hex: "#02040A")],
-                        center: .center,
-                        startRadius: diameter * 0.05,
-                        endRadius: diameter * 0.48
-                    )
-                )
-                .padding(rim * 0.5 + 1.5)
-            Circle()
-                .stroke(Color.white.opacity(0.20), lineWidth: 1)
-                .padding(diameter * 0.065)
-            Circle()
-                .stroke(
-                    LinearGradient(
-                        colors: [Color.white, Color(red: 0.78, green: 0.90, blue: 1)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    ),
-                    lineWidth: rim
-                )
-            Ellipse()
-                .fill(Color.white)
-                .frame(width: diameter * 0.20, height: 8 + pulse * 6)
-                .blur(radius: 5)
-                .opacity(0.8 + min(pulse, 0.2))
-                .offset(y: diameter * 0.5 - rim)
-            Ellipse()
-                .fill(Color.white.opacity(0.85))
-                .frame(width: diameter * 0.32, height: 16)
-                .blur(radius: 10)
-                .opacity(0.35 + pulse * 0.4)
-                .offset(y: diameter * 0.5 - 2)
-        }
-        .frame(width: diameter, height: diameter)
-    }
-
-    private func floor(_ pulse: Double) -> some View {
-        let bloom = Color(hex: "#2E8BFF")
-        return ZStack {
-            Capsule()
-                .fill(
-                    LinearGradient(
-                        colors: [.clear, bloom.opacity(0.45 + pulse * 0.35), .clear],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                )
-                .frame(width: diameter * 0.92, height: 14 + pulse * 10)
-                .blur(radius: 8 + pulse * 6)
-            Capsule()
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            .clear,
-                            bloom.opacity(0.35),
-                            Color.white.opacity(0.92),
-                            bloom.opacity(0.35),
-                            .clear
-                        ],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                )
-                .frame(width: diameter * 0.62, height: 1.6)
-        }
-        .frame(width: diameter, height: 22)
     }
 }
 
@@ -1159,13 +611,13 @@ private struct FilesHub: View {
 
 // MARK: - Conversation log
 
-struct StoredTurn: Codable, Identifiable, Equatable {
+struct StoredTurn: Codable, Identifiable, Equatable, Sendable {
     var id: UUID
     var role: String
     var text: String
 }
 
-struct StoredConversation: Codable, Identifiable, Equatable {
+struct StoredConversation: Codable, Identifiable, Equatable, Sendable {
     var id: UUID
     var title: String
     var updatedAt: Date
@@ -1183,6 +635,7 @@ final class ConversationLog {
     private(set) var items: [StoredConversation] = []
     private var liveID: UUID?
     private var sealedCount: Int?
+    private var saveGeneration = 0
     private let key = "jarvis.conversations.v1"
     private let recentCap = 40
 
@@ -1289,9 +742,18 @@ final class ConversationLog {
     }
 
     private func save() {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .secondsSince1970
-        guard let data = try? encoder.encode(items) else { return }
-        UserDefaults.standard.set(data, forKey: key)
+        saveGeneration += 1
+        let generation = saveGeneration
+        let snapshot = items
+        let key = key
+        Task.detached(priority: .utility) {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .secondsSince1970
+            guard let data = try? encoder.encode(snapshot) else { return }
+            await MainActor.run {
+                guard generation == ConversationLog.shared.saveGeneration else { return }
+                UserDefaults.standard.set(data, forKey: key)
+            }
+        }
     }
 }

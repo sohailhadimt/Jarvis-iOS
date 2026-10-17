@@ -242,7 +242,7 @@ final class VisionCamera {
             }
             owners.remove(owner)
             isLive = false
-            note = problem
+            note = JarvisLines.explain(problem)
             return
         }
         guard owners.contains(owner) else {

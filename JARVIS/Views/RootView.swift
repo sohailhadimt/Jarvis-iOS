@@ -22,6 +22,8 @@ struct RootView: View {
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
+        .background(Color(hex: "#05080F").ignoresSafeArea())
+        .preferredColorScheme(.dark)
         .ignoresSafeArea(.keyboard)
         .onAppear {
             UIDevice.current.isBatteryMonitoringEnabled = true

@@ -361,7 +361,7 @@ struct VoicesSettingsView: View {
             voices = try await ElevenLabsClient.voices(apiKey: key)
             error = nil
         } catch {
-            self.error = error.localizedDescription
+            self.error = JarvisLines.explain(error)
         }
     }
 }

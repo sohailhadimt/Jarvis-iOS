@@ -251,7 +251,7 @@ struct CallingSettingsView: View {
                     report = "Calling not set up. Still missing on the worker: \(config.missing.joined(separator: ", "))."
                 }
             } catch {
-                report = "Calling not set up. \(error.localizedDescription)"
+                report = JarvisLines.explain(error)
                 applyNumber("")
             }
         }

@@ -373,7 +373,7 @@ enum CloudSpeech {
         if !failed.isEmpty {
             facts.append("Failed. " + joined(failed.map { task in
                 var line = task.goal
-                if let error = task.error, !error.isEmpty { line += ". \(error)" }
+                if let error = task.error, !error.isEmpty { line += ". \(JarvisLines.explain(error))" }
                 return line
             }, count: failed.count))
         }
@@ -423,7 +423,7 @@ enum CloudSpeech {
             let lines = detail.subtasks.map { sub in
                 var line = "\(sub.agent) \(sub.status): \(sub.title)"
                 if let summary = sub.resultSummary, !summary.isEmpty { line += ". \(summary)" }
-                if let error = sub.error, !error.isEmpty { line += ". \(error)" }
+                if let error = sub.error, !error.isEmpty { line += ". \(JarvisLines.explain(error))" }
                 return line
             }
             parts.append("Subtasks. " + lines.joined(separator: " "))
@@ -495,7 +495,7 @@ enum CloudSpeech {
     private static func taskLine(_ task: CloudTask) -> String {
         var line = "\(task.status): \(task.goal)"
         if let summary = task.resultSummary, !summary.isEmpty { line += ". \(summary)" }
-        if let error = task.error, !error.isEmpty { line += ". \(error)" }
+        if let error = task.error, !error.isEmpty { line += ". \(JarvisLines.explain(error))" }
         return line
     }
 
@@ -762,7 +762,7 @@ struct CloudClient: Sendable {
             let (payload, status) = try await raw(method: "POST", path: "/calls", authorize: true, body: data, query: [])
             if status == 503 { return .notSetUp }
             guard (200..<300).contains(status) else {
-                return .failed(Self.failure(data: payload, status: status).localizedDescription)
+                return .failed(JarvisLines.explain(Self.failure(data: payload, status: status)))
             }
             let envelope = try JSONDecoder().decode(CallEnvelope.self, from: payload)
             return .placed(envelope.call)
@@ -770,9 +770,9 @@ struct CloudClient: Sendable {
             if case .http(let code, let message) = error, code == 503 || message.contains("Calling not set up") {
                 return .notSetUp
             }
-            return .failed(error.localizedDescription)
+            return .failed(JarvisLines.explain(error))
         } catch {
-            return .failed(error.localizedDescription)
+            return .failed(JarvisLines.explain(error))
         }
     }
 
@@ -841,16 +841,16 @@ struct CloudClient: Sendable {
         do {
             let (payload, status) = try await raw(method: "POST", path: path, authorize: true, body: data, query: [])
             if status == 503 {
-                let message = Self.failure(data: payload, status: status).localizedDescription
+                let message = JarvisLines.explain(Self.failure(data: payload, status: status))
                 return .notSetUp(message)
             }
             guard (200..<300).contains(status) else {
-                return .failed(Self.failure(data: payload, status: status).localizedDescription)
+                return .failed(JarvisLines.explain(Self.failure(data: payload, status: status)))
             }
             let audio = (try? JSONDecoder().decode(ScreenAck.self, from: payload))?.audio ?? ""
             return .done(audio)
         } catch {
-            return .failed(error.localizedDescription)
+            return .failed(JarvisLines.explain(error))
         }
     }
 

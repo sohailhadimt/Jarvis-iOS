@@ -80,7 +80,7 @@ final class CloudMonitor {
                 self.memory = memory
             }
         } catch {
-            lastError = error.localizedDescription
+            lastError = JarvisLines.explain(error)
         }
     }
 
