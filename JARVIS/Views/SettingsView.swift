@@ -62,6 +62,17 @@ struct SettingsView: View {
             } header: {
                 Text("Action Button")
             }
+            Section("More") {
+                NavigationLink { CloudBriefingView() } label: { Label("Briefing", systemImage: "sun.horizon") }
+                NavigationLink { CloudActivityView() } label: { Label("Activity", systemImage: "list.bullet.rectangle") }
+                NavigationLink { CloudBusinessView() } label: { Label("Business", systemImage: "chart.bar") }
+                NavigationLink { VisionStudioView() } label: { Label("Vision", systemImage: "eye") }
+                Button {
+                    NotificationCenter.default.post(name: .jarvisOpenStandBy, object: nil)
+                } label: {
+                    Label("StandBy", systemImage: "moon.stars")
+                }
+            }
         }
         .navigationTitle("Settings")
         .toolbar(.visible, for: .navigationBar)

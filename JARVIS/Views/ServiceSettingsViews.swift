@@ -278,7 +278,6 @@ struct VoicesSettingsView: View {
         @Bindable var settings = settings
         Form {
             Section {
-                Toggle("Separate full-screen mode", isOn: $settings.voiceSeparateMode)
                 Toggle("Start with voice", isOn: $settings.startWithVoice)
                 Toggle("Background conversations", isOn: $settings.backgroundConversations)
                 Toggle("Captions on", isOn: $settings.captionsDefault)
@@ -301,7 +300,7 @@ struct VoicesSettingsView: View {
             } header: {
                 Text("Voice mode")
             } footer: {
-                Text("Full-screen voice is the default: a black screen, the sky orb, and the ask bar. Turn separate mode off for the in-chat composer. Tap the orb for the transcript. Captions are the two lines under the orb. VAD sensitivity changes how quickly silence ends your turn; higher is about 500ms and lower is about 700ms. The Action Button session is unaffected.")
+                Text("The home ring brightens with JARVIS's voice and, more gently, with the microphone. Start with voice opens listening as soon as JARVIS is on screen. Lines under the greeting show the live turn. VAD sensitivity changes how quickly silence ends your turn; higher is about 500ms and lower is about 700ms. The Action Button session is unaffected.")
             }
             Section("Selected: \(settings.voiceName)") {
                 VStack(alignment: .leading) {
