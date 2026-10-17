@@ -9,6 +9,12 @@ export const OUTBOUND_INTRO = "Hello, this is JARVIS, Master Hadi's personal ass
 export const INBOUND_GREETING =
   "Hello, you've reached Master Hadi's phone, this is JARVIS his personal assistant. This call may be handled by AI. Who's calling and how can I help?";
 
+/** George, the premade British voice the iPhone app uses for JARVIS. */
+export const JARVIS_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb";
+
+/** Twilio fallback when ElevenLabs does not take the call. Brian is British neural. */
+export const FALLBACK_SAY_VOICE = "Polly.Brian-Neural";
+
 export const PERSONAL_CHECK = "I'll need to check with Master Hadi before I share that.";
 
 export const CALL_SECRET_NAMES = [
@@ -531,54 +537,28 @@ async function voiceWebhook(request: Request, env: Env, id: string): Promise<Res
   const spoken = scriptForMode(mode, row, screen, relayAnswer);
   const from = params.From || toE164(env.TWILIO_FROM_NUMBER ?? "") || "";
   const to = params.To || row.to;
-  const payload = {
-    agent_id: (env.ELEVENLABS_AGENT_ID ?? "").trim(),
-    from_number: from,
-    to_number: to,
-    direction: screen?.direction === "inbound" ? "inbound" : "outbound",
-    conversation_initiation_client_data: {
-      user_id: row.id,
-      dynamic_variables: {
-        contact_name: screen?.caller_name || row.contact_name,
-        brief: row.brief,
-        opening_line: spoken.first,
-      },
-      conversation_config_override: {
-        agent: {
-          first_message: spoken.first,
-          language: "en",
-          prompt: { prompt: spoken.prompt },
-        },
-      },
-    },
-  };
   try {
-    const response = await fetch("https://api.elevenlabs.io/v1/convai/twilio/register-call", {
-      method: "POST",
-      redirect: "error",
-      signal: AbortSignal.timeout(8_000),
-      headers: {
-        "xi-api-key": (env.ELEVENLABS_API_KEY ?? "").trim(),
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(payload),
+    const connected = await registerElevenLabsCall(env, {
+      id: row.id,
+      from,
+      to,
+      direction: screen?.direction === "inbound" ? "inbound" : "outbound",
+      first: spoken.first,
+      prompt: spoken.prompt,
+      contact: screen?.caller_name || row.contact_name,
+      brief: row.brief,
     });
-    const text = await response.text();
-    if (!response.ok) {
-      const reason = safeError(text || "ElevenLabs could not start the call.");
+    if (!connected.twiml) {
+      const reason = connected.error || connected.reason || "ElevenLabs could not start the call.";
       await updateCall(env, id, { status: "failed", error: reason });
       reportCallFailure(env, row, reason);
       return xml(sayAndHangup("Hello, this is JARVIS, Master Hadi's personal assistant. I'm sorry, I can't continue this call right now. Goodbye."), 200);
     }
-    const conversationId =
-      conversationIdFromTwiml(text) ||
-      response.headers.get("conversation-id") ||
-      response.headers.get("x-conversation-id");
     await updateCall(env, id, {
       status: "in_progress",
-      conversation_id: conversationId,
+      conversation_id: connected.conversationId,
     });
-    return new Response(text, { status: 200, headers: { "content-type": "text/xml; charset=utf-8" } });
+    return new Response(connected.twiml, { status: 200, headers: { "content-type": "text/xml; charset=utf-8" } });
   } catch (err) {
     const reason = safeError(err instanceof Error ? err.message : "ElevenLabs could not be reached.");
     await updateCall(env, id, { status: "failed", error: reason });
@@ -1004,8 +984,342 @@ function xml(body: string, status: number): Response {
   return new Response(body, { status, headers: { "content-type": "text/xml; charset=utf-8" } });
 }
 
+export interface ElevenCallInput {
+  id: string;
+  from: string;
+  to: string;
+  direction: "inbound" | "outbound";
+  first: string;
+  prompt: string;
+  contact: string;
+  brief: string;
+}
+
+export interface ElevenCallResult {
+  twiml: string | null;
+  conversationId: string | null;
+  error: string;
+  reason: string;
+}
+
+const REGISTER_CALL_URL = "https://api.elevenlabs.io/v1/convai/twilio/register-call";
+
+let preparedAgentId = "";
+let prepareBlockedAgentId = "";
+
+/** Tests reset the per-isolate agent cache. */
+export function clearElevenLabsTelephonyCache(): void {
+  preparedAgentId = "";
+  prepareBlockedAgentId = "";
+}
+
+/**
+ * Register a Twilio call with ElevenLabs and return the TwiML Twilio should speak.
+ * register-call is the bring-your-own-Twilio path. Its TwiML contains the authenticated
+ * Media Stream URL. A conversational signed URL is a different websocket and is not used here.
+ * For inbound, from is the caller and to is the Twilio number.
+ */
+export async function registerElevenLabsCall(env: Env, input: ElevenCallInput): Promise<ElevenCallResult> {
+  const agentId = (env.ELEVENLABS_AGENT_ID ?? "").trim();
+  const apiKey = (env.ELEVENLABS_API_KEY ?? "").trim();
+  const meta = {
+    call: input.id,
+    direction: input.direction,
+    hasKey: Boolean(apiKey),
+    hasAgent: Boolean(agentId),
+    agentPrefix: agentId.startsWith("agent_"),
+  };
+  if (!apiKey || !agentId) {
+    console.error("elevenlabs hand-off failed", JSON.stringify({ ...meta, reason: "missing_secret", prepare: "skipped" }));
+    return { twiml: null, conversationId: null, error: "missing_secret", reason: "missing_secret" };
+  }
+  if (!input.from || !input.to) {
+    console.error("elevenlabs hand-off failed", JSON.stringify({ ...meta, reason: "missing_number", prepare: "skipped" }));
+    return { twiml: null, conversationId: null, error: "missing_number", reason: "missing_number" };
+  }
+  const prepare = await prepareTelephonyAgent(apiKey, agentId);
+  let withOverrides = await postRegister(apiKey, agentId, input, true, 5_000);
+  if (!withOverrides.twiml && withOverrides.reason === "audio_format" && prepare === "patched") {
+    withOverrides = await postRegister(apiKey, agentId, input, true, 4_000);
+  }
+  if (withOverrides.twiml) {
+    console.log("elevenlabs connected", JSON.stringify({ call: input.id, direction: input.direction, overrides: true, prepare }));
+    return withOverrides;
+  }
+  if (withOverrides.reason === "override_not_allowed") {
+    const bare = await postRegister(apiKey, agentId, input, false, 3_000);
+    if (bare.twiml) {
+      console.error(
+        "elevenlabs connected without screening overrides",
+        JSON.stringify({ ...meta, reason: withOverrides.reason, prepare }),
+      );
+      return bare;
+    }
+    console.error(
+      "elevenlabs hand-off failed",
+      JSON.stringify({ ...meta, reason: bare.reason, prepare, detail: clip(bare.error, 180) }),
+    );
+    return bare;
+  }
+  console.error(
+    "elevenlabs hand-off failed",
+    JSON.stringify({ ...meta, reason: withOverrides.reason, prepare, detail: clip(withOverrides.error, 180) }),
+  );
+  return withOverrides;
+}
+
+async function postRegister(
+  apiKey: string,
+  agentId: string,
+  input: ElevenCallInput,
+  overrides: boolean,
+  timeoutMs: number,
+): Promise<ElevenCallResult> {
+  try {
+    const response = await fetch(REGISTER_CALL_URL, {
+      method: "POST",
+      redirect: "error",
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: {
+        "xi-api-key": apiKey,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(registerPayload(agentId, input, overrides)),
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      const detail = elevenDetail(text);
+      const reason = classifyEleven(response.status, detail);
+      return { twiml: null, conversationId: null, error: `${reason}: ${safeError(detail)}`, reason };
+    }
+    const twiml = unwrapTwiml(text);
+    if (!twiml) {
+      return { twiml: null, conversationId: null, error: "non_twiml", reason: "non_twiml" };
+    }
+    return {
+      twiml,
+      conversationId:
+        conversationIdFromTwiml(twiml) || response.headers.get("conversation-id") || response.headers.get("x-conversation-id"),
+      error: "",
+      reason: "",
+    };
+  } catch (err) {
+    const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+    const reason = timedOut ? "timeout" : "network";
+    return { twiml: null, conversationId: null, error: reason, reason };
+  }
+}
+
+function registerPayload(agentId: string, input: ElevenCallInput, overrides: boolean): Record<string, unknown> {
+  const initiation: Record<string, unknown> = {
+    user_id: input.id,
+    dynamic_variables: {
+      contact_name: input.contact,
+      brief: input.brief,
+      opening_line: input.first,
+    },
+  };
+  if (overrides) {
+    initiation.conversation_config_override = {
+      agent: {
+        first_message: input.first,
+        language: "en",
+        prompt: { prompt: input.prompt },
+      },
+      tts: { voice_id: JARVIS_VOICE_ID },
+    };
+  }
+  return {
+    agent_id: agentId,
+    from_number: input.from,
+    to_number: input.to,
+    direction: input.direction,
+    conversation_initiation_client_data: initiation,
+  };
+}
+
+/**
+ * Turn on μ-law 8000 Hz, the app voice, and the security switches register-call needs.
+ * The agent's prompt text is not sent. A failed update is logged and the call still tries.
+ */
+async function prepareTelephonyAgent(apiKey: string, agentId: string): Promise<string> {
+  if (preparedAgentId === agentId) return "cached";
+  if (prepareBlockedAgentId === agentId) return "blocked";
+  const url = `https://api.elevenlabs.io/v1/convai/agents/${encodeURIComponent(agentId)}`;
+  let current: unknown = null;
+  try {
+    const got = await fetch(url, {
+      method: "GET",
+      redirect: "error",
+      signal: AbortSignal.timeout(2_500),
+      headers: { "xi-api-key": apiKey },
+    });
+    if (!got.ok) {
+      if (got.status === 401 || got.status === 403 || got.status === 404) prepareBlockedAgentId = agentId;
+      return `get_${got.status}`;
+    }
+    current = (await got.json()) as unknown;
+  } catch {
+    return "get_failed";
+  }
+  if (agentTelephonyReady(current)) {
+    preparedAgentId = agentId;
+    return "ready";
+  }
+  try {
+    const full = telephonyPatch(current);
+    let patched = await patchAgent(url, apiKey, full);
+    const platform = isRecord(full.platform_settings) ? full.platform_settings : null;
+    if (!patched.ok && platform && "workspace_overrides" in platform) {
+      const slim = telephonyPatch(null);
+      patched = await patchAgent(url, apiKey, slim);
+    }
+    if (!patched.ok) {
+      if (patched.status === 401 || patched.status === 403) prepareBlockedAgentId = agentId;
+      return `patch_${patched.status}:${classifyEleven(patched.status, patched.detail)}`;
+    }
+    preparedAgentId = agentId;
+    return "patched";
+  } catch {
+    return "patch_failed";
+  }
+}
+
+async function patchAgent(
+  url: string,
+  apiKey: string,
+  body: Record<string, unknown>,
+): Promise<{ ok: boolean; status: number; detail: string }> {
+  const response = await fetch(url, {
+    method: "PATCH",
+    redirect: "error",
+    signal: AbortSignal.timeout(2_500),
+    headers: { "xi-api-key": apiKey, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (response.ok) return { ok: true, status: response.status, detail: "" };
+  return { ok: false, status: response.status, detail: elevenDetail(await response.text()) };
+}
+
+function agentTelephonyReady(payload: unknown): boolean {
+  if (!isRecord(payload)) return false;
+  const config = isRecord(payload.conversation_config) ? payload.conversation_config : null;
+  const asr = config && isRecord(config.asr) ? config.asr : null;
+  const tts = config && isRecord(config.tts) ? config.tts : null;
+  const platform = isRecord(payload.platform_settings) ? payload.platform_settings : null;
+  const overrides = platform && isRecord(platform.overrides) ? platform.overrides : null;
+  const conv = overrides && isRecord(overrides.conversation_config_override) ? overrides.conversation_config_override : null;
+  const agent = conv && isRecord(conv.agent) ? conv.agent : null;
+  const prompt = agent && isRecord(agent.prompt) ? agent.prompt : null;
+  const ttsOverride = conv && isRecord(conv.tts) ? conv.tts : null;
+  return (
+    asr?.user_input_audio_format === "ulaw_8000" &&
+    tts?.agent_output_audio_format === "ulaw_8000" &&
+    tts?.voice_id === JARVIS_VOICE_ID &&
+    agent?.first_message === true &&
+    agent?.language === true &&
+    prompt?.prompt === true &&
+    ttsOverride?.voice_id === true
+  );
+}
+
+function telephonyPatch(current: unknown): Record<string, unknown> {
+  const platform: Record<string, unknown> = {
+    overrides: {
+      conversation_config_override: {
+        agent: {
+          first_message: true,
+          language: true,
+          prompt: { prompt: true },
+        },
+        tts: { voice_id: true },
+      },
+    },
+  };
+  const existing = isRecord(current) && isRecord(current.platform_settings) ? current.platform_settings : null;
+  if (existing && isRecord(existing.workspace_overrides)) platform.workspace_overrides = existing.workspace_overrides;
+  return {
+    conversation_config: {
+      asr: { user_input_audio_format: "ulaw_8000" },
+      tts: { agent_output_audio_format: "ulaw_8000", voice_id: JARVIS_VOICE_ID },
+    },
+    platform_settings: platform,
+  };
+}
+
+function unwrapTwiml(text: string, depth = 0): string | null {
+  const trimmed = text.replace(/^\uFEFF/, "").trim();
+  if (trimmed.startsWith("<") && isTwiml(trimmed)) return trimmed;
+  if (depth >= 2 || (!trimmed.startsWith("{") && !trimmed.startsWith('"') && !trimmed.startsWith("["))) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (typeof parsed === "string") return unwrapTwiml(parsed, depth + 1);
+    if (isRecord(parsed)) {
+      for (const key of ["twiml", "xml", "content"]) {
+        const value = parsed[key];
+        if (typeof value === "string") {
+          const inner = unwrapTwiml(value, depth + 1);
+          if (inner) return inner;
+        }
+      }
+    }
+  } catch {
+    // The body was not JSON.
+  }
+  return null;
+}
+
+function isTwiml(value: string): boolean {
+  return /<response[\s>]/i.test(value);
+}
+
+function elevenDetail(text: string): string {
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (typeof parsed === "string") return parsed;
+    if (isRecord(parsed)) {
+      if (typeof parsed.detail === "string") return parsed.detail;
+      if (Array.isArray(parsed.detail)) {
+        const messages = parsed.detail.flatMap((item) => {
+          if (!isRecord(item) || typeof item.msg !== "string") return [];
+          const loc = Array.isArray(item.loc) ? item.loc.filter((part) => typeof part === "string").join(".") : "";
+          return [loc ? `${loc}: ${item.msg}` : item.msg];
+        });
+        if (messages.length > 0) return messages.join("; ");
+      }
+      if (isRecord(parsed.detail) && typeof parsed.detail.message === "string") return parsed.detail.message;
+      if (typeof parsed.message === "string") return parsed.message;
+    }
+  } catch {
+    // The body was not JSON.
+  }
+  return text;
+}
+
+function classifyEleven(status: number, detail: string): string {
+  const lower = detail.toLowerCase();
+  if (
+    lower.includes("ulaw") ||
+    lower.includes("audio format") ||
+    lower.includes("audio_format") ||
+    (lower.includes("pcm_16000") && lower.includes("twilio"))
+  ) {
+    return "audio_format";
+  }
+  if (
+    lower.includes("override") ||
+    (lower.includes("first_message") && (lower.includes("allow") || lower.includes("enable") || lower.includes("denied")))
+  ) {
+    return "override_not_allowed";
+  }
+  if (status === 401 || status === 403) return "unauthorized";
+  if (status === 404) return "agent_not_found";
+  if (status === 400 || status === 422) return "validation";
+  return `http_${status}`;
+}
+
 function sayAndHangup(line: string): string {
-  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-GB">${escapeXml(line)}</Say><Hangup/></Response>`;
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-GB" voice="${FALLBACK_SAY_VOICE}">${escapeXml(line)}</Say><Hangup/></Response>`;
 }
 
 function escapeXml(value: string): string {

@@ -1,5 +1,5 @@
 import { dbAll, dbFirst, dbRun, getState, setState } from "./db";
-import { conversationIdFromTwiml, safeError, toE164, twilioRequestSigned, type CallLine } from "./calls";
+import { FALLBACK_SAY_VOICE, registerElevenLabsCall, safeError, toE164, twilioRequestSigned, type CallLine } from "./calls";
 import { apiError, isRecord, json, newId, nowIso } from "./http";
 import { pushNotice } from "./screening";
 import type { Env } from "./types";
@@ -206,12 +206,18 @@ export async function handleOwnerWebhook(request: Request, env: Env, path: strin
   const origin = new URL(request.url).origin;
   if (!leaf) {
     return xml(
-      `<Response><Gather input="dtmf speech" numDigits="1" timeout="4" speechTimeout="auto" action="${escapeXml(`${origin}/calls/owner/${id}/key`)}" method="POST"><Say language="en-GB">This is JARVIS. Press 1 for the details, or say details. Or stay on the line.</Say></Gather><Redirect method="POST">${escapeXml(`${origin}/calls/owner/${id}/speak`)}</Redirect></Response>`,
+      `<Response><Gather input="dtmf speech" numDigits="1" timeout="4" speechTimeout="auto" action="${escapeXml(`${origin}/calls/owner/${id}/key`)}" method="POST"><Say language="en-GB" voice="${FALLBACK_SAY_VOICE}">This is JARVIS. Press 1 for the details, or say details. Or stay on the line.</Say></Gather><Redirect method="POST">${escapeXml(`${origin}/calls/owner/${id}/speak`)}</Redirect></Response>`,
       200,
     );
   }
   const detail = leaf === "key" && (params.Digits === "1" || /detail/i.test(params.SpeechResult ?? ""));
-  return speakAlert(env, alert, id, detail);
+  const from = params.From || toE164(env.TWILIO_FROM_NUMBER ?? "") || "";
+  let to = params.To || "";
+  if (!to && alert.call_id) {
+    const row = await dbFirst<{ to_number: string }>(env, "SELECT to_number FROM outbound_calls WHERE id = ?", [alert.call_id]);
+    to = row?.to_number || "";
+  }
+  return speakAlert(env, alert, id, detail, { from, to });
 }
 
 export async function routeOwnerApi(request: Request, env: Env, path: string): Promise<Response | null> {
@@ -337,8 +343,8 @@ async function speakAlert(
   alert: { summary: string; detail: string; call_id: string | null },
   alertId: string,
   detailFirst: boolean,
+  numbers: { from: string; to: string },
 ): Promise<Response> {
-  const from = toE164(env.TWILIO_FROM_NUMBER ?? "") ?? "";
   const first = detailFirst
     ? `Here is the detail. ${clip(alert.detail, 400)} Tell me what you would like me to do.`
     : ownerSummaryLine(clip(alert.summary, 240));
@@ -350,43 +356,25 @@ async function speakAlert(
     "If he tells you what to do, repeat it in one sentence, say you have noted it, and end the call.",
     "Do not talk about anything else. British English.",
   ].join("\n");
-  try {
-    const response = await fetch("https://api.elevenlabs.io/v1/convai/twilio/register-call", {
-      method: "POST",
-      redirect: "error",
-      signal: AbortSignal.timeout(20_000),
-      headers: {
-        "xi-api-key": (env.ELEVENLABS_API_KEY ?? "").trim(),
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        agent_id: (env.ELEVENLABS_AGENT_ID ?? "").trim(),
-        from_number: from,
-        to_number: from,
-        direction: "outbound",
-        conversation_initiation_client_data: {
-          user_id: alert.call_id || alertId,
-          dynamic_variables: { opening_line: first },
-          conversation_config_override: {
-            agent: { first_message: first, language: "en", prompt: { prompt } },
-          },
-        },
-      }),
-    });
-    const text = await response.text();
-    if (!response.ok) return xml(say("Hello, this is JARVIS. I could not finish this call. Goodbye."), 502);
-    const conversationId = conversationIdFromTwiml(text);
-    if (conversationId && alert.call_id) {
-      await dbRun(env, "UPDATE outbound_calls SET conversation_id = ?, status = 'in_progress', updated_at = ? WHERE id = ?", [
-        conversationId,
-        nowIso(),
-        alert.call_id,
-      ]).catch(() => undefined);
-    }
-    return new Response(text, { status: 200, headers: { "content-type": "text/xml; charset=utf-8" } });
-  } catch {
-    return xml(say("Hello, this is JARVIS. I could not finish this call. Goodbye."), 502);
+  const connected = await registerElevenLabsCall(env, {
+    id: alert.call_id || alertId,
+    from: numbers.from,
+    to: numbers.to,
+    direction: "outbound",
+    first,
+    prompt,
+    contact: "Master Hadi",
+    brief: clip(alert.summary, 240),
+  });
+  if (!connected.twiml) return xml(say("Hello, this is JARVIS. I could not finish this call. Goodbye."), 200);
+  if (connected.conversationId && alert.call_id) {
+    await dbRun(env, "UPDATE outbound_calls SET conversation_id = ?, status = 'in_progress', updated_at = ? WHERE id = ?", [
+      connected.conversationId,
+      nowIso(),
+      alert.call_id,
+    ]).catch(() => undefined);
   }
+  return new Response(connected.twiml, { status: 200, headers: { "content-type": "text/xml; charset=utf-8" } });
 }
 
 async function checkBalance(env: Env): Promise<void> {
@@ -439,7 +427,7 @@ async function formParams(request: Request): Promise<Record<string, string>> {
 }
 
 function say(line: string): string {
-  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-GB">${escapeXml(line)}</Say><Hangup/></Response>`;
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-GB" voice="${FALLBACK_SAY_VOICE}">${escapeXml(line)}</Say><Hangup/></Response>`;
 }
 
 function xml(body: string, status: number): Response {

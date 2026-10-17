@@ -191,13 +191,19 @@ If the other person asks something outside the brief, JARVIS says "One moment pl
 
 JARVIS can also ring `OWNER_PHONE` when a task fails, a call does not connect, or the Twilio balance is low. A number saved from Calling settings on the iPhone is used instead when one is set. That call uses the ElevenLabs voice, with a short summary and a way to press 1 or say "details". Quiet hours and a daily cap (three by default) keep it inside the balance. Outside those limits he sends a push notification instead.
 
-On the ElevenLabs agent:
+On the ElevenLabs agent, telephony needs μ-law 8000 Hz in both directions. Otherwise `register-call` rejects the hand-off and the caller hears the British Polly fallback instead of JARVIS. The first call asks ElevenLabs to set that audio format, to set the voice to George (`JBFqnCBsd6RMkjVDRZzb`, the same voice as the iPhone), and to allow per-call overrides of the first message, system prompt, language, and voice. The API key has to be allowed to edit the agent. The worker does not replace the agent's prompt text.
 
-- Set the voice input and output format to μ-law 8000 Hz.
-- In Security, allow overriding the first message and the system prompt. The worker sends both on each call. You can also set the agent's first message to `{{opening_line}}` and mention `{{contact_name}}` and `{{brief}}` in its prompt.
-- Optional post-call webhook: `https://<your-worker>/calls/elevenlabs`.
+If that update is refused, set the same four things yourself:
 
-The number is not purchased yet, and this worker is not deployed yet. Nothing in the app can dial until the secrets above exist and the worker is deployed. Apply `schema.sql` so the call tables exist before the first real call.
+- Voice: output format μ-law 8000 Hz, and the voice George.
+- Advanced: input format μ-law 8000 Hz.
+- Security: allow overriding the first message, the system prompt, the language, and the voice.
+
+You can also set the agent's first message to `{{opening_line}}` and mention `{{contact_name}}` and `{{brief}}` in its prompt. Inbound calls still send those variables when overrides are off.
+
+Leave the Twilio number's voice webhook on this worker. Importing the number into the ElevenLabs dashboard replaces that webhook. Optional post-call webhook: `https://<your-worker>/calls/elevenlabs`.
+
+Apply `schema.sql` so the call tables exist before the first real call.
 
 ## Inbound screening
 

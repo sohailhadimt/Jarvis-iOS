@@ -1,10 +1,11 @@
 import { dbAll, dbFirst, dbRun } from "./db";
 import {
+  FALLBACK_SAY_VOICE,
   INBOUND_GREETING,
   approvedScreening,
   callingSecrets,
-  conversationIdFromTwiml,
   guessCaller,
+  registerElevenLabsCall,
   safeError,
   screeningScript,
   smsAction,
@@ -69,6 +70,7 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
   }
   const caller = toE164(params.From ?? "");
   const ours = toE164(env.TWILIO_FROM_NUMBER ?? "");
+  const dialed = toE164(params.To ?? "") ?? ours;
   if (!caller || (ours && caller === ours)) return xml("<Response><Hangup/></Response>", 200);
   const permission = await matchPermission(env, caller);
   const id = newId("call");
@@ -94,18 +96,17 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
   }
   ctx.waitUntil(notify(env, id, caller, "", ""));
   ctx.waitUntil(learnCaller(env, id, new URL(request.url).origin));
-  const connected = await registerAgent(env, {
+  const connected = await registerElevenLabsCall(env, {
     id,
-    from: ours ?? caller,
-    to: caller,
+    from: caller,
+    to: dialed || caller,
     direction: "inbound",
     first: INBOUND_GREETING,
     prompt: permission.allow ? approvedScreening(permission.note) : screeningScript(),
     contact: "Caller",
     brief: "Find out who is calling and why. Do not reveal personal information.",
   });
-  if (!connected.twiml || !connected.twiml.includes("<Response")) {
-    console.error("inbound elevenlabs failed", connected.error || "response was not TwiML");
+  if (!connected.twiml) {
     await dbRun(env, "UPDATE outbound_calls SET status = 'message', error = ?, updated_at = ? WHERE id = ?", [
       connected.error || "ElevenLabs did not return TwiML.",
       nowIso(),
@@ -224,7 +225,7 @@ async function applyDecision(
     return { ok: true, audio: "none" };
   }
   if (action === "connect") {
-    const twiml = `<Response><Say language="en-GB">I'll put you through to Master Hadi.</Say><Dial callerId="${escapeXml(from ?? "")}"><Number>${escapeXml(mobile ?? "")}</Number></Dial></Response>`;
+    const twiml = `<Response><Say language="en-GB" voice="${FALLBACK_SAY_VOICE}">I'll put you through to Master Hadi.</Say><Dial callerId="${escapeXml(from ?? "")}"><Number>${escapeXml(mobile ?? "")}</Number></Dial></Response>`;
     const updated = await updateTwiml(env, call.twilio_sid, twiml);
     if (!updated.ok) return { ok: false, response: apiError(502, "twilio", updated.error) };
     await mark(env, id, "connecting", "connect");
@@ -237,7 +238,7 @@ async function applyDecision(
     const moved = await updateTwiml(
       env,
       call.twilio_sid,
-      `<Response><Say language="en-GB">Connecting you to Master Hadi.</Say>${joinTwiml(room, false)}</Response>`,
+      `<Response><Say language="en-GB" voice="${FALLBACK_SAY_VOICE}">Connecting you to Master Hadi.</Say>${joinTwiml(room, false)}</Response>`,
     );
     if (!moved.ok) return { ok: false, response: apiError(502, "twilio", moved.error) };
     await mark(env, id, "connecting", "takeover");
@@ -557,45 +558,6 @@ async function twilioPost(account: string, token: string, path: string, form: UR
   }
 }
 
-async function registerAgent(
-  env: Env,
-  input: { id: string; from: string; to: string; direction: string; first: string; prompt: string; contact: string; brief: string },
-): Promise<{ twiml: string | null; conversationId: string | null; error: string }> {
-  try {
-    const response = await fetch("https://api.elevenlabs.io/v1/convai/twilio/register-call", {
-      method: "POST",
-      redirect: "error",
-      signal: AbortSignal.timeout(8_000),
-      headers: {
-        "xi-api-key": (env.ELEVENLABS_API_KEY ?? "").trim(),
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        agent_id: (env.ELEVENLABS_AGENT_ID ?? "").trim(),
-        from_number: input.from,
-        to_number: input.to,
-        direction: input.direction,
-        conversation_initiation_client_data: {
-          user_id: input.id,
-          dynamic_variables: { contact_name: input.contact, brief: input.brief, opening_line: input.first },
-          conversation_config_override: {
-            agent: { first_message: input.first, language: "en", prompt: { prompt: input.prompt } },
-          },
-        },
-      }),
-    });
-    const text = await response.text();
-    if (!response.ok) return { twiml: null, conversationId: null, error: safeError(text || "ElevenLabs could not start the call.") };
-    return {
-      twiml: text,
-      conversationId: conversationIdFromTwiml(text) || response.headers.get("conversation-id"),
-      error: "",
-    };
-  } catch (err) {
-    return { twiml: null, conversationId: null, error: safeError(err instanceof Error ? err.message : "ElevenLabs could not be reached.") };
-  }
-}
-
 async function mark(env: Env, id: string, status: string, decision: string): Promise<void> {
   await dbRun(env, "UPDATE outbound_calls SET status = ?, updated_at = ? WHERE id = ?", [status, nowIso(), id]);
   await dbRun(env, "UPDATE call_screen SET decision = ? WHERE call_id = ?", [decision, id]).catch(() => undefined);
@@ -666,11 +628,11 @@ function twilioMessage(text: string): string {
 }
 
 function say(line: string): string {
-  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-GB">${escapeXml(line)}</Say><Hangup/></Response>`;
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-GB" voice="${FALLBACK_SAY_VOICE}">${escapeXml(line)}</Say><Hangup/></Response>`;
 }
 
 function takeMessage(line: string): string {
-  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-GB">${escapeXml(line)}</Say><Record maxLength="120" playBeep="true"/><Hangup/></Response>`;
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-GB" voice="${FALLBACK_SAY_VOICE}">${escapeXml(line)}</Say><Record maxLength="120" playBeep="true"/><Hangup/></Response>`;
 }
 
 function xml(body: string, status: number): Response {

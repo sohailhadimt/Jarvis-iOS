@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { route } from "../src/routes";
 import {
+  FALLBACK_SAY_VOICE,
   INBOUND_GREETING,
+  JARVIS_VOICE_ID,
   OUTBOUND_INTRO,
   agentScript,
   approvedScreening,
@@ -14,6 +16,7 @@ import {
   isCallWebhook,
   outboundOpening,
   readConversation,
+  clearElevenLabsTelephonyCache,
   safeError,
   screeningScript,
   smsAction,
@@ -66,6 +69,24 @@ function ctx(): ExecutionContext {
 }
 
 const bearer = { authorization: "Bearer secret-token", "content-type": "application/json" };
+
+function callingEnv(): Env {
+  const env = mockEnv("secret-token");
+  env.TWILIO_ACCOUNT_SID = "ACexampleaccountsid000000000000";
+  env.TWILIO_AUTH_TOKEN = "twilio-auth-token-example";
+  env.TWILIO_FROM_NUMBER = "+447700900000";
+  env.ELEVENLABS_API_KEY = "elevenlabs-key-example-value";
+  env.ELEVENLABS_AGENT_ID = "agent_example";
+  return env;
+}
+
+function inboundRequest(params: Record<string, string>, signature: string): Request {
+  return new Request("http://internal.local/calls/inbound", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", "X-Twilio-Signature": signature },
+    body: new URLSearchParams(params).toString(),
+  });
+}
 
 describe("calling setup", () => {
   it("treats blank secrets as missing and does not dial", async () => {
@@ -263,6 +284,7 @@ describe("Twilio webhooks", () => {
       expect(response.status).toBe(403);
       const xml = await response.text();
       expect(xml).toContain("JARVIS");
+      expect(xml).toContain(FALLBACK_SAY_VOICE);
       expect(xml).not.toContain("elevenlabs-key-example-value");
       expect(calls).toEqual([]);
     } finally {
@@ -296,6 +318,7 @@ describe("Twilio webhooks", () => {
       expect(response.status).toBe(403);
       const xml = await response.text();
       expect(xml).toContain("JARVIS");
+      expect(xml).toContain(FALLBACK_SAY_VOICE);
       expect(xml).not.toContain("twilio-auth-token-example");
       expect(calls).toEqual([]);
     } finally {
@@ -365,6 +388,7 @@ describe("Twilio webhooks", () => {
   });
 
   it("accepts the public inbound URL and takes a message when ElevenLabs fails", async () => {
+    clearElevenLabsTelephonyCache();
     const env = mockEnv("secret-token");
     env.TWILIO_ACCOUNT_SID = "ACexampleaccountsid000000000000";
     env.TWILIO_AUTH_TOKEN = "twilio-auth-token-example";
@@ -389,10 +413,118 @@ describe("Twilio webhooks", () => {
       expect(response.status).toBe(200);
       const xml = await response.text();
       expect(xml).toContain("<Response>");
-      expect(xml).toContain("<Say");
+      expect(xml).toContain(`voice="${FALLBACK_SAY_VOICE}"`);
       expect(xml).toContain("<Record");
       expect(xml).not.toContain("twilio-auth-token-example");
       expect(xml).not.toContain("elevenlabs-key-example-value");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("hands an inbound call to ElevenLabs with the caller as from and the app voice", async () => {
+    clearElevenLabsTelephonyCache();
+    const env = callingEnv();
+    const params = { CallSid: "CA123", From: "+447700900123", To: "+447700900000" };
+    const signed = "https://jarvis-backend.jarvis-hadi.workers.dev/calls/inbound";
+    const signature = await twilioSignature(signed, params, "twilio-auth-token-example");
+    const seen: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
+    const twiml =
+      '<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="wss://example.test/media"><Parameter name="conversation_id" value="conv_test123"/></Stream></Connect></Response>';
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const method = init?.method ?? "GET";
+      const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
+      seen.push({ url, method, body });
+      if (url.includes("/convai/agents/")) {
+        if (method === "PATCH") return new Response("{}", { status: 200 });
+        return new Response(
+          JSON.stringify({
+            conversation_config: {
+              asr: { user_input_audio_format: "pcm_16000" },
+              tts: { agent_output_audio_format: "pcm_16000", voice_id: "other-voice" },
+            },
+            platform_settings: { overrides: { conversation_config_override: { agent: { first_message: false } } } },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("register-call")) {
+        return new Response(JSON.stringify(twiml), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const response = await route(inboundRequest(params, signature), env, ctx());
+      expect(response.status).toBe(200);
+      const xml = await response.text();
+      expect(xml).toBe(twiml);
+      expect(xml).toContain("conv_test123");
+      expect(xml).not.toContain("elevenlabs-key-example-value");
+      const patch = seen.find((call) => call.url.includes("/convai/agents/") && call.method === "PATCH");
+      expect(patch?.body).toMatchObject({
+        conversation_config: {
+          asr: { user_input_audio_format: "ulaw_8000" },
+          tts: { agent_output_audio_format: "ulaw_8000", voice_id: JARVIS_VOICE_ID },
+        },
+      });
+      const registrations = seen.filter((call) => call.url.includes("register-call"));
+      expect(registrations).toHaveLength(1);
+      const registered = registrations[0];
+      expect(registered?.body).toMatchObject({
+        from_number: "+447700900123",
+        to_number: "+447700900000",
+        direction: "inbound",
+      });
+      const initiation = registered?.body?.conversation_initiation_client_data as {
+        conversation_config_override: { agent: { first_message: string }; tts: { voice_id: string } };
+      };
+      expect(initiation.conversation_config_override.agent.first_message).toBe(INBOUND_GREETING);
+      expect(initiation.conversation_config_override.tts.voice_id).toBe(JARVIS_VOICE_ID);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("retries an inbound call without overrides when the agent refuses them", async () => {
+    clearElevenLabsTelephonyCache();
+    const env = callingEnv();
+    const params = { CallSid: "CA123", From: "+447700900123", To: "+447700900000" };
+    const signed = "https://jarvis-backend.jarvis-hadi.workers.dev/calls/inbound";
+    const signature = await twilioSignature(signed, params, "twilio-auth-token-example");
+    const bodies: Array<Record<string, unknown> | null> = [];
+    const twiml = "<Response><Connect><Stream url=\"wss://example.test/media\"></Stream></Connect></Response>";
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes("/convai/agents/")) return new Response("no", { status: 403 });
+      if (url.includes("register-call")) {
+        const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
+        bodies.push(body);
+        if (bodies.length === 1) {
+          return new Response(JSON.stringify({ detail: "Override for first_message is not allowed by config." }), { status: 400 });
+        }
+        return new Response(twiml, { status: 200, headers: { "content-type": "text/xml" } });
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const response = await route(inboundRequest(params, signature), env, ctx());
+      expect(response.status).toBe(200);
+      const xml = await response.text();
+      expect(xml).toBe(twiml);
+      expect(xml).not.toContain("<Record");
+      expect(bodies).toHaveLength(2);
+      const first = bodies[0]?.conversation_initiation_client_data as { conversation_config_override?: unknown };
+      const second = bodies[1]?.conversation_initiation_client_data as {
+        conversation_config_override?: unknown;
+        dynamic_variables: { opening_line: string };
+      };
+      expect(first.conversation_config_override).toBeTruthy();
+      expect(second.conversation_config_override).toBeUndefined();
+      expect(second.dynamic_variables.opening_line).toBe(INBOUND_GREETING);
+      expect(JSON.stringify(bodies)).not.toContain("elevenlabs-key-example-value");
     } finally {
       globalThis.fetch = original;
     }
