@@ -65,6 +65,18 @@ export interface Env {
   ELEVENLABS_API_KEY?: string;
   ELEVENLABS_AGENT_ID?: string;
   ELEVENLABS_WEBHOOK_SECRET?: string;
+  /** Real mobile for Dial transfer, conference take-over, and SMS fallback. */
+  SOHAIL_MOBILE_NUMBER?: string;
+  APNS_KEY_ID?: string;
+  APNS_TEAM_ID?: string;
+  APNS_PRIVATE_KEY?: string;
+  APNS_BUNDLE_ID?: string;
+  /** sandbox or production. Production matches TestFlight. */
+  APNS_ENVIRONMENT?: string;
+  /** Optional. In-app VoIP audio is not linked until these and the Voice SDK exist. */
+  TWILIO_API_KEY_SID?: string;
+  TWILIO_API_KEY_SECRET?: string;
+  TWILIO_VOICE_APP_SID?: string;
 }
 
 export interface PlanSubtask {

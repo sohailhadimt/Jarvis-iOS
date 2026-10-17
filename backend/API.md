@@ -585,6 +585,8 @@ The call record has `id`, `contact_name`, `to`, `brief`, `status` (`placing`, `r
 
 `GET /calls/:id` refreshes the transcript from ElevenLabs when a conversation id is known. `GET /calls` lists the latest 50.
 
-Twilio's voice webhook is `POST /calls/voice/:id`. The status webhook is `POST /calls/twilio-status/:id`. Both require a valid `X-Twilio-Signature` and do not use the app bearer token. The voice webhook registers the call with ElevenLabs Conversational AI and returns that TwiML. The agent's first words are exactly: "Hello, this is Sohail's AI assistant. I'm calling on his behalf."
+Twilio's voice webhook is `POST /calls/voice/:id`. The status webhook is `POST /calls/twilio-status/:id`. Both require a valid `X-Twilio-Signature` and do not use the app bearer token. The voice webhook registers the call with ElevenLabs Conversational AI and returns that TwiML. An outbound call's first words are: "Hello, this is JARVIS, Master Hadi's personal assistant. Master Hadi asked me to tell you" followed by the brief.
+
+`POST /calls/inbound` is the Twilio voice webhook for forwarded calls. `POST /calls/sms` reads CONNECT, HANDLE, MESSAGE, DECLINE, ALLOW, or DENY. `GET /calls/active`, `POST /calls/:id/screen`, `POST /calls/:id/personal`, `POST /calls/device`, and `POST /calls/permissions` use the app bearer token. Personal details are denied unless a saved permission or a live approval allows them. `SOHAIL_MOBILE_NUMBER` is the real mobile for `<Dial>` and the SMS fallback. APNs secrets are `APNS_KEY_ID`, `APNS_TEAM_ID`, and `APNS_PRIVATE_KEY`. None of these values are returned to the app except the Twilio number, which Settings needs for the forwarding codes.
 
 `POST /calls/elevenlabs` is the optional post-call webhook. It updates a call only when `user_id` or `conversation_id` matches a row this worker created. Set `ELEVENLABS_WEBHOOK_SECRET` to require the `ElevenLabs-Signature` header (`t=<unix>,v0=<hex hmac>` of `timestamp.body`).

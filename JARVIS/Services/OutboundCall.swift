@@ -262,6 +262,12 @@ struct StoredCall: Codable, Equatable, Identifiable {
     var spoken: Bool
     var createdAt: Date
     var updatedAt: Date
+    var direction: String? = nil
+    var callerName: String? = nil
+    var reason: String? = nil
+    var personalAllowed: Bool? = nil
+    var personalRequested: Bool? = nil
+    var decision: String? = nil
 
     var titleStatus: String {
         switch status {
@@ -273,8 +279,22 @@ struct StoredCall: Codable, Equatable, Identifiable {
         case "completed": "Completed"
         case "failed": "Failed"
         case "cancelled": "Cancelled"
+        case "screening": "Screening"
+        case "listening": "Listening"
+        case "handling": "JARVIS handling"
+        case "message": "Taking a message"
+        case "connecting": "Connecting you"
+        case "declined": "Declined"
         default: status
         }
+    }
+
+    var displayName: String {
+        if direction == "inbound" {
+            if let callerName, !callerName.isEmpty { return callerName }
+            return "Incoming call"
+        }
+        return contactName
     }
 
     static func local(name: String, number: String, brief: String, status: String, detail: String, spoken: Bool) -> StoredCall {
@@ -312,7 +332,13 @@ extension StoredCall {
             detail: record.error ?? "",
             spoken: spoken,
             createdAt: Self.date(record.createdAt),
-            updatedAt: Self.date(record.updatedAt)
+            updatedAt: Self.date(record.updatedAt),
+            direction: record.direction,
+            callerName: record.callerName,
+            reason: record.reason,
+            personalAllowed: record.personalAllowed,
+            personalRequested: record.personalRequested,
+            decision: record.decision
         )
     }
 
@@ -333,6 +359,14 @@ enum CallReport {
         }
         if summary.isEmpty { return "I've finished with \(name), sir. I don't have their words yet." }
         return "Back from \(name), sir. \(clip(summary))"
+    }
+
+    static func inbound(name: String, summary: String, status: String) -> String {
+        if status == "failed" || status == "declined" {
+            return "That call from \(name) has ended, sir."
+        }
+        if summary.isEmpty { return "That call from \(name) has ended, sir. I don't have a message yet." }
+        return "That call from \(name) has ended, sir. \(clip(summary))"
     }
 
     private static func clip(_ text: String) -> String {
@@ -374,7 +408,8 @@ enum CallLogStore {
     }
 
     static func openCalls() -> [StoredCall] {
-        entries().filter { ["placing", "ringing", "in_progress", "wrapping"].contains($0.status) }
+        let live = ["placing", "ringing", "in_progress", "wrapping", "screening", "listening", "handling", "message", "connecting"]
+        return entries().filter { live.contains($0.status) }
     }
 
     private static func save(_ rows: [StoredCall]) {

@@ -35,6 +35,7 @@ struct RootView: View {
             if settings.startWithVoice, !engine.isSessionActive {
                 Task { await engine.startSession(continuous: true) }
             }
+            engine.startScreenWatch()
             if !settings.voiceMatchPrompted && !VoiceProfileStore.hasProfile {
                 offerVoiceMatch = true
             }
@@ -58,6 +59,13 @@ struct RootView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: JarvisStartListening.notification)) { _ in
             startListeningIfRequested()
+        }
+        .safeAreaInset(edge: .bottom) {
+            if engine.inboundCall != nil {
+                ScreeningCard()
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 8)
+            }
         }
         .sheet(item: Binding(get: { engine.messageDraft }, set: { engine.messageDraft = $0 })) { draft in
             MessageComposer(draft: draft) { engine.messageDraft = nil }

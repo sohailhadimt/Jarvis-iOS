@@ -775,11 +775,57 @@ struct CloudClient: Sendable {
         return envelope.call
     }
 
+    func activeInboundCalls() async throws -> [PhoneCallRecord] {
+        let envelope: CallListEnvelope = try await sendNoBody(method: "GET", path: "/calls/active")
+        return envelope.calls
+    }
+
+    func screenCall(id: String, action: String) async -> ScreenResult {
+        await postCallAction(path: "/calls/\(Self.path(id))/screen", body: ["action": action])
+    }
+
+    func setCallPersonal(id: String, allow: Bool, note: String) async -> ScreenResult {
+        await postCallAction(path: "/calls/\(Self.path(id))/personal", body: ["allow": allow, "note": note])
+    }
+
+    func registerCallDevice(token: String) async -> ScreenResult {
+        await postCallAction(path: "/calls/device", body: ["token": token])
+    }
+
+    func replaceCallPermissions(_ rules: [[String: Any]]) async -> ScreenResult {
+        await postCallAction(path: "/calls/permissions", body: ["rules": rules])
+    }
+
+    private func postCallAction(path: String, body: [String: Any]) async -> ScreenResult {
+        let data: Data
+        do {
+            data = try JSONSerialization.data(withJSONObject: body)
+        } catch {
+            return .failed("That request could not be sent.")
+        }
+        do {
+            let (payload, status) = try await raw(method: "POST", path: path, authorize: true, body: data, query: [])
+            if status == 503 {
+                let message = Self.failure(data: payload, status: status).localizedDescription
+                return .notSetUp(message)
+            }
+            guard (200..<300).contains(status) else {
+                return .failed(Self.failure(data: payload, status: status).localizedDescription)
+            }
+            let audio = (try? JSONDecoder().decode(ScreenAck.self, from: payload))?.audio ?? ""
+            return .done(audio)
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+    }
+
     func postGroupLine(author: String, text: String) async throws {
         let _: AckEnvelope = try await sendJSON(method: "POST", path: "/group", body: ["author": author, "text": text])
     }
 
     private struct CallEnvelope: Decodable { var call: PhoneCallRecord }
+    private struct CallListEnvelope: Decodable { var calls: [PhoneCallRecord] }
+    private struct ScreenAck: Decodable { var audio: String? }
     private struct PersonaListEnvelope: Decodable { var agents: [CloudPersona] }
     private struct PersonaEnvelope: Decodable { var agent: CloudPersona }
     private struct PersonaTaskEnvelope: Decodable { var task: CloudPersonaTask }
@@ -827,6 +873,38 @@ struct CallingConfig: Decodable, Sendable {
     var configured: Bool
     var message: String
     var missing: [String]
+    var fromNumber: String?
+    var forwarding: CallingForwarding?
+    var screening: ScreeningFlags?
+
+    enum CodingKeys: String, CodingKey {
+        case configured, message, missing, forwarding, screening
+        case fromNumber = "from_number"
+    }
+}
+
+struct CallingForwarding: Decodable, Sendable {
+    var unconditional: String
+    var noAnswer: String
+    var busy: String
+    var unreachable: String
+    var cancel: String
+
+    enum CodingKeys: String, CodingKey {
+        case unconditional, busy, unreachable, cancel
+        case noAnswer = "no_answer"
+    }
+}
+
+struct ScreeningFlags: Decodable, Sendable {
+    var mobileSet: Bool
+    var push: Bool
+    var voip: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case push, voip
+        case mobileSet = "mobile_set"
+    }
 }
 
 struct PhoneCallLine: Decodable, Sendable {
@@ -845,15 +923,31 @@ struct PhoneCallRecord: Decodable, Sendable {
     var error: String?
     var createdAt: String
     var updatedAt: String
+    var direction: String?
+    var callerName: String?
+    var reason: String?
+    var personalAllowed: Bool?
+    var personalRequested: Bool?
+    var decision: String?
 
-    var isFinished: Bool { status == "completed" || status == "failed" }
+    var isFinished: Bool { status == "completed" || status == "failed" || status == "declined" }
+    var isInbound: Bool { direction == "inbound" }
 
     enum CodingKeys: String, CodingKey {
-        case id, to, brief, status, transcript, summary, error
+        case id, to, brief, status, transcript, summary, error, direction, reason, decision
         case contactName = "contact_name"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case callerName = "caller_name"
+        case personalAllowed = "personal_allowed"
+        case personalRequested = "personal_requested"
     }
+}
+
+enum ScreenResult: Sendable {
+    case done(String)
+    case notSetUp(String)
+    case failed(String)
 }
 
 enum CallPlaceResult: Sendable {

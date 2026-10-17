@@ -45,9 +45,14 @@ struct CallLogView: View {
             } label: {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
-                        Text(row.contactName)
+                        Text(row.displayName)
                             .font(.subheadline.weight(.medium))
                             .foregroundStyle(.white)
+                        if row.direction == "inbound" {
+                            Text("In")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(settings.accentColor)
+                        }
                         Spacer()
                         Text(row.titleStatus)
                             .font(.caption)
@@ -64,9 +69,15 @@ struct CallLogView: View {
                 Text(row.number)
                     .font(.caption.monospaced())
                     .foregroundStyle(.white.opacity(0.7))
-                Text(row.brief)
-                    .font(.footnote)
-                    .foregroundStyle(.white)
+                if let reason = row.reason, !reason.isEmpty {
+                    Text(reason)
+                        .font(.footnote)
+                        .foregroundStyle(.white)
+                } else {
+                    Text(row.brief)
+                        .font(.footnote)
+                        .foregroundStyle(.white)
+                }
                 if !row.summary.isEmpty {
                     Text(row.summary)
                         .font(.body)

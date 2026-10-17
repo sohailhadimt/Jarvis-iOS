@@ -236,3 +236,33 @@ CREATE TABLE IF NOT EXISTS outbound_calls (
 );
 
 CREATE INDEX IF NOT EXISTS idx_outbound_calls_created ON outbound_calls (created_at);
+
+-- Inbound screening. Default is to deny personal details.
+CREATE TABLE IF NOT EXISTS call_screen (
+  call_id TEXT PRIMARY KEY,
+  direction TEXT NOT NULL,
+  caller_phone TEXT,
+  caller_name TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  decision TEXT,
+  personal_allowed INTEGER NOT NULL DEFAULT 0,
+  personal_requested INTEGER NOT NULL DEFAULT 0,
+  personal_note TEXT NOT NULL DEFAULT '',
+  conference_name TEXT,
+  notified_at TEXT,
+  named_notified INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS call_devices (
+  token TEXT PRIMARY KEY,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS call_permissions (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  phone TEXT,
+  allow_personal INTEGER NOT NULL DEFAULT 0,
+  note TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
+);

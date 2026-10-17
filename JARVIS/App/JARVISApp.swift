@@ -1,8 +1,10 @@
 import SwiftData
 import SwiftUI
+import UIKit
 
 @main
 struct JARVISApp: App {
+    @UIApplicationDelegateAdaptor(JarvisPush.self) private var push
     @State private var engine = AssistantEngine.shared
     @State private var settings = AppSettings.shared
 

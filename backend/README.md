@@ -107,6 +107,15 @@ npx wrangler secret put ELEVENLABS_AGENT_ID
 npx wrangler secret put ELEVENLABS_WEBHOOK_SECRET
 ```
 
+Inbound screening, after the number exists. These stay empty until you are ready. The real mobile is where put-through and take-over ring, and where the SMS fallback goes. Push needs an APNs auth key and the Push capability on the App ID.
+
+```bash
+npx wrangler secret put SOHAIL_MOBILE_NUMBER
+npx wrangler secret put APNS_KEY_ID
+npx wrangler secret put APNS_TEAM_ID
+npx wrangler secret put APNS_PRIVATE_KEY
+```
+
 Until those five calling secrets are set, `GET /calls/config` reports `"message": "Calling not set up."` and `POST /calls` does not dial.
 
 Paste the key when prompted, then press Enter. `JARVIS_APP_TOKEN` is the bearer token the iOS app will send. Generate one with:
@@ -174,7 +183,7 @@ Saying "call Sam and tell them the meeting moved" in the app looks up Sam, then 
 
 The worker places the call with the Twilio Calls API and, when Twilio requests TwiML, registers it with ElevenLabs Conversational AI (`POST /v1/convai/twilio/register-call`). ElevenLabs speaks with the agent's voice and streams audio with Twilio. The worker does not bridge the audio itself.
 
-Every call starts with: "Hello, this is Sohail's AI assistant. I'm calling on his behalf."
+Every outbound call starts with: "Hello, this is JARVIS, Master Hadi's personal assistant. Master Hadi asked me to tell you …" and then the message. JARVIS listens, stays inside the brief, and the summary comes back to the iPhone.
 
 On the ElevenLabs agent:
 
@@ -182,7 +191,17 @@ On the ElevenLabs agent:
 - In Security, allow overriding the first message and the system prompt. The worker sends both on each call. You can also set the agent's first message to `{{opening_line}}` and mention `{{contact_name}}` and `{{brief}}` in its prompt.
 - Optional post-call webhook: `https://<your-worker>/calls/elevenlabs`.
 
-The number is not purchased yet, and this worker is not deployed yet. Nothing in the app can dial until the secrets above exist and the worker is deployed. Apply `schema.sql` so the `outbound_calls` table exists before the first real call.
+The number is not purchased yet, and this worker is not deployed yet. Nothing in the app can dial until the secrets above exist and the worker is deployed. Apply `schema.sql` so the call tables exist before the first real call.
+
+## Inbound screening
+
+An iPhone cannot intercept a normal carrier call. Forward the mobile to the Twilio number with the GSM codes shown in Settings. Point the number's voice webhook at `POST /calls/inbound` and the SMS webhook at `POST /calls/sms`.
+
+JARVIS answers: "Hello, you've reached Master Hadi's phone, this is JARVIS his personal assistant. This call may be handled by AI. Who's calling and how can I help?"
+
+The app shows Put me through, Let JARVIS handle it, Take a message, and Decline. Put me through uses Twilio `<Dial>` to `SOHAIL_MOBILE_NUMBER`. Take over moves the caller into a conference and rings that same mobile, which drops the AI. Listen-in on the iPhone is the live transcript. In-app muted audio needs the Twilio Voice SDK, which is not linked in this build.
+
+Schedule, location, and other personal details are denied unless that person is allowed in Settings or you approve the live prompt. Push uses `APNS_KEY_ID`, `APNS_TEAM_ID`, and `APNS_PRIVATE_KEY` when the App ID has Push Notifications. Otherwise the worker texts `SOHAIL_MOBILE_NUMBER`.
 
 ## ASG context the model is given
 

@@ -46,6 +46,8 @@ final class AssistantEngine {
     private(set) var briefChoices: [CallChoice] = []
     /// A briefed call waiting for a spoken or tapped yes. Other approvals stay tap-only.
     private(set) var pendingCallBrief: PendingCallBrief?
+    /// The inbound call JARVIS is screening, when one is live.
+    private(set) var inboundCall: PhoneCallRecord?
     /// Bumped when the on-phone call log changes.
     private(set) var callLogTick: Int = 0
     var hasContactChoices: Bool { !callChoices.isEmpty || !briefChoices.isEmpty }
@@ -79,6 +81,8 @@ final class AssistantEngine {
     @ObservationIgnored private var pendingAction: PendingAction?
     @ObservationIgnored private var heldBrief = ""
     @ObservationIgnored private var callWatch: Task<Void, Never>?
+    @ObservationIgnored private var screenWatch: Task<Void, Never>?
+    @ObservationIgnored private var inboundIDs: Set<String> = []
     @ObservationIgnored private var silenceTask: Task<Void, Never>?
     @ObservationIgnored private var turnTask: Task<Void, Never>?
     @ObservationIgnored private var pushToTalkHeld = false
@@ -1276,7 +1280,7 @@ final class AssistantEngine {
         pendingCallBrief = PendingCallBrief(contactName: name, number: number, brief: brief)
         let spokenBrief = brief.count > 280 ? String(brief.prefix(280)) + "…" : brief
         let who = name == number ? number : name
-        let line = "I'll call \(who) and tell them \(spokenBrief). I'll introduce myself as your AI assistant. Say yes, sir, or no to cancel."
+        let line = "I'll call \(who) and tell them \(spokenBrief). I'll introduce myself as JARVIS, Master Hadi's assistant. Say yes, sir, or no to cancel."
         await speakLine(line, userText: userText)
         afterTurn()
     }
@@ -1358,6 +1362,81 @@ final class AssistantEngine {
         }
     }
 
+    func startScreenWatch() {
+        guard screenWatch == nil else { return }
+        screenWatch = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.pullInbound()
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+    }
+
+    func decideInbound(_ action: String) {
+        guard let id = inboundCall?.id else { return }
+        Task { await self.sendScreen(id: id, action: action) }
+    }
+
+    func allowInboundPersonal(_ allow: Bool) {
+        guard let id = inboundCall?.id else { return }
+        let note = CallPrivacyStore.note(matching: inboundCall)
+        Task { await self.sendPersonal(id: id, allow: allow, note: note) }
+    }
+
+    private func pullInbound() async {
+        guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else { return }
+        await CallPrivacyStore.syncIfNeeded()
+        await CallDevice.uploadIfNeeded()
+        guard let calls = try? await client.activeInboundCalls() else { return }
+        let seen = Set(calls.map(\.id))
+        for record in calls {
+            absorb(record, announce: false)
+            if !inboundIDs.contains(record.id) {
+                inboundIDs.insert(record.id)
+                let name = record.callerName?.isEmpty == false ? (record.callerName ?? "someone") : "someone"
+                Task { await self.announceScreen(name) }
+            }
+        }
+        let gone = inboundIDs.subtracting(seen)
+        for id in gone {
+            inboundIDs.remove(id)
+            if let record = try? await client.outboundCall(id: id) {
+                absorb(record, announce: true)
+            }
+        }
+        inboundCall = calls.first
+    }
+
+    private func announceScreen(_ name: String) async {
+        guard phase == .idle || phase == .listening else { return }
+        let line = "Sir, \(name) is calling. I'm screening it."
+        recordAssistant(line)
+        saveForWidget(transcript: name, reply: line)
+        await say(line)
+        if isSessionActive && isContinuous {
+            beginListening(manual: false)
+        }
+    }
+
+    private func sendScreen(id: String, action: String) async {
+        guard let client = try? JarvisCloudAPI.client() else { return }
+        let result = await client.screenCall(id: id, action: action)
+        await pullInbound()
+        if case .notSetUp(let message) = result {
+            statusLine = message
+        } else if case .failed(let message) = result {
+            statusLine = message
+        } else if action == "listen" {
+            statusLine = "Live transcript is on this iPhone. Take over rings your mobile."
+        }
+    }
+
+    private func sendPersonal(id: String, allow: Bool, note: String) async {
+        guard let client = try? JarvisCloudAPI.client() else { return }
+        _ = await client.setCallPersonal(id: id, allow: allow, note: allow ? note : "")
+        await pullInbound()
+    }
+
     private func pullOpenCalls() async {
         guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else { return }
         for row in CallLogStore.openCalls() where row.id.hasPrefix("call_") {
@@ -1375,14 +1454,17 @@ final class AssistantEngine {
         CallLogStore.update(stored)
         callLogTick += 1
         guard shouldSpeak else { return }
-        let name = stored.contactName
+        let name = stored.displayName
         let summary = stored.summary.isEmpty ? stored.detail : stored.summary
         let status = stored.status
-        Task { await self.speakCallReport(name: name, summary: summary, status: status) }
+        let inbound = stored.direction == "inbound"
+        Task { await self.speakCallReport(name: name, summary: summary, status: status, inbound: inbound) }
     }
 
-    private func speakCallReport(name: String, summary: String, status: String) async {
-        let line = CallReport.spoken(name: name, summary: summary, status: status)
+    private func speakCallReport(name: String, summary: String, status: String, inbound: Bool = false) async {
+        let line = inbound
+            ? CallReport.inbound(name: name, summary: summary, status: status)
+            : CallReport.spoken(name: name, summary: summary, status: status)
         for _ in 0..<40 {
             if phase == .idle || phase == .listening { break }
             try? await Task.sleep(for: .milliseconds(500))
