@@ -205,7 +205,7 @@ struct APIKeysSettingsView: View {
             } header: {
                 Text("OpenAI")
             } footer: {
-                Text("Create a key at platform.openai.com > API keys. Default model: gpt-4o-mini. Web search uses the OpenAI search model in Integrations.")
+                Text("Create a key at platform.openai.com > API keys. Default model: gpt-4o-mini. Web search uses the OpenAI search model in Apps.")
             }
 
             Section {

@@ -14,7 +14,7 @@ struct VisionStudioView: View {
                 studio
             }
         }
-        .navigationTitle("Vision")
+        .navigationTitle("Camera")
         .toolbar(.visible, for: .navigationBar)
         .task { await camera.acquire(owner: .panel) }
         .onDisappear { camera.release(owner: .panel) }
