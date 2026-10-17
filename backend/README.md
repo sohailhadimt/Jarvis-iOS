@@ -163,7 +163,7 @@ Create the token at [dash.cloudflare.com/profile/api-tokens](https://dash.cloudf
 - Permissions: **Account → Workers Scripts → Edit**, **Account → D1 → Edit**
 - Account resources: your account
 
-`.github/workflows/deploy-backend.yml` runs when `backend/` changes on `main`, and when started by hand. It typechecks, tests, creates or reuses the D1 database `jarvis-db`, applies `schema.sql`, deploys, then copies worker secrets from GitHub when those secrets exist. `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are required. A missing Twilio, Gemini, Groq, ElevenLabs, or app-token secret is skipped and listed in the job summary.
+`.github/workflows/deploy-backend.yml` runs when `backend/` changes on `main` or on a pull request, and when started by hand. It typechecks, tests, creates or reuses the D1 database `jarvis-db`, applies `schema.sql`, deploys, then copies worker secrets from GitHub when those secrets exist. `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are required. A missing Twilio, Gemini, Groq, ElevenLabs, or app-token secret is skipped and listed in the job summary.
 
 ## Nightly lead research
 
