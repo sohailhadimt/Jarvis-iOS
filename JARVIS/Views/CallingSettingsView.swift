@@ -69,7 +69,7 @@ struct CallingSettingsView: View {
             } header: {
                 Text("Calls to you")
             } footer: {
-                Text("JARVIS can ring this number about a failed task, a blocked call, or a low Twilio balance. Quiet hours and the daily cap keep that inside the balance. Outside those limits he sends a notification instead. The number is saved from here, not built into the app.")
+                Text("This number stays on this iPhone. It starts empty. JARVIS rings it for a failed task, a blocked call, or a low Twilio balance, and for put-through. If you leave it blank, the worker uses its OWNER_PHONE secret. Quiet hours and the daily cap keep those calls inside the balance. Outside those limits he sends a notification instead.")
             }
 
             Section {
@@ -120,6 +120,7 @@ struct CallingSettingsView: View {
         .tint(settings.primaryColor)
         .onAppear {
             rules = CallPrivacyStore.rules()
+            mobile = KeychainStore.get(.ownerPhone) ?? ""
             refresh()
         }
     }
@@ -192,8 +193,10 @@ struct CallingSettingsView: View {
     }
 
     private func saveLimits() {
+        let trimmed = mobile.trimmingCharacters(in: .whitespacesAndNewlines)
+        KeychainStore.set(trimmed.isEmpty ? nil : trimmed, for: .ownerPhone)
         let settings = OwnerCallSettings(
-            mobile: mobile.trimmingCharacters(in: .whitespacesAndNewlines),
+            mobile: trimmed,
             quietStart: quietStart,
             quietEnd: quietEnd,
             maxCallsPerDay: dailyCap,
@@ -202,14 +205,16 @@ struct CallingSettingsView: View {
         )
         Task {
             guard let client = try? JarvisCloudAPI.client() else {
-                report = "Calling not set up."
+                report = "Saved on this iPhone. Calling is not set up, so the worker was not updated."
                 return
             }
             switch await client.saveOwnerCallSettings(settings) {
             case .failed(let message), .notSetUp(let message):
-                report = message
+                report = "Saved on this iPhone. The worker did not take it: \(message)"
             case .done:
-                report = "Saved. Problem calls use this mobile, with quiet hours and the daily cap."
+                report = trimmed.isEmpty
+                    ? "Saved. No mobile is stored on this iPhone, so the worker uses its OWNER_PHONE secret."
+                    : "Saved on this iPhone. Problem calls and put-through use this number, with quiet hours and the daily cap."
             }
         }
     }
@@ -228,7 +233,6 @@ struct CallingSettingsView: View {
                 mobileSet = config.screening?.mobileSet ?? false
                 pushReady = config.screening?.push ?? false
                 if let saved = try? await JarvisCloudAPI.client().ownerCallSettings() {
-                    mobile = saved.mobile
                     quietStart = saved.quietStart
                     quietEnd = saved.quietEnd
                     dailyCap = saved.maxCallsPerDay

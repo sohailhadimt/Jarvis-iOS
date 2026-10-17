@@ -11,8 +11,9 @@ TWILIO_FROM_NUMBER=
 ELEVENLABS_API_KEY=
 ELEVENLABS_AGENT_ID=
 ELEVENLABS_WEBHOOK_SECRET=
-# Inbound screening. Leave empty in git.
-SOHAIL_MOBILE_NUMBER=
+# Your own mobile for put-through and problem calls. Leave empty in git.
+# Set it at deploy: npx wrangler secret put OWNER_PHONE
+OWNER_PHONE=
 APNS_KEY_ID=
 APNS_TEAM_ID=
 APNS_PRIVATE_KEY=

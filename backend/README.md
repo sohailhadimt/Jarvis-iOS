@@ -107,10 +107,10 @@ npx wrangler secret put ELEVENLABS_AGENT_ID
 npx wrangler secret put ELEVENLABS_WEBHOOK_SECRET
 ```
 
-Inbound screening, after the number exists. These stay empty until you are ready. The real mobile is where put-through and take-over ring, and where the SMS fallback goes. Push needs an APNs auth key and the Push capability on the App ID.
+Inbound screening, after the number exists. These stay empty until you are ready. `OWNER_PHONE` is your own mobile, in E.164. Put-through, take-over, the SMS fallback, and problem calls ring that number. Set it when you deploy. Do not commit it. The same number can also be typed later in the app under Calling. That copy stays in the iPhone Keychain and, once you tap save, overrides the secret. Push needs an APNs auth key and the Push capability on the App ID.
 
 ```bash
-npx wrangler secret put SOHAIL_MOBILE_NUMBER
+npx wrangler secret put OWNER_PHONE
 npx wrangler secret put APNS_KEY_ID
 npx wrangler secret put APNS_TEAM_ID
 npx wrangler secret put APNS_PRIVATE_KEY
@@ -187,7 +187,7 @@ Every outbound call starts with: "Hello, this is JARVIS, Master Hadi's personal 
 
 If the other person asks something outside the brief, JARVIS says "One moment please" and the question is pushed to the iPhone. A typed or spoken reply is relayed. If nobody answers within the configured 30 to 45 seconds, JARVIS says he will find out and call back, and a follow-up task is left for Sohail.
 
-JARVIS can also ring the mobile saved in Settings when a task fails, a call does not connect, or the Twilio balance is low. That call uses the ElevenLabs voice, with a short summary and a way to press 1 or say "details". Quiet hours and a daily cap (three by default) keep it inside the balance. Outside those limits he sends a push notification instead.
+JARVIS can also ring `OWNER_PHONE` when a task fails, a call does not connect, or the Twilio balance is low. A number saved from Calling settings on the iPhone is used instead when one is set. That call uses the ElevenLabs voice, with a short summary and a way to press 1 or say "details". Quiet hours and a daily cap (three by default) keep it inside the balance. Outside those limits he sends a push notification instead.
 
 On the ElevenLabs agent:
 
@@ -203,9 +203,9 @@ An iPhone cannot intercept a normal carrier call. Forward the mobile to the Twil
 
 JARVIS answers: "Hello, you've reached Master Hadi's phone, this is JARVIS his personal assistant. This call may be handled by AI. Who's calling and how can I help?"
 
-The app shows Put me through, Let JARVIS handle it, Take a message, and Decline. Put me through uses Twilio `<Dial>` to `SOHAIL_MOBILE_NUMBER`. Take over moves the caller into a conference and rings that same mobile, which drops the AI. Listen-in on the iPhone is the live transcript. In-app muted audio needs the Twilio Voice SDK, which is not linked in this build.
+The app shows Put me through, Let JARVIS handle it, Take a message, and Decline. Put me through uses Twilio `<Dial>` to the mobile saved in Calling settings, or to `OWNER_PHONE` when that field is empty. Take over moves the caller into a conference and rings that same mobile, which drops the AI. Listen-in on the iPhone is the live transcript. In-app muted audio needs the Twilio Voice SDK, which is not linked in this build.
 
-Schedule, location, and other personal details are denied unless that person is allowed in Settings or you approve the live prompt. Push uses `APNS_KEY_ID`, `APNS_TEAM_ID`, and `APNS_PRIVATE_KEY` when the App ID has Push Notifications. Otherwise the worker texts `SOHAIL_MOBILE_NUMBER`.
+Schedule, location, and other personal details are denied unless that person is allowed in Settings or you approve the live prompt. Push uses `APNS_KEY_ID`, `APNS_TEAM_ID`, and `APNS_PRIVATE_KEY` when the App ID has Push Notifications. Otherwise the worker texts that same mobile.
 
 ## ASG context the model is given
 

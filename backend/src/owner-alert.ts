@@ -82,7 +82,7 @@ export function isOwnerWebhook(method: string, path: string): boolean {
 export async function readOwnerMobile(env: Env): Promise<string | null> {
   const settings = await readCallSettings(env);
   const saved = settings.mobile_number ? toE164(settings.mobile_number) : null;
-  return saved || toE164(env.SOHAIL_MOBILE_NUMBER ?? "");
+  return saved || toE164(env.OWNER_PHONE ?? "");
 }
 
 export async function readCallSettings(env: Env): Promise<CallSettings> {

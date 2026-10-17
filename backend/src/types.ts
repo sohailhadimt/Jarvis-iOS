@@ -65,8 +65,11 @@ export interface Env {
   ELEVENLABS_API_KEY?: string;
   ELEVENLABS_AGENT_ID?: string;
   ELEVENLABS_WEBHOOK_SECRET?: string;
-  /** Real mobile for Dial transfer, conference take-over, and SMS fallback. */
-  SOHAIL_MOBILE_NUMBER?: string;
+  /**
+   * Sohail's own mobile for put-through, take-over, SMS, and problem calls.
+   * Set at deploy with `npx wrangler secret put OWNER_PHONE`. Never commit the number.
+   */
+  OWNER_PHONE?: string;
   APNS_KEY_ID?: string;
   APNS_TEAM_ID?: string;
   APNS_PRIVATE_KEY?: string;

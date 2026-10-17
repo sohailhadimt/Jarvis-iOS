@@ -192,8 +192,8 @@ async function applyDecision(
         {
           configured: false,
           message: "Calling not set up.",
-          missing: ["mobile_number"],
-          error: { code: "mobile_not_set", message: "Set your mobile in Calling settings." },
+          missing: ["OWNER_PHONE"],
+          error: { code: "mobile_not_set", message: "Set your mobile in Calling settings, or set the OWNER_PHONE secret on the worker." },
         },
         503,
       ),
