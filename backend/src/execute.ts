@@ -1,4 +1,5 @@
 import { agentSystemPrompt, plannerSystemPrompt, plannerUserPrompt } from "./agents";
+import { isRoutine, openMission } from "./missions";
 import { computeNextRun, cronMatches, parseCron } from "./cron";
 import { dbAll, dbFirst, dbRun, logActivity, logProgress } from "./db";
 import { clip, newId, nowIso, parseStringArray } from "./http";
@@ -63,6 +64,17 @@ async function runDueJobs(env: Env): Promise<void> {
     const due = !job.next_run_at || job.next_run_at <= nowStamp;
     if (!due) continue;
     if (created >= 3) break;
+    if (isRoutine(job.id)) {
+      const missionId = await openMission(env, job.goal);
+      await dbRun(env, "UPDATE scheduled_jobs SET last_run_at = ?, next_run_at = ? WHERE id = ?", [
+        nowStamp,
+        computeNextRun(now, expr),
+        job.id,
+      ]);
+      await logActivity(env, "scheduler", "routine.ran", null, { job_id: job.id, mission_id: missionId, cron: job.cron });
+      created++;
+      continue;
+    }
     const taskId = newId("task");
     await dbRun(
       env,

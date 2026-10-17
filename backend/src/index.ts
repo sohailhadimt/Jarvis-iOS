@@ -1,4 +1,5 @@
 import { runTick } from "./execute";
+import { runMissionTick } from "./missions";
 import { sweepOwner } from "./owner-alert";
 import { runPersonaTick } from "./personas";
 import { route } from "./routes";
@@ -9,6 +10,15 @@ export default {
     return route(request, env, ctx);
   },
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(Promise.all([runTick(env, `cron:${controller.cron}`), runPersonaTick(env), sweepOwner(env)]));
+    ctx.waitUntil(
+      Promise.all([
+        runTick(env, `cron:${controller.cron}`),
+        (async () => {
+          await runMissionTick(env);
+          await runPersonaTick(env);
+        })(),
+        sweepOwner(env),
+      ]),
+    );
   },
 };

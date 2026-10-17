@@ -547,19 +547,25 @@ Update a row. Omitted fields stay as they are. You cannot clear `source_urls`.
 
 ## Named agents
 
-`GET /agents` returns `{ "agents": [] }` and seeds J.A.R.V.I.S., E.D.I.T.H., U.L.T.R.O.N., and F.R.I.D.A.Y. when they are missing.
+`GET /agents` returns `{ "agents": [] }` and seeds J.A.R.V.I.S. (chief of staff), E.D.I.T.H. (research), U.L.T.R.O.N. (sales), and F.R.I.D.A.Y. (builder). Each agent includes `tools`, `voice_id`, and `voice_name`. A built-in agent whose instructions are still the original text is updated to the current role. Edited instructions are left as they are.
 
-`POST /agents` creates one. Body: `name`, `role`, `instructions`, optional `avatar` and `color_hex`. `201` `{ "agent": {} }`.
+`POST /agents` creates one. Body: `name`, `role`, `instructions`, optional `avatar`, `color_hex`, `tools`, `voice_id`, and `voice_name`. `201` `{ "agent": {} }`. `POST /agents/:id` updates those fields. `DELETE /agents/:id` removes the agent and its thread.
 
-`POST /agents/:id` updates name, role, instructions, memory, avatar, or color. `DELETE /agents/:id` removes the agent and its thread.
+`voice_id` is an ElevenLabs voice id stored for the iPhone. It is not a secret. Leave it empty to use the phone's JARVIS voice.
 
 `GET /agents/:id/messages` and `POST /agents/:id/messages` with `{ "author", "role", "text" }` are that agent's thread.
 
-`POST /agent-tasks` with `{ "agent_id", "goal", "id?" }` queues work. `GET /agent-tasks` lists it. Status is `queued`, `working`, `done`, or `needs_approval`. The cron tick runs one queued task through Gemini. Sending, publishing, or spending becomes `needs_approval` and an approval row. Nothing is sent.
+`POST /agent-tasks` with `{ "agent_id", "goal", "id?" }` queues work. `GET /agent-tasks` lists it. Status is `queued`, `working`, `done`, or `needs_approval`. Each cron tick runs up to three named-agent steps (one model call each, Gemini then Groq). A step can search, open a page, save a finding, draft a document, store a reminder, or queue an approval. Sending, publishing, spending, or placing a call becomes `needs_approval`. Nothing is sent or dialled.
 
-`POST /agent-tasks/:id/approve` and `POST /agent-tasks/:id/decline` mark the draft done and return `external_action_taken: false`. Approving or rejecting the matching row in `/approvals` does the same and still does not send, publish, or pay.
+`POST /agent-tasks/:id/approve` and `POST /agent-tasks/:id/decline` mark the draft done and return `external_action_taken: false`. Approving or rejecting the matching row in `/approvals` does the same and still does not send, publish, pay, or dial.
 
-`GET /group` and `POST /group` with `{ "author", "text" }` are the shared room.
+`POST /missions` with `{ "goal" }` asks JARVIS for a JSON plan and queues one task per assignment. `GET /missions` lists them. `GET /missions/:id` includes the specialist tasks and, when they have all finished, a report that quotes their results. The report does not add facts.
+
+`GET /routines` lists scheduled jobs, including the daily briefing (`30 7 * * *` UTC), the reminder sweep (`0 18 * * *` UTC), and the Monday pipeline monitor (`0 9 * * 1` UTC). They are off until `POST /routines/:id` with `{ "enabled": true }`. Enabling one creates a mission on the next matching cron tick. It does not send or spend.
+
+`GET /rooms` lists rooms. Project Money is `room_project_money`. `GET /group` and `POST /group` are that room. A user message that contains `@EDITH`, `@ULTRON`, `@FRIDAY`, or `@JARVIS` queues that agent. One agent may mention one other agent. A second hop does not queue anyone else.
+
+`GET /reminders` lists open reminders stored by the reminder tool. It does not write to the iPhone calendar.
 
 ## Outbound calls
 

@@ -311,3 +311,112 @@ CREATE TABLE IF NOT EXISTS call_permissions (
   note TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL
 );
+
+-- Named-agent tools and ElevenLabs voice. The voice id is optional and is not a secret.
+CREATE TABLE IF NOT EXISTS persona_profiles (
+  agent_id TEXT PRIMARY KEY,
+  tools_json TEXT NOT NULL DEFAULT '[]',
+  voice_id TEXT NOT NULL DEFAULT '',
+  voice_name TEXT NOT NULL DEFAULT ''
+);
+
+-- One model step of a named-agent task, saved so the next cron tick can continue.
+CREATE TABLE IF NOT EXISTS persona_task_state (
+  task_id TEXT PRIMARY KEY,
+  messages_json TEXT NOT NULL,
+  step INTEGER NOT NULL DEFAULT 0,
+  locked_until TEXT
+);
+
+-- JARVIS missions. Specialists are persona tasks linked below.
+CREATE TABLE IF NOT EXISTS missions (
+  id TEXT PRIMARY KEY,
+  goal TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('planning', 'running', 'awaiting_approval', 'completed', 'failed')),
+  report TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mission_tasks (
+  mission_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  PRIMARY KEY (mission_id, task_id)
+);
+
+-- Project Money is the shared room. Other rooms can be added later.
+CREATE TABLE IF NOT EXISTS rooms (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  purpose TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS room_messages (
+  id TEXT PRIMARY KEY,
+  room_id TEXT NOT NULL,
+  author TEXT NOT NULL,
+  role TEXT NOT NULL,
+  text TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_room_messages_room ON room_messages (room_id, created_at);
+
+CREATE TABLE IF NOT EXISTS reminders (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  text TEXT NOT NULL,
+  due_at TEXT,
+  status TEXT NOT NULL DEFAULT 'open',
+  created_at TEXT NOT NULL
+);
+
+INSERT INTO rooms (id, name, purpose, created_at)
+SELECT
+  'room_project_money',
+  'Project Money',
+  'EDITH, ULTRON, and FRIDAY compare notes on money-making projects. Mention someone with @EDITH, @ULTRON, @FRIDAY, or @JARVIS. Drafts stay drafts until you approve them.',
+  '1970-01-01T00:00:00.000Z'
+WHERE NOT EXISTS (SELECT 1 FROM rooms WHERE id = 'room_project_money');
+
+INSERT INTO room_messages (id, room_id, author, role, text, created_at)
+SELECT id, 'room_project_money', author, 'user', text, created_at
+FROM group_messages
+WHERE NOT EXISTS (SELECT 1 FROM room_messages WHERE room_messages.id = group_messages.id);
+
+INSERT INTO scheduled_jobs (id, name, goal, cron, enabled, last_run_at, next_run_at, created_at)
+SELECT
+  'job_daily_briefing',
+  'Daily briefing',
+  'Prepare today''s briefing from stored findings, pending approvals, failed tasks, and the pipeline. Delegate research to EDITH, sales notes to ULTRON, and build notes to FRIDAY. Do not contact anyone and do not invent numbers.',
+  '30 7 * * *',
+  0,
+  NULL,
+  NULL,
+  '1970-01-01T00:00:00.000Z'
+WHERE NOT EXISTS (SELECT 1 FROM scheduled_jobs WHERE id = 'job_daily_briefing');
+
+INSERT INTO scheduled_jobs (id, name, goal, cron, enabled, last_run_at, next_run_at, created_at)
+SELECT
+  'job_open_reminders',
+  'Reminder sweep',
+  'List open reminders and anything awaiting approval. Draft a short reminder. Do not send it.',
+  '0 18 * * *',
+  0,
+  NULL,
+  NULL,
+  '1970-01-01T00:00:00.000Z'
+WHERE NOT EXISTS (SELECT 1 FROM scheduled_jobs WHERE id = 'job_open_reminders');
+
+INSERT INTO scheduled_jobs (id, name, goal, cron, enabled, last_run_at, next_run_at, created_at)
+SELECT
+  'job_pipeline_monitor',
+  'Pipeline monitor',
+  'Review the sales pipeline. Note prospects with no source URL and drafts waiting for approval. Delegate the reading to EDITH and the sales note to ULTRON. Do not contact anyone.',
+  '0 9 * * 1',
+  0,
+  NULL,
+  NULL,
+  '1970-01-01T00:00:00.000Z'
+WHERE NOT EXISTS (SELECT 1 FROM scheduled_jobs WHERE id = 'job_pipeline_monitor');

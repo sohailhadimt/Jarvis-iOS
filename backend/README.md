@@ -8,6 +8,8 @@ The iOS app is separate. This folder is the only part you deploy here. Phone wak
 
 You send a goal. JARVIS (the chief of staff) breaks it into subtasks and hands each one to a specialist: research, lead generation, sales, outreach, marketing, website, analytics, admin, automation, or quality control.
 
+The named team is the same idea with its own roster. EDITH researches, ULTRON drafts sales and strategy, and FRIDAY drafts pages, code, and schedules. Project Money (`/group`) is the room where they compare notes. `POST /missions` makes JARVIS assign the work. Up to three of those steps run on each cron tick. Send, spend, publish, and call stay drafts until you approve them. The daily briefing, reminder sweep, and pipeline monitor are scheduled jobs and stay off until you enable them.
+
 Specialists can search the web, read a page, save a finding, save a sales prospect, and draft a proposal, an outreach email, or website HTML. **They cannot send email, publish a site, or pay anyone.** Those actions are drafts plus an approval. Approving a row records your decision. It still does not send anything.
 
 Every finding and every lead must have a source URL. If a page was not fetched, that fact is not stored.
