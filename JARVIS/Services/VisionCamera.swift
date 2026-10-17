@@ -1,6 +1,8 @@
 import AVFoundation
 import CoreImage
 import CoreVideo
+import Observation
+import SwiftUI
 import UIKit
 
 enum CameraOwner: Hashable {

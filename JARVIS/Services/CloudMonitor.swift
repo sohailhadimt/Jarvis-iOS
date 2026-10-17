@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import UserNotifications
 
 /// Foreground poll of the JARVIS cloud. The first successful fetch only records what is already stored.
