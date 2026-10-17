@@ -2,8 +2,8 @@ import { dbAll, dbFirst, dbRun } from "./db";
 import { apiError, asString, isRecord, json, newId, nowIso } from "./http";
 import type { Env } from "./types";
 
-/** Spoken before the brief on every outbound call. */
-export const OUTBOUND_INTRO = "Hello, this is JARVIS, Master Hadi's personal assistant. Master Hadi asked me to tell you";
+/** The only fixed words at the start of an outbound call. The message follows as a statement. */
+export const OUTBOUND_INTRO = "Hello, this is JARVIS, Master Hadi's personal assistant.";
 
 /** Said when JARVIS answers a forwarded call. UK disclosure: this is AI, not Master Hadi. */
 export const INBOUND_GREETING =
@@ -107,10 +107,56 @@ export function isBlockedNumber(e164: string): boolean {
   return BLOCKED_NATIONAL.has(national) || BLOCKED_NATIONAL.has(digits);
 }
 
+/** Turns "tell him I'm busy" into "Master Hadi is currently busy." */
+export function conveyBrief(brief: string): string {
+  const stripped = stripInstruction(clip(brief, 500).replace(/\s+/g, " "));
+  const spoken = thirdPerson(stripped);
+  if (!spoken) return "Master Hadi will be in touch.";
+  const cased = spoken.charAt(0).toUpperCase() + spoken.slice(1);
+  return /[.!?]$/.test(cased) ? cased : `${cased}.`;
+}
+
 export function outboundOpening(brief: string): string {
-  const message = clip(brief, 500).replace(/\s+/g, " ");
-  const spoken = /[.!?]$/.test(message) ? message : `${message}.`;
-  return `${OUTBOUND_INTRO} ${spoken}`;
+  return `${OUTBOUND_INTRO} ${conveyBrief(brief)}`;
+}
+
+function stripInstruction(text: string): string {
+  let current = text.trim();
+  const patterns = [
+    /^(please\s+)?(tell|inform)\s+(him|her|them|the caller)\s+(that\s+|to\s+)?/i,
+    /^(please\s+)?(say|mention)\s+(that\s+)?/i,
+    /^(please\s+)?let\s+(him|her|them)\s+know\s+(that\s+)?/i,
+    /^(please\s+)?ask\s+(him|her|them)\s+(to\s+|that\s+)?/i,
+    /^(please\s+)?(pass on|relay)\s+(that\s+)?/i,
+  ];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const pattern of patterns) {
+      const next = current.replace(pattern, "").trim();
+      if (next !== current) {
+        current = next;
+        changed = true;
+      }
+    }
+  }
+  return current;
+}
+
+function thirdPerson(text: string): string {
+  let value = text.replace(/,\s+(will|can)\b/gi, " and $1");
+  value = value.replace(
+    /\b(i am|i'm)\s+(?:currently\s+)?(busy|out|away|unavailable|free|in a meeting|tied up|running late)\b/gi,
+    "Master Hadi is currently $2",
+  );
+  value = value.replace(/\b(i will|i'll)\b/gi, "Master Hadi will");
+  value = value.replace(/\b(i have|i've)\b/gi, "Master Hadi has");
+  value = value.replace(/\b(i am|i'm)\b/gi, "Master Hadi is");
+  value = value.replace(/\bmy\b/gi, "his");
+  value = value.replace(/\bme\b/gi, "him");
+  value = value.replace(/\bi\b/gi, "Master Hadi");
+  value = value.replace(/\bcall back\b/gi, "call you back");
+  return value.replace(/\s+/g, " ").trim();
 }
 
 export function forwardingCodes(number: string): {
@@ -135,8 +181,9 @@ export function agentScript(contactName: string, brief: string): string {
   return [
     "You are JARVIS, Master Hadi's personal assistant, on a live telephone call in the United Kingdom.",
     `Your first spoken words are exactly: "${opening}"`,
-    "That opening already delivers his message. Then stop and listen.",
-    "Stay polite. Answer sensibly, and only within the brief. If they ask something the brief does not cover, say you will ask Master Hadi.",
+    "That opening already states his message in the third person. Then stop and listen.",
+    "Do not say that he asked you to tell them, that he wanted you to say it, or that you are passing on a message. State the fact.",
+    "On later turns, keep speaking about him as Master Hadi. Stay polite. Answer only within the brief. If they ask something the brief does not cover, say you will ask Master Hadi.",
     "Do not invent prices, times, promises, locations, or personal details.",
     "Never claim to be Master Hadi. You are his AI assistant, and the opening already says so.",
     `You are speaking with ${name}.`,

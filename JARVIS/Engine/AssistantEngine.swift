@@ -1280,7 +1280,7 @@ final class AssistantEngine {
         pendingCallBrief = PendingCallBrief(contactName: name, number: number, brief: brief)
         let spokenBrief = brief.count > 280 ? String(brief.prefix(280)) + "…" : brief
         let who = name == number ? number : name
-        let line = "I'll call \(who) and tell them \(spokenBrief). I'll introduce myself as JARVIS, Master Hadi's assistant. Say yes, sir, or no to cancel."
+        let line = "I'll call \(who) and tell them \(spokenBrief). I'll introduce myself as JARVIS, Master Hadi's assistant, and say it as a statement. Say yes, sir, or no to cancel."
         await speakLine(line, userText: userText)
         afterTurn()
     }
