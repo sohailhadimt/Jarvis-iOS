@@ -54,6 +54,10 @@ final class AssistantEngine {
     private(set) var userIsSpeaking = false
     private(set) var dictationText = ""
     private(set) var isDictating = false
+    /// Name of a photo, PDF or text file waiting for the next question.
+    private(set) var attachmentName: String?
+    @ObservationIgnored private var attachmentMime: String?
+    @ObservationIgnored private var attachmentData: Data?
     var messageDraft: MessageDraft?
 
     @ObservationIgnored private var conversation: [ChatMessage] = []
@@ -346,6 +350,54 @@ final class AssistantEngine {
                 beginListening(manual: false)
             }
         }
+    }
+
+    /// Keeps a photo, PDF or text file for the next question. Images are stored as JPEG.
+    func stageFile(name: String, data: Data, ext: String) {
+        if data.count > 8_000_000 {
+            errorMessage = "That file is too large. Keep it under 8 MB."
+            return
+        }
+        let lower = ext.lowercased()
+        if lower == "pdf" {
+            holdAttachment(name: name, mime: "application/pdf", data: data)
+            return
+        }
+        if ["txt", "md", "csv", "json", "text"].contains(lower) {
+            holdAttachment(name: name, mime: "text/plain", data: data)
+            return
+        }
+        if let image = UIImage(data: data) {
+            let quality: CGFloat = 0.7
+            if let jpeg = image.jpegData(compressionQuality: quality) {
+                let title = name.isEmpty ? "Photo" : name
+                holdAttachment(name: title, mime: "image/jpeg", data: jpeg)
+                return
+            }
+        }
+        errorMessage = "JARVIS can read a photo, PDF or text file."
+    }
+
+    func clearAttachment() {
+        attachmentName = nil
+        attachmentMime = nil
+        attachmentData = nil
+    }
+
+    private func holdAttachment(name: String, mime: String, data: Data) {
+        attachmentName = name
+        attachmentMime = mime
+        attachmentData = data
+        errorMessage = nil
+    }
+
+    private func takeAttachment(for text: String) -> StagedFile? {
+        if Self.needsTools(text) || wantsCloudTool(text) || isBriefingRequest(text) || DeepResearch.wants(text) {
+            return nil
+        }
+        guard let name = attachmentName, let mime = attachmentMime, let data = attachmentData else { return nil }
+        clearAttachment()
+        return StagedFile(name: name, mime: mime, data: data)
     }
 
     /// Typed request from the Tasks screen. Same turn pipeline as a finished utterance.
@@ -930,14 +982,23 @@ final class AssistantEngine {
         let userMessage = ChatMessage(role: "user", content: text)
         tools.resetTurn()
         citations = []
-        let visionJPEG = await visionAttachment(for: text)
+        let stagedFile = takeAttachment(for: text)
+        let visionJPEG: Data?
+        if stagedFile == nil {
+            visionJPEG = await visionAttachment(for: text)
+        } else {
+            visionJPEG = nil
+        }
 
         do {
             let facts = JarvisStore.allFacts()
             let prior = recordedUser ? Array(conversation.dropLast()) : conversation
             let history = Array(prior.suffix(16))
             let produced: Produced
-            if let visionJPEG {
+            if let stagedFile {
+                let system = settings.voicePrompt(facts: facts, question: text)
+                produced = try await answerFile(file: stagedFile, system: system, history: history, user: userMessage)
+            } else if let visionJPEG {
                 let system = settings.voicePrompt(facts: facts, question: text)
                 produced = try await answerVision(jpeg: visionJPEG, system: system, history: history, user: userMessage)
             } else {
@@ -1545,6 +1606,58 @@ final class AssistantEngine {
             continuation.finish()
         }
     }
+
+    /// A staged photo, PDF or text file. Gemini reads it. The reply stays in the usual voice.
+    private func answerFile(file: StagedFile, system: String, history: [ChatMessage],
+                            user: ChatMessage) async throws -> Produced {
+        statusLine = Self.readingLine
+        pushActivity()
+        defer {
+            if statusLine == Self.readingLine || statusLine == ModelFallback.busyLine {
+                statusLine = nil
+            }
+        }
+        guard let key = KeychainStore.get(.gemini), !key.isEmpty else {
+            throw LLMError.missingKey("Gemini")
+        }
+        let brief = system + " The user attached a file named \(file.name). Answer from that file. Do not invent pages or details that are not in it."
+        let models = Self.groundModels()
+        var last: Error = LLMError.emptyReply(provider: "Gemini")
+        var index: Int = 0
+        while index < models.count {
+            let model = models[index]
+            var attempt: Int = 0
+            while attempt < 3 {
+                do {
+                    let stream = GeminiFiles.stream(system: brief, history: history, user: user,
+                                                    file: file, model: model, apiKey: key)
+                    let streamed = try await speakStream(stream, fallback: nil)
+                    let trimmed = streamed.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.isEmpty { throw LLMError.emptyReply(provider: "Gemini") }
+                    return Produced(text: streamed.text, spoken: streamed.spoken)
+                } catch {
+                    if Task.isCancelled { throw error }
+                    last = error
+                    guard let llm = error as? LLMError else { throw error }
+                    if llm.isBusy {
+                        statusLine = ModelFallback.busyLine
+                        pushActivity()
+                        let shift: Int = attempt
+                        let delay: Int = 400 * (1 << shift)
+                        try await Task.sleep(for: .milliseconds(delay))
+                        attempt += 1
+                        continue
+                    }
+                    if Self.groundingRejected(error) { break }
+                    throw error
+                }
+            }
+            index += 1
+        }
+        throw last
+    }
+
+    private static let readingLine = "Reading…"
 
     /// Gemini sees one JPEG and answers in the same voice as a spoken turn.
     private func answerVision(jpeg: Data, system: String, history: [ChatMessage],

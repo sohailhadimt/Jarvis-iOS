@@ -60,6 +60,9 @@ struct ChatView: View {
             AgentJobStrip()
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
+            AttachmentChip()
+                .padding(.horizontal, 16)
+                .padding(.bottom, 6)
             composer
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
@@ -80,6 +83,7 @@ struct ChatView: View {
     private var composer: some View {
         HStack(spacing: 8) {
             circleButton(system: "plus", fill: Color.primary.opacity(0.08), foreground: .primary, action: onPlus)
+            AttachControl()
             TextField(voiceOn ? "Ask JARVIS" : "Message", text: $draft, axis: .vertical)
                 .lineLimit(1...4)
                 .padding(.horizontal, 12)
@@ -137,7 +141,8 @@ struct ChatView: View {
     }
 
     private func sendDraft() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = typed.isEmpty && engine.attachmentName != nil ? "What is in this file?" : typed
         guard !text.isEmpty else { return }
         draft = ""
         engine.ask(text)
@@ -460,6 +465,7 @@ struct FullScreenVoiceView: View {
 
     private var askBar: some View {
         HStack(spacing: 8) {
+            AttachControl()
             TextField("", text: $draft, prompt: Text("Ask JARVIS…").foregroundStyle(settings.accentColor.opacity(0.55)))
                 .font(.system(size: 15, weight: .regular, design: .monospaced))
                 .foregroundStyle(.white)
@@ -486,6 +492,7 @@ struct FullScreenVoiceView: View {
             if !engine.callChoices.isEmpty {
                 CallPicker()
             }
+            AttachmentChip()
             if let status = engine.statusLine, !status.isEmpty {
                 hudText(status)
             } else if let note = camera.note, !note.isEmpty {
@@ -559,7 +566,8 @@ struct FullScreenVoiceView: View {
     }
 
     private func sendDraft() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = typed.isEmpty && engine.attachmentName != nil ? "What is in this file?" : typed
         guard !text.isEmpty else { return }
         draft = ""
         engine.ask(text)
