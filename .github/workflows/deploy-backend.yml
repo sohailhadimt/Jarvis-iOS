@@ -35,15 +35,142 @@ jobs:
       - name: Test
         run: npx vitest run
 
-      - name: Require a real D1 database id
+      - name: Resolve D1 database
         run: |
-          if grep -q "00000000-0000-0000-0000-000000000000" wrangler.toml; then
-            echo "Replace database_id in backend/wrangler.toml with the id printed by: npx wrangler d1 create jarvis-db"
-            exit 1
-          fi
+          set -euo pipefail
+          node <<'NODE'
+          import { execSync } from "node:child_process";
+          import { readFileSync, writeFileSync } from "node:fs";
+
+          function rowsFrom(raw) {
+            const start = raw.indexOf("[");
+            const objectStart = raw.indexOf("{");
+            const sliceFrom = start === -1 ? objectStart : objectStart === -1 ? start : Math.min(start, objectStart);
+            if (sliceFrom === -1) throw new Error(raw.trim() || "wrangler d1 list returned no JSON");
+            const parsed = JSON.parse(raw.slice(sliceFrom));
+            if (Array.isArray(parsed)) return parsed;
+            if (Array.isArray(parsed.result)) return parsed.result;
+            if (Array.isArray(parsed.d1)) return parsed.d1;
+            return [];
+          }
+
+          function list() {
+            const raw = execSync("npx wrangler d1 list --json", { encoding: "utf8" });
+            return rowsFrom(raw);
+          }
+
+          let rows = list();
+          let row = rows.find((item) => item.name === "jarvis-db");
+          if (!row) {
+            execSync("npx wrangler d1 create jarvis-db", { stdio: "inherit" });
+            rows = list();
+            row = rows.find((item) => item.name === "jarvis-db");
+          }
+          const id = row?.uuid || row?.database_id;
+          if (!id) {
+            console.error("jarvis-db has no id after create.");
+            process.exit(1);
+          }
+          const toml = readFileSync("wrangler.toml", "utf8");
+          const next = toml.replace(/database_id = "[^"]*"/, `database_id = "${id}"`);
+          if (next === toml) {
+            console.error("wrangler.toml has no database_id line.");
+            process.exit(1);
+          }
+          writeFileSync("wrangler.toml", next);
+          console.log(`D1 jarvis-db ${id}`);
+          NODE
 
       - name: Apply D1 schema
-        run: npx wrangler d1 execute jarvis-db --remote --file=./schema.sql --yes
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if npx wrangler d1 execute jarvis-db --remote --file=./schema.sql --yes; then
+              exit 0
+            fi
+            echo "schema apply failed (attempt ${attempt}); waiting"
+            sleep 8
+          done
+          exit 1
 
       - name: Deploy Worker
-        run: npx wrangler deploy
+        run: |
+          set -euo pipefail
+          npx wrangler deploy | tee /tmp/wrangler-deploy.txt
+          url=$(grep -oE 'https://[A-Za-z0-9.-]+\.workers\.dev' /tmp/wrangler-deploy.txt | head -1 || true)
+          echo "Worker URL: ${url:-unknown}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set Worker secrets
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          JARVIS_APP_TOKEN: ${{ secrets.JARVIS_APP_TOKEN }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM_NUMBER: ${{ secrets.TWILIO_FROM_NUMBER }}
+          OWNER_PHONE: ${{ secrets.OWNER_PHONE }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          ELEVENLABS_AGENT_ID: ${{ secrets.ELEVENLABS_AGENT_ID }}
+          ELEVENLABS_WEBHOOK_SECRET: ${{ secrets.ELEVENLABS_WEBHOOK_SECRET }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+        run: |
+          set -euo pipefail
+          put_if_present() {
+            local name="$1"
+            local value="${!name-}"
+            if [ -z "$value" ]; then
+              echo "missing $name"
+              return 1
+            fi
+            printf '%s' "$value" | npx wrangler secret put "$name"
+            echo "set $name"
+            return 0
+          }
+          required=(
+            GEMINI_API_KEY
+            GROQ_API_KEY
+            JARVIS_APP_TOKEN
+            TWILIO_ACCOUNT_SID
+            TWILIO_AUTH_TOKEN
+            TWILIO_FROM_NUMBER
+            OWNER_PHONE
+            ELEVENLABS_API_KEY
+            ELEVENLABS_AGENT_ID
+          )
+          optional=(
+            ELEVENLABS_WEBHOOK_SECRET
+            TAVILY_API_KEY
+            BRAVE_API_KEY
+          )
+          missing_required=()
+          missing_optional=()
+          for name in "${required[@]}"; do
+            if [ -z "${!name-}" ]; then
+              echo "missing $name"
+              missing_required+=("$name")
+            else
+              put_if_present "$name"
+            fi
+          done
+          for name in "${optional[@]}"; do
+            if [ -z "${!name-}" ]; then
+              echo "missing $name"
+              missing_optional+=("$name")
+            else
+              put_if_present "$name"
+            fi
+          done
+          {
+            echo "## Worker secrets"
+            if [ ${#missing_required[@]} -eq 0 ]; then
+              echo "Required secrets were set."
+            else
+              echo "Missing required GitHub secrets (not sent to the worker):"
+              for name in "${missing_required[@]}"; do echo "- \`$name\`"; done
+            fi
+            if [ ${#missing_optional[@]} -gt 0 ]; then
+              echo "Optional secrets not set:"
+              for name in "${missing_optional[@]}"; do echo "- \`$name\`"; done
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

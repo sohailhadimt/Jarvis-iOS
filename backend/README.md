@@ -58,7 +58,7 @@ npx wrangler d1 create jarvis-db
 
 The command prints a `database_id`. Open `wrangler.toml` and replace `00000000-0000-0000-0000-000000000000` with that id. The binding name stays `DB` and the database name stays `jarvis-db`.
 
-The database id is not a secret. Commit the updated `wrangler.toml` so GitHub Actions can deploy.
+The database id is not a secret. You can commit it. GitHub Actions does not need that commit: the deploy workflow looks up `jarvis-db` by name, creates it when it is missing, and writes the id into `wrangler.toml` for that run.
 
 ## 4. Apply the schema
 
@@ -101,7 +101,7 @@ npx wrangler secret put ELEVENLABS_API_KEY
 npx wrangler secret put ELEVENLABS_AGENT_ID
 ```
 
-`TWILIO_FROM_NUMBER` stays unset until the UK number is purchased and compliance has cleared. Optional, for the post-call webhook:
+When those values are GitHub Actions secrets, the deploy workflow runs `wrangler secret put` for each one that is present and skips the rest. It never prints the values. Optional, for the post-call webhook:
 
 ```bash
 npx wrangler secret put ELEVENLABS_WEBHOOK_SECRET
@@ -163,7 +163,7 @@ Create the token at [dash.cloudflare.com/profile/api-tokens](https://dash.cloudf
 - Permissions: **Account → Workers Scripts → Edit**, **Account → D1 → Edit**
 - Account resources: your account
 
-`.github/workflows/deploy-backend.yml` runs when `backend/` changes on `main`. It typechecks, tests, applies `schema.sql`, and deploys. Until the two secrets exist and `database_id` in `wrangler.toml` is real, that workflow fails on purpose.
+`.github/workflows/deploy-backend.yml` runs when `backend/` changes on `main`, and when started by hand. It typechecks, tests, creates or reuses the D1 database `jarvis-db`, applies `schema.sql`, deploys, then copies worker secrets from GitHub when those secrets exist. `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are required. A missing Twilio, Gemini, Groq, ElevenLabs, or app-token secret is skipped and listed in the job summary.
 
 ## Nightly lead research
 
