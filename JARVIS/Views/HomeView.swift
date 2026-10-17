@@ -76,6 +76,7 @@ struct HomeView: View {
                 VStack(spacing: 0) {
                     sheetLink("Agents", systemImage: "person.3") { AgentsView() }
                     sheetLink("Conversation", systemImage: "text.bubble") { ReplyDetailView() }
+                    sheetLink("News", systemImage: "newspaper") { NewsPulseView() }
                     sheetLink("Briefing", systemImage: "sun.horizon") { CloudBriefingView() }
                     sheetLink("Tasks", systemImage: "checklist") { CloudTasksView() }
                     sheetLink("Approvals", systemImage: "checkmark.circle") { CloudApprovalsView() }
@@ -321,6 +322,76 @@ struct ConfirmBar: View {
         .padding(12)
         .frame(maxWidth: .infinity)
         .glassPanel(tint: settings.primaryColor, radius: 16)
+    }
+}
+
+struct NewsPulseView: View {
+    @Environment(AssistantEngine.self) private var engine
+    @Environment(AppSettings.self) private var settings
+    @State private var briefing: NewsBriefing?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Button {
+                    engine.ask("What's happening?")
+                } label: {
+                    Text("What's happening?")
+                        .font(.system(size: 15, weight: .medium, design: .monospaced))
+                        .foregroundStyle(settings.accentColor)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 44)
+                        .overlay(Capsule().stroke(settings.accentColor.opacity(0.7), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                if let status = engine.statusLine, !status.isEmpty {
+                    Text(status)
+                        .font(.caption)
+                        .foregroundStyle(settings.accentColor)
+                }
+                if let briefing {
+                    Text(briefing.createdAt.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.55))
+                    Text(briefing.text)
+                        .font(.body)
+                        .foregroundStyle(.white)
+                        .textSelection(.enabled)
+                    if !briefing.citations.isEmpty {
+                        Text("Sources")
+                            .font(.caption.weight(.semibold))
+                            .tracking(1.2)
+                            .foregroundStyle(settings.primaryColor)
+                        ForEach(briefing.citations) { citation in
+                            newsLink(citation)
+                        }
+                    }
+                } else {
+                    Text("Ask what's happening for a short briefing from the live web.")
+                        .font(.body)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Color.black)
+        .navigationTitle("News")
+        .toolbar(.visible, for: .navigationBar)
+        .onAppear { briefing = NewsPulseStore.load() }
+        .onChange(of: engine.newsTick) { _, _ in
+            briefing = NewsPulseStore.load()
+        }
+    }
+
+    private func newsLink(_ citation: Citation) -> some View {
+        let destination = URL(string: citation.url)
+        return Group {
+            if let destination {
+                Link(citation.title, destination: destination)
+                    .font(.footnote)
+            }
+        }
     }
 }
 

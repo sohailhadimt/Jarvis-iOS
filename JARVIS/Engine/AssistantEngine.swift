@@ -47,6 +47,8 @@ final class AssistantEngine {
     private(set) var turns: [VoiceTurn] = []
     /// Bumped when a research report is saved, so Conversation can reload it.
     private(set) var researchTick: Int = 0
+    /// Bumped when a news briefing is saved, so the News panel can reload it.
+    private(set) var newsTick: Int = 0
     private(set) var microphoneMuted = false
     /// True from the moment a session is requested until the microphone is actually listening.
     private(set) var voiceConnecting = false
@@ -973,6 +975,10 @@ final class AssistantEngine {
         if wantsCloudTool(text) && CloudMonitor.shared.hasRunningWork {
             cloudExecuting = true
         }
+        if NewsPulse.wants(text) {
+            await deliverNews(userText: text)
+            return
+        }
         if isBriefingRequest(text) {
             await deliverBriefing(userText: text)
             return
@@ -1310,6 +1316,25 @@ final class AssistantEngine {
         return words.prefix(count).joined(separator: " ")
     }
 
+    /// World headlines from grounded search. "What's been happening" stays on the cloud briefing.
+    private func deliverNews(userText: String) async {
+        let persona = AppSettings.shared.personality
+        let outcome = await NewsPulse.run(question: userText, persona: persona) { step in
+            self.statusLine = step
+            self.pushActivity()
+        }
+        guard !Task.isCancelled else { return }
+        citations = outcome.citations
+        statusLine = nil
+        recordAssistant(outcome.report)
+        saveForWidget(transcript: userText, reply: outcome.spoken)
+        NewsPulseStore.save(text: outcome.report, citations: outcome.citations)
+        newsTick += 1
+        await say(outcome.spoken)
+        guard !Task.isCancelled else { return }
+        afterTurn()
+    }
+
     func clearGenerated() {
         generatedPreview = nil
     }
@@ -1389,7 +1414,7 @@ final class AssistantEngine {
         let lower = text.lowercased()
         let phrases = [
             "what's been happening", "whats been happening", "what has been happening",
-            "what have you been doing", "what's happening", "whats happening", "briefing",
+            "what have you been doing", "briefing",
         ]
         if phrases.contains(where: { lower.contains($0) }) { return true }
         let stripped = lower.replacingOccurrences(of: "jarvis", with: " ")
