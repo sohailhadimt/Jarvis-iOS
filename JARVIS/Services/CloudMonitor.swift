@@ -114,7 +114,7 @@ final class CloudMonitor {
         center.getNotificationSettings { settings in
             switch settings.authorizationStatus {
             case .notDetermined:
-                center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
                     guard granted else { return }
                     Self.deliver(id: id, body: body)
                 }

@@ -197,6 +197,9 @@ describe("phone numbers and the call script", () => {
     expect(script).toContain(outboundOpening(brief));
     expect(script).toContain("Never claim to be Master Hadi");
     expect(script).toContain("Then stop and listen.");
+    expect(script).toContain("Ask one question at a time");
+    expect(script).toContain("Read the message back");
+
   });
 
   it("keeps personal details out of the prompt unless this call is approved", () => {
@@ -204,6 +207,10 @@ describe("phone numbers and the call script", () => {
     expect(denied).toContain("not approved");
     expect(denied).not.toContain("Kent");
     expect(screeningScript()).toContain(INBOUND_GREETING);
+    expect(screeningScript()).toContain("live, two-way phone conversation");
+    expect(screeningScript()).toContain("wait for a complete reply");
+    expect(screeningScript()).toContain("accept corrections");
+
     expect(screeningScript()).not.toContain("Kent");
     const approved = approvedScreening("He is free after four.");
     expect(approved).toContain(INBOUND_GREETING);
@@ -487,7 +494,7 @@ describe("Twilio webhooks", () => {
     }
   });
 
-  it("retries an inbound call without overrides when the agent refuses them", async () => {
+  it("uses safe voicemail rather than a generic agent when call-specific instructions are refused", async () => {
     clearElevenLabsTelephonyCache();
     const env = callingEnv();
     const params = { CallSid: "CA123", From: "+447700900123", To: "+447700900000" };
@@ -513,17 +520,12 @@ describe("Twilio webhooks", () => {
       const response = await route(inboundRequest(params, signature), env, ctx());
       expect(response.status).toBe(200);
       const xml = await response.text();
-      expect(xml).toBe(twiml);
-      expect(xml).not.toContain("<Record");
-      expect(bodies).toHaveLength(2);
+      expect(xml).not.toBe(twiml);
+      expect(xml).toContain("<Record");
+      expect(xml).toContain("leave a message");
+      expect(bodies).toHaveLength(1);
       const first = bodies[0]?.conversation_initiation_client_data as { conversation_config_override?: unknown };
-      const second = bodies[1]?.conversation_initiation_client_data as {
-        conversation_config_override?: unknown;
-        dynamic_variables: { opening_line: string };
-      };
       expect(first.conversation_config_override).toBeTruthy();
-      expect(second.conversation_config_override).toBeUndefined();
-      expect(second.dynamic_variables.opening_line).toBe(INBOUND_GREETING);
       expect(JSON.stringify(bodies)).not.toContain("elevenlabs-key-example-value");
     } finally {
       globalThis.fetch = original;
