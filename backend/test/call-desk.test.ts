@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { awayFirstMessage, callStage, decisionOf, needsDelegation, ownerReach, parseAway, wittyFallback } from "../src/call-desk";
+import { awayFirstMessage, awayPrompt, callStage, decisionOf, needsDelegation, ownerReach, parseAway, wittyFallback } from "../src/call-desk";
 
 describe("call desk", () => {
   it("maps call statuses onto the home-screen stages", () => {
@@ -30,6 +30,8 @@ describe("call desk", () => {
     expect(parseAway("what's the weather")).toBeNull();
     expect(awayFirstMessage("I'll call back later")).toContain("may be handled by AI");
     expect(awayFirstMessage("I'll call back later")).toContain("I'll call back later");
+    expect(awayPrompt("I'll call back later")).toContain("two-way conversation");
+    expect(awayPrompt("I'll call back later")).toContain("let them correct it");
   });
 
   it("texts when he is busy or quiet, and keeps the daily cap", () => {
