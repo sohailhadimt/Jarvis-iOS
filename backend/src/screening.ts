@@ -16,6 +16,7 @@ import {
   type CallLine,
 } from "./calls";
 import { apiError, asString, isRecord, json, newId, nowIso } from "./http";
+import { continueInboundConversation, converseAction, converseTwiml, inboundOpening } from "./inbound-converse";
 import { forcePolly } from "./outbound-speech";
 import type { Env } from "./types";
 
@@ -24,7 +25,7 @@ const ACTIVE = ["screening", "listening", "handling", "message", "connecting", "
 export function isScreenWebhook(method: string, path: string): boolean {
   if (method !== "POST") return false;
   if (path === "/calls/inbound" || path === "/calls/sms") return true;
-  return /^\/calls\/(?:join|voicemail)\/[A-Za-z0-9_]+$/.test(path);
+  return /^\/calls\/(?:join|voicemail|converse)\/[A-Za-z0-9_]+$/.test(path);
 }
 
 /**
@@ -37,14 +38,14 @@ export function pollyInbound(env: Env): boolean {
 }
 
 export function inboundFallbackResponse(): Response {
-  return xml(takeMessage(`${INBOUND_GREETING} Please leave a message after the tone, and I will pass it to Master Hadi.`), 200);
+  return xml(say(`${INBOUND_GREETING} I'm sorry, I can't take this call just now. Goodbye.`), 200);
 }
 
 export async function handleScreenWebhook(request: Request, env: Env, path: string, ctx: ExecutionContext): Promise<Response> {
   const setup = callingSecrets(env);
   if (!setup.configured) {
     console.error("inbound call is not configured", setup.missing.join(","));
-    if (path === "/calls/inbound") return xml(takeMessage(`${INBOUND_GREETING} Please leave a message after the tone, and I will pass it to Master Hadi.`), 200);
+    if (path === "/calls/inbound") return inboundFallbackResponse();
     return xml(say(`${INBOUND_GREETING} I'm sorry, call screening is not set up. Goodbye.`), 503);
   }
   if (path === "/calls/inbound") {
@@ -57,6 +58,7 @@ export async function handleScreenWebhook(request: Request, env: Env, path: stri
   }
   if (path === "/calls/sms") return smsWebhook(request, env, ctx);
   const id = path.split("/").pop() ?? "";
+  if (path.startsWith("/calls/converse/")) return converseWebhook(request, env, id);
   if (path.startsWith("/calls/voicemail/")) return voicemailWebhook(request, env, id);
   return joinWebhook(request, env, id);
 }
@@ -108,15 +110,14 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
     console.error("inbound call was not stored", safeError(err instanceof Error ? err.message : "insert failed"));
   }
   if (pollyInbound(env)) {
-    await dbRun(env, "UPDATE outbound_calls SET status = 'message', updated_at = ? WHERE id = ?", [nowIso(), id]).catch(() => undefined);
-    await recordHandoff(env, { callId: id, path: "polly", ok: true, reason: "say_record" });
-    return xml(
-      takeMessage(
-        `${INBOUND_GREETING} Please leave a message after the tone.`,
-        voicemailCallback(request, id),
-      ),
-      200,
-    );
+    const opening = inboundOpening();
+    await dbRun(env, "UPDATE outbound_calls SET status = 'in_progress', transcript_json = ?, updated_at = ? WHERE id = ?", [
+      JSON.stringify([{ role: "assistant", text: opening }]),
+      nowIso(),
+      id,
+    ]).catch(() => undefined);
+    await recordHandoff(env, { callId: id, path: "polly", ok: true, reason: "converse" });
+    return xml(converseTwiml(opening, converseAction(request, id)), 200);
   }
   ctx.waitUntil(notify(env, id, caller, "", ""));
   ctx.waitUntil(learnCaller(env, id, new URL(request.url).origin));
@@ -143,13 +144,12 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
       id,
     ]).catch(() => undefined);
     await recordHandoff(env, { callId: id, path: "register", ok: false, reason, detail });
-    return xml(
-      takeMessage(
-        `${first} Please leave a message after the tone, and I will pass it to Master Hadi.`,
-        voicemailCallback(request, id),
-      ),
-      200,
-    );
+    await dbRun(env, "UPDATE outbound_calls SET status = 'in_progress', transcript_json = ?, updated_at = ? WHERE id = ?", [
+      JSON.stringify([{ role: "assistant", text: first }]),
+      nowIso(),
+      id,
+    ]).catch(() => undefined);
+    return xml(converseTwiml(first, converseAction(request, id)), 200);
   }
   await recordHandoff(env, { callId: id, path: "register", ok: true, reason: "twiml" });
   if (connected.conversationId) {
@@ -162,12 +162,12 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
   return new Response(connected.twiml, { status: 200, headers: { "content-type": "text/xml; charset=utf-8" } });
 }
 
-function voicemailCallback(request: Request, id: string): string {
-  const voicemail = new URL(request.url);
-  voicemail.protocol = "https:";
-  voicemail.pathname = `/calls/voicemail/${id}`;
-  voicemail.search = "";
-  return voicemail.toString();
+async function converseWebhook(request: Request, env: Env, id: string): Promise<Response> {
+  const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
+  const params = await formParams(request);
+  const valid = await twilioRequestSigned(request, params, token);
+  if (!valid) return xml(say("This call could not be verified. Goodbye."), 403);
+  return xml(await continueInboundConversation(env, id, params.SpeechResult || "", converseAction(request, id)), 200);
 }
 
 async function voicemailWebhook(request: Request, env: Env, id: string): Promise<Response> {
@@ -747,11 +747,6 @@ function twilioMessage(text: string): string {
 
 function say(line: string): string {
   return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-GB" voice="${FALLBACK_SAY_VOICE}">${escapeXml(line)}</Say><Hangup/></Response>`;
-}
-
-function takeMessage(line: string, voicemailUrl = ""): string {
-  const callback = voicemailUrl ? ` transcribe="true" transcribeCallback="${escapeXml(voicemailUrl)}"` : "";
-  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-GB" voice="${FALLBACK_SAY_VOICE}">${escapeXml(line)}</Say><Record maxLength="120" playBeep="true" timeout="5"${callback}/><Hangup/></Response>`;
 }
 
 function xml(body: string, status: number): Response {

@@ -52,19 +52,32 @@ export async function completeChat(
   env: Env,
   messages: ChatMessage[],
   tools: LlmTool[] | null,
+  options?: { timeoutMs?: number; maxTokens?: number; budgetMs?: number },
 ): Promise<LlmSuccess | LlmFailure> {
+  const started = Date.now();
+  const allowance = (): number => {
+    const cap = options?.timeoutMs ?? LIMITS.llmTimeoutMs;
+    if (!options?.budgetMs) return cap;
+    return Math.min(cap, options.budgetMs - (Date.now() - started));
+  };
   const cooldownRaw = await getState(env, COOLDOWN_KEY);
   const cooldownUntil = cooldownRaw ? Date.parse(cooldownRaw) : 0;
   const geminiCooling = Number.isFinite(cooldownUntil) && cooldownUntil > Date.now();
 
   if (env.GEMINI_API_KEY && !geminiCooling) {
-    const gemini = await callProvider("gemini", GEMINI_URL, env.GEMINI_API_KEY, GEMINI_MODEL, messages, tools);
+    const geminiWait = allowance();
+    if (geminiWait < 200) {
+      return { ok: false, code: "timeout", message: "The reply missed the latency budget." };
+    }
+    const gemini = await callProvider("gemini", GEMINI_URL, env.GEMINI_API_KEY, GEMINI_MODEL, messages, tools, geminiWait, options?.maxTokens);
     if (gemini.ok) return gemini;
     if (gemini.code === "rate_limited") {
       await setState(env, COOLDOWN_KEY, new Date(Date.now() + LIMITS.rateLimitCooldownMs).toISOString());
     }
     if (!env.GROQ_API_KEY) return gemini;
-    const groq = await callProvider("groq", GROQ_URL, env.GROQ_API_KEY, GROQ_MODEL, messages, tools);
+    const groqWait = allowance();
+    if (groqWait < 200) return gemini;
+    const groq = await callProvider("groq", GROQ_URL, env.GROQ_API_KEY, GROQ_MODEL, messages, tools, groqWait, options?.maxTokens);
     if (groq.ok) return groq;
     if (gemini.code === "rate_limited" && groq.code === "rate_limited") {
       return {
@@ -83,7 +96,9 @@ export async function completeChat(
   }
 
   if (env.GROQ_API_KEY) {
-    const groq = await callProvider("groq", GROQ_URL, env.GROQ_API_KEY, GROQ_MODEL, messages, tools);
+    const groqWait = allowance();
+    if (groqWait < 200) return { ok: false, code: "timeout", message: "The reply missed the latency budget." };
+    const groq = await callProvider("groq", GROQ_URL, env.GROQ_API_KEY, GROQ_MODEL, messages, tools, groqWait, options?.maxTokens);
     if (!groq.ok && geminiCooling) {
       return {
         ...groq,
@@ -168,12 +183,14 @@ async function callProvider(
   model: string,
   messages: ChatMessage[],
   tools: LlmTool[] | null,
+  timeoutMs: number = LIMITS.llmTimeoutMs,
+  maxTokens: number = 2048,
 ): Promise<LlmSuccess | LlmFailure> {
   const body: Record<string, unknown> = {
     model,
     messages: messages.map(toWireMessage),
     temperature: 0.2,
-    max_tokens: 2048,
+    max_tokens: maxTokens,
   };
   if (tools && tools.length > 0) body.tools = tools;
   try {
@@ -184,7 +201,7 @@ async function callProvider(
         "content-type": "application/json",
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(LIMITS.llmTimeoutMs),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const text = await response.text();
     const rateLimited =
