@@ -288,3 +288,51 @@ jobs:
             echo "- Voice POST \`${voice}\`"
             echo "- SMS POST \`${sms}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Register ElevenLabs post-call webhook and settle calls
+        env:
+          JARVIS_APP_TOKEN: ${{ secrets.JARVIS_APP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${JARVIS_APP_TOKEN:-}" ] || [ -z "${WORKER_URL:-}" ]; then
+            echo "JARVIS_APP_TOKEN and WORKER_URL are required to settle calls."
+            exit 1
+          fi
+          base="${WORKER_URL%/}"
+          code=$(curl -sS -o /tmp/settle.json -w "%{http_code}" \
+            -X POST "${base}/calls/settle" \
+            -H "authorization: Bearer ${JARVIS_APP_TOKEN}" \
+            -H "content-type: application/json" \
+            --data '{}')
+          echo "settle HTTP ${code}"
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          const body = JSON.parse(readFileSync("/tmp/settle.json", "utf8"));
+          const target = "call_2fe78971459946b3bd5bdcd82c15b378";
+          const settled = Array.isArray(body.settled) ? body.settled : [];
+          const hit = settled.find((row) => row && row.call_id === target);
+          const webhook = body.webhook || {};
+          console.log(`webhook ok=${Boolean(webhook.ok)} created=${Boolean(webhook.created)} attached=${Boolean(webhook.attached)} status=${webhook.status ?? 0}`);
+          if (!hit || !hit.message_id) {
+            console.error(`No unread message for ${target}.`);
+            for (const row of settled) {
+              if (!row) continue;
+              console.error(`${row.call_id} ${row.status} message=${row.message_id || "none"}`);
+            }
+            process.exit(1);
+          }
+          console.log(`${target} ${hit.message_id} ${hit.status}`);
+          console.log(hit.spoken || "");
+          if (!webhook.attached) {
+            console.error("Post-call webhook was not attached.");
+            process.exit(1);
+          }
+          const summary = [
+            "## Post-call settle",
+            `- Webhook attached: ${Boolean(webhook.attached)} (created ${Boolean(webhook.created)}, HTTP ${webhook.status ?? 0})`,
+            `- ${target}: \`${hit.message_id}\``,
+            `- Spoken: ${hit.spoken || ""}`,
+          ].join("\n");
+          const { appendFileSync } = await import("node:fs");
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
+          NODE

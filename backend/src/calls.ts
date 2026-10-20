@@ -357,11 +357,15 @@ export async function twilioRequestSigned(request: Request, params: Record<strin
 
 export function isCallWebhook(method: string, path: string): boolean {
   if (method !== "POST") return false;
-  if (path === "/calls/elevenlabs") return true;
+  if (path === "/calls/elevenlabs" || path === "/calls/elevenlabs/post-call") return true;
   return /^\/calls\/(?:voice|twilio-status|gather)\/[A-Za-z0-9_]+$/.test(path);
 }
 
 export async function handleCallWebhook(request: Request, env: Env, path: string): Promise<Response> {
+  if (path === "/calls/elevenlabs/post-call") {
+    const { handleElevenPostCall } = await import("./call-settle");
+    return handleElevenPostCall(request, env);
+  }
   const setup = callingSecrets(env);
   if (!setup.configured || !env.TWILIO_AUTH_TOKEN || !env.TWILIO_ACCOUNT_SID || !env.TWILIO_FROM_NUMBER) {
     return xml(sayAndHangup("Hello, this is JARVIS, Master Hadi's personal assistant. I'm sorry, this call is not set up. Goodbye."), 503);
@@ -673,7 +677,7 @@ async function elevenLabsWebhook(request: Request, env: Env): Promise<Response> 
   const raw = await request.text();
   const secret = env.ELEVENLABS_WEBHOOK_SECRET?.trim();
   if (secret) {
-    const ok = await elevenSignatureValid(request.headers.get("ElevenLabs-Signature"), raw, secret);
+    const ok = await elevenLabsSignatureValid(request.headers.get("ElevenLabs-Signature"), raw, secret);
     if (!ok) return apiError(401, "unauthorized", "Webhook signature did not match.");
   }
   const payload = parseJson(raw);
@@ -1209,17 +1213,29 @@ async function formParams(request: Request): Promise<Record<string, string>> {
   return fields;
 }
 
-async function elevenSignatureValid(header: string | null, body: string, secret: string): Promise<boolean> {
-  if (!header) return false;
-  const parts = header.split(",");
+/** HMAC of `${timestamp}.${body}`. Accepts any v0 while a secret rotates. Rejects stamps older or newer than 30 minutes. */
+export async function elevenLabsSignatureValid(
+  header: string | null,
+  body: string,
+  secret: string,
+  nowMs = Date.now(),
+): Promise<boolean> {
+  if (!header || !secret) return false;
   let timestamp = "";
-  let signature = "";
-  for (const part of parts) {
-    const [name, value] = part.split("=");
-    if (name?.trim() === "t") timestamp = value?.trim() ?? "";
-    if (name?.trim() === "v0") signature = value?.trim() ?? "";
+  const signatures: string[] = [];
+  for (const part of header.split(",")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    const name = part.slice(0, eq).trim();
+    const value = part.slice(eq + 1).trim();
+    if (name === "t") timestamp = value;
+    if (name === "v0" && value) signatures.push(value);
   }
-  if (!timestamp || !signature) return false;
+  if (!timestamp || signatures.length === 0) return false;
+  const raw = Number(timestamp);
+  if (!Number.isFinite(raw)) return false;
+  const stampMs = raw > 1e12 ? raw : raw * 1000;
+  if (Math.abs(nowMs - stampMs) > 30 * 60 * 1000) return false;
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(secret),
@@ -1229,7 +1245,7 @@ async function elevenSignatureValid(header: string | null, body: string, secret:
   );
   const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${timestamp}.${body}`));
   const expected = [...new Uint8Array(mac)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-  return timingEqual(expected, signature);
+  return signatures.some((signature) => timingEqual(expected, signature));
 }
 
 function notSetUp(missing: string[]): Response {

@@ -1,3 +1,4 @@
+import { sweepInboundCalls } from "./call-settle";
 import { runTick } from "./execute";
 import { sweepHunts } from "./hunt";
 import { runMissionTick } from "./missions";
@@ -22,6 +23,7 @@ export default {
         sweepOwner(env),
         sweepMemoryNudges(env),
         sweepHunts(env),
+        sweepInboundCalls(env),
       ]),
     );
   },

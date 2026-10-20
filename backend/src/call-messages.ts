@@ -33,18 +33,20 @@ const UNREAD_SQL =
 const RECENT_SQL =
   "SELECT id, call_id, caller_name, summary, spoken, called_at, read_at, created_at FROM call_messages ORDER BY created_at DESC LIMIT 30";
 
+/** True for the old voicemail placeholder and for a blank summary. */
+export function isPlaceholderSummary(text: string): boolean {
+  const clean = text.replace(/\s+/g, " ").trim();
+  return !clean || /^a caller left a message\.?$/i.test(clean);
+}
+
 /** Spoken line for one finished inbound call. No phone numbers. */
 export function spokenCallMessage(name: string, calledAtIso: string, summary: string): string {
   const who = callerLabel(name);
   const time = londonClock(calledAtIso);
   const detail = tidyDetail(summary);
-  if (!detail) return `Sir, you have a message. ${who} called at ${time}.`;
-  const clause = detail.replace(/[.…]+$/u, "");
-  if (/^(to|about|asking|for)\b/i.test(clause)) {
-    return `Sir, you have a message. ${who} called at ${time} ${clause}.`;
-  }
+  if (!detail) return `Sir, you have a message from ${who} at ${time}.`;
   const sentence = /[.!?…]$/u.test(detail) ? detail : `${detail}.`;
-  return `Sir, you have a message. ${who} called at ${time}. ${sentence}`;
+  return `Sir, you have a message from ${who}. They said ${sentence}`;
 }
 
 /**
@@ -68,7 +70,8 @@ export async function rememberInboundMessage(env: Env, callId: string): Promise<
       [callId],
     );
     if (!call || call.status !== "completed") return true;
-    const detail = tidyDetail(call.summary || screen.reason || "");
+    const rawDetail = tidyDetail(call.summary || screen.reason || "");
+    const detail = isPlaceholderSummary(rawDetail) ? "" : rawDetail;
     const spoken = spokenCallMessage(screen.caller_name, call.created_at, detail);
     const who = callerLabel(screen.caller_name);
     const existing = await dbFirst<MessageRow>(
@@ -77,7 +80,19 @@ export async function rememberInboundMessage(env: Env, callId: string): Promise<
       [callId],
     );
     if (existing) {
-      if (detail && detail !== existing.summary) {
+      const replacing = isPlaceholderSummary(existing.summary) && Boolean(detail);
+      if (replacing) {
+        const nextSpoken = spokenCallMessage(screen.caller_name, existing.called_at || call.created_at, detail);
+        await dbRun(env, "UPDATE call_messages SET caller_name = ?, summary = ?, spoken = ? WHERE id = ?", [
+          who,
+          detail,
+          nextSpoken,
+          existing.id,
+        ]);
+        const owner = await readOwnerMobile(env);
+        if (owner) await sendSms(env, owner, nextSpoken);
+        await pushNotice(env, "JARVIS", nextSpoken, { kind: "call_message", message_id: existing.id }, "JARVIS_MESSAGE");
+      } else if (detail && detail !== existing.summary) {
         const nextSpoken = spokenCallMessage(screen.caller_name, existing.called_at || call.created_at, detail);
         await dbRun(env, "UPDATE call_messages SET summary = ?, spoken = ? WHERE id = ?", [detail, nextSpoken, existing.id]);
       }

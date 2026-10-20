@@ -49,6 +49,13 @@ function messageEnv(screens: ScreenRow[], calls: CallRow[], messages: MessageRow
               read_at: null,
               created_at: String(this.args[6]),
             });
+          } else if (sql.includes("SET caller_name = ?")) {
+            const row = messages.find((item) => item.id === String(this.args[3]));
+            if (row) {
+              row.caller_name = String(this.args[0]);
+              row.summary = String(this.args[1]);
+              row.spoken = String(this.args[2]);
+            }
           } else if (sql.includes("SET summary = ?")) {
             const row = messages.find((item) => item.id === String(this.args[2]));
             if (row) {
@@ -112,7 +119,7 @@ describe("call messages", () => {
       "to check you're well and asked you to ring him back on +15550001111",
     );
     expect(line).toBe(
-      "Sir, you have a message. Sohil called at 11:06 to check you're well and asked you to ring him back on.",
+      "Sir, you have a message from Sohil. They said to check you're well and asked you to ring him back on.",
     );
     expect(line).not.toContain("+1555");
   });
@@ -142,7 +149,7 @@ describe("call messages", () => {
       expect(await rememberInboundMessage(env, "call_abc")).toBe(true);
       expect(messages).toHaveLength(1);
       expect(messages[0]?.spoken).toBe(
-        "Sir, you have a message. Sohil called at 11:06 to check you're well and asked you to ring him back.",
+        "Sir, you have a message from Sohil. They said to check you're well and asked you to ring him back.",
       );
       expect(bodies).toHaveLength(1);
       const sent = new URLSearchParams(bodies[0]);
@@ -154,7 +161,8 @@ describe("call messages", () => {
       const listed = (await unread.json()) as { messages: Array<{ id: string; read: boolean; spoken: string }> };
       expect(listed.messages).toHaveLength(1);
       expect(listed.messages[0]?.read).toBe(false);
-      expect(listed.messages[0]?.spoken).toContain("Sohil called at 11:06");
+      expect(listed.messages[0]?.spoken).toContain("from Sohil");
+      expect(listed.messages[0]?.spoken).toContain("They said");
 
       const read = await route(
         new Request(`https://jarvis.example/calls/messages/${listed.messages[0]?.id}/read`, { method: "POST", headers: bearer }),
@@ -170,6 +178,47 @@ describe("call messages", () => {
       const kept = (await recent.json()) as { messages: Array<{ read: boolean }> };
       expect(kept.messages).toHaveLength(1);
       expect(kept.messages[0]?.read).toBe(true);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("texts once when a placeholder summary is replaced with the real message", async () => {
+    const screens: ScreenRow[] = [{ call_id: "call_vm", direction: "inbound", caller_name: "Sam", reason: "" }];
+    const calls: CallRow[] = [
+      {
+        id: "call_vm",
+        status: "completed",
+        summary: "The boiler is leaking.",
+        created_at: "2026-10-20T10:06:00.000Z",
+      },
+    ];
+    const messages: MessageRow[] = [
+      {
+        id: "cmsg_e89beexample",
+        call_id: "call_vm",
+        caller_name: "Someone",
+        summary: "A caller left a message.",
+        spoken: "Sir, you have a message from Someone at 11:06.",
+        called_at: "2026-10-20T10:06:00.000Z",
+        read_at: null,
+        created_at: "2026-10-20T10:07:00.000Z",
+      },
+    ];
+    const env = messageEnv(screens, calls, messages);
+    const bodies: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(String(init?.body ?? ""));
+      return new Response("{}", { status: 201 });
+    }) as typeof fetch;
+    try {
+      expect(await rememberInboundMessage(env, "call_vm")).toBe(true);
+      expect(await rememberInboundMessage(env, "call_vm")).toBe(true);
+      expect(messages[0]?.summary).toBe("The boiler is leaking.");
+      expect(messages[0]?.caller_name).toBe("Sam");
+      expect(messages[0]?.spoken).toBe("Sir, you have a message from Sam. They said The boiler is leaking.");
+      expect(bodies).toHaveLength(1);
     } finally {
       globalThis.fetch = original;
     }

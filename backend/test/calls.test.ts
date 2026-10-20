@@ -333,6 +333,7 @@ describe("Twilio webhooks", () => {
     expect(isCallWebhook("POST", "/calls/voice/call_abc")).toBe(true);
     expect(isCallWebhook("GET", "/calls/voice/call_abc")).toBe(false);
     expect(isCallWebhook("POST", "/calls/elevenlabs")).toBe(true);
+    expect(isCallWebhook("POST", "/calls/elevenlabs/post-call")).toBe(true);
     expect(isCallWebhook("POST", "/calls/gather/call_abc")).toBe(true);
     expect(isCallWebhook("GET", "/calls/gather/call_abc")).toBe(false);
     expect(isScreenWebhook("POST", "/calls/inbound")).toBe(true);
@@ -704,7 +705,7 @@ describe("Twilio webhooks", () => {
       expect(sent).toHaveLength(1);
       expect(sent[0]?.get("To")).toBe("+15557654321");
       expect(sent[0]?.get("From")).toBe("+447700900000");
-      expect(sent[0]?.get("Body")).toContain("Sir, you have a message.");
+      expect(sent[0]?.get("Body")).toContain("Sir, you have a message from");
       expect(sent[0]?.get("Body")).toContain("boiler");
       const repeat = await route(signedForm(action, bye, byeSignature), env, ctx());
       expect(repeat.status).toBe(200);

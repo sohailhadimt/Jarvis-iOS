@@ -179,11 +179,14 @@ async function voicemailWebhook(request: Request, env: Env, id: string): Promise
   const transcript = spoken.slice(0, 300);
   const recordingSid = (params.RecordingSid || "").trim();
   if (recordingSid) await rememberRecording(env, id, recordingSid).catch(() => undefined);
-  const prior = await dbFirst<{ summary: string | null }>(env, "SELECT summary FROM outbound_calls WHERE id = ?", [id]).catch(() => null);
-  const already = Boolean(transcript && prior?.summary?.includes(transcript.slice(0, 80)));
   await recordHandoff(env, { callId: id, path: "voicemail", ok: true, reason: spoken ? "transcribed" : "recorded" });
+  if (!transcript) return xml("<Response></Response>", 200);
+  const prior = await dbFirst<{ summary: string | null }>(env, "SELECT summary FROM outbound_calls WHERE id = ?", [id]).catch(() => null);
+  const priorSummary = (prior?.summary ?? "").replace(/\s+/g, " ").trim();
+  const placeholder = !priorSummary || /^a caller left a message\.?$/i.test(priorSummary);
+  const already = Boolean(priorSummary && !placeholder && priorSummary.includes(transcript.slice(0, 80)));
   if (!already) {
-    const stored = transcript || "A caller left a message.";
+    const stored = transcript.replace(/\+\d{6,}/g, "").replace(/\s+/g, " ").trim();
     await dbRun(
       env,
       "UPDATE outbound_calls SET status = 'completed', summary = ?, updated_at = ? WHERE id = ?",
