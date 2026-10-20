@@ -1,8 +1,10 @@
 import { runTick } from "./execute";
+import { sweepHunts } from "./hunt";
 import { runMissionTick } from "./missions";
 import { sweepOwner } from "./owner-alert";
 import { runPersonaTick } from "./personas";
 import { route } from "./routes";
+import { sweepMemoryNudges } from "./sms-desk";
 import type { Env } from "./types";
 
 export default {
@@ -18,6 +20,8 @@ export default {
           await runPersonaTick(env);
         })(),
         sweepOwner(env),
+        sweepMemoryNudges(env),
+        sweepHunts(env),
       ]),
     );
   },

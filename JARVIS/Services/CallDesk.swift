@@ -55,6 +55,7 @@ final class DevicePresence {
     private var activity = "unknown"
     private var started = false
     private var lastPost = Date.distantPast
+    private var lastBusy = Date.distantPast
 
     func start() {
         guard !started else { return }
@@ -91,6 +92,31 @@ final class DevicePresence {
         lastPost = Date()
         let fix = DeviceLocation.shared.cached()
         await client.postPresence(activity: activity, busy: Self.calendarBusy(), lat: fix?.lat, lon: fix?.lon)
+        await postBusyIfDue()
+    }
+
+    /// The next fortnight of busy blocks, only when calendar access is already granted.
+    private func postBusyIfDue() async {
+        guard Date().timeIntervalSince(lastBusy) > 600 else { return }
+        guard EKEventStore.authorizationStatus(for: .event) == .fullAccess else { return }
+        guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else { return }
+        lastBusy = Date()
+        await client.postBusy(Self.busyBlocks())
+    }
+
+    private static func busyBlocks() -> [[String: Any]] {
+        let store = EKEventStore()
+        let start = Date()
+        let end = Calendar.current.date(byAdding: .day, value: 14, to: start) ?? start
+        let events = store.events(matching: store.predicateForEvents(withStart: start, end: end, calendars: nil))
+        let formatter = ISO8601DateFormatter()
+        return events.prefix(40).map { event in
+            [
+                "starts_at": formatter.string(from: event.startDate),
+                "ends_at": formatter.string(from: event.endDate),
+                "title": String((event.title ?? "").prefix(80)),
+            ]
+        }
     }
 
     private static func calendarBusy() -> Bool {

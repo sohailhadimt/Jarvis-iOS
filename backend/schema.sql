@@ -364,6 +364,62 @@ CREATE TABLE IF NOT EXISTS call_bridges (
   created_at TEXT NOT NULL
 );
 
+-- Facts learned from texts. Birthdays use when_md (MM-DD). nudged_for is the occurrence date already texted.
+CREATE TABLE IF NOT EXISTS owner_facts (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  detail TEXT NOT NULL,
+  when_md TEXT,
+  nudged_for TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sms_turns (
+  id TEXT PRIMARY KEY,
+  phone TEXT NOT NULL,
+  role TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sms_turns_phone ON sms_turns (phone, created_at);
+
+-- A comparison of businesses JARVIS is calling. Booking waits for an approval.
+CREATE TABLE IF NOT EXISTS call_hunts (
+  id TEXT PRIMARY KEY,
+  goal TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS call_quotes (
+  id TEXT PRIMARY KEY,
+  hunt_id TEXT NOT NULL,
+  call_id TEXT,
+  business TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  price TEXT,
+  availability TEXT,
+  fees TEXT,
+  summary TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_call_quotes_hunt ON call_quotes (hunt_id);
+CREATE INDEX IF NOT EXISTS idx_call_quotes_call ON call_quotes (call_id);
+
+-- Busy blocks posted by the phone. Used only to propose meeting times.
+CREATE TABLE IF NOT EXISTS calendar_busy (
+  id TEXT PRIMARY KEY,
+  starts_at TEXT NOT NULL,
+  ends_at TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS call_permissions (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,

@@ -45,7 +45,7 @@ export async function handleScreenWebhook(request: Request, env: Env, path: stri
       return inboundFallbackResponse();
     }
   }
-  if (path === "/calls/sms") return smsWebhook(request, env);
+  if (path === "/calls/sms") return smsWebhook(request, env, ctx);
   const id = path.split("/").pop() ?? "";
   if (path.startsWith("/calls/voicemail/")) return voicemailWebhook(request, env, id);
   return joinWebhook(request, env, id);
@@ -182,29 +182,44 @@ async function voicemailWebhook(request: Request, env: Env, id: string): Promise
   return xml("<Response></Response>", 200);
 }
 
-async function smsWebhook(request: Request, env: Env): Promise<Response> {
+async function smsWebhook(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
   const params = await formParams(request);
   const valid = await twilioRequestSigned(request, params, token);
   if (!valid) return xml("<Response></Response>", 403);
-  const action = smsAction(params.Body ?? "");
-  if (!action) return xml("<Response></Response>", 200);
-  const row = await dbFirst<{ id: string }>(
-    env,
-    `SELECT outbound_calls.id AS id
-     FROM outbound_calls
-     JOIN call_screen ON call_screen.call_id = outbound_calls.id
-     WHERE call_screen.direction = 'inbound' AND outbound_calls.status IN ('screening','listening','handling','message','connecting','in_progress','ringing')
-     ORDER BY outbound_calls.created_at DESC LIMIT 1`,
-  );
-  if (!row) return xml("<Response></Response>", 200);
-  const origin = new URL(request.url).origin;
-  if (action === "allow" || action === "deny") {
-    await applyPersonal(env, row.id, action === "allow", "", origin);
-  } else if (action === "connect") {
-    await applyDecision(env, row.id, "connect", origin);
-  } else {
-    await applyDecision(env, row.id, action, origin);
+  const body = params.Body ?? "";
+  const from = params.From ?? "";
+  const action = smsAction(body);
+  if (action) {
+    const { readOwnerMobile } = await import("./owner-alert");
+    const owner = await readOwnerMobile(env);
+    const sender = toE164(from);
+    if (owner && sender === owner) {
+      const row = await dbFirst<{ id: string }>(
+        env,
+        `SELECT outbound_calls.id AS id
+         FROM outbound_calls
+         JOIN call_screen ON call_screen.call_id = outbound_calls.id
+         WHERE call_screen.direction = 'inbound' AND outbound_calls.status IN ('screening','listening','handling','message','connecting','in_progress','ringing')
+         ORDER BY outbound_calls.created_at DESC LIMIT 1`,
+      );
+      if (row) {
+        const origin = new URL(request.url).origin;
+        if (action === "allow" || action === "deny") {
+          await applyPersonal(env, row.id, action === "allow", "", origin);
+        } else if (action === "connect") {
+          await applyDecision(env, row.id, "connect", origin);
+        } else {
+          await applyDecision(env, row.id, action, origin);
+        }
+        return xml("<Response></Response>", 200);
+      }
+    }
+  }
+  if (body.trim()) {
+    ctx.waitUntil(
+      import("./sms-desk").then((mod) => mod.handleInboundSms(env, from, body).catch(() => undefined)),
+    );
   }
   return xml("<Response></Response>", 200);
 }

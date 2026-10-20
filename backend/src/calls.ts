@@ -663,6 +663,7 @@ async function twilioStatusWebhook(request: Request, env: Env, id: string): Prom
   await updateCall(env, id, patch);
   if (patch.status === "completed" || patch.status === "failed") {
     void import("./call-desk").then((mod) => mod.settleDelegation(env, id).catch(() => undefined));
+    void import("./hunt").then((mod) => mod.noteQuote(env, id).catch(() => undefined));
   }
   return json({ ok: true });
 }
@@ -694,6 +695,7 @@ async function elevenLabsWebhook(request: Request, env: Env): Promise<Response> 
   await updateCall(env, row.id, patch);
   void noteAwayOnCall(env, row.id);
   void settleDelegation(env, row.id);
+  void import("./hunt").then((mod) => mod.noteQuote(env, row.id).catch(() => undefined));
   if (read?.lines.length) {
     const updated = { ...row, transcript: read.lines };
     await noteScreenFromTranscript(env, updated);
@@ -1083,7 +1085,7 @@ async function decideRoute(request: Request, env: Env, id: string): Promise<Resp
   return json({ ok: true, confirming: Boolean(placed), call: row ? await presentCall(env, row) : null });
 }
 
-async function dialConfirm(env: Env, contact: string, to: string, brief: string): Promise<string | null> {
+export async function dialConfirm(env: Env, contact: string, to: string, brief: string): Promise<string | null> {
   const from = toE164(env.TWILIO_FROM_NUMBER ?? "");
   const sid = (env.TWILIO_ACCOUNT_SID ?? "").trim();
   const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();

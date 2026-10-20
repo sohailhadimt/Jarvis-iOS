@@ -891,6 +891,28 @@ struct CloudClient: Sendable {
         return envelope.alerts
     }
 
+    func callHunts() async throws -> [CallHunt] {
+        let envelope: HuntListEnvelope = try await sendNoBody(method: "GET", path: "/calls/hunts")
+        return envelope.hunts
+    }
+
+    func chooseHunt(huntID: String, quoteID: String) async -> Bool {
+        guard let body = try? JSONSerialization.data(withJSONObject: ["quote_id": quoteID]) else { return false }
+        guard let (_, status) = try? await raw(
+            method: "POST",
+            path: "/calls/hunts/\(Self.path(huntID))/choose",
+            authorize: true,
+            body: body,
+            query: []
+        ) else { return false }
+        return (200..<300).contains(status)
+    }
+
+    func postBusy(_ blocks: [[String: Any]]) async {
+        guard let data = try? JSONSerialization.data(withJSONObject: ["blocks": blocks]) else { return }
+        _ = try? await raw(method: "POST", path: "/calendar/busy", authorize: true, body: data, query: [])
+    }
+
     private func postCallAction(path: String, body: [String: Any]) async -> ScreenResult {
         let data: Data
         do {
@@ -1154,6 +1176,28 @@ struct OwnerCallSettings: Codable, Equatable, Sendable {
         case urgentOnly = "urgent_only"
         case questionTimeoutSeconds = "question_timeout_seconds"
     }
+}
+
+struct CallQuote: Decodable, Identifiable, Equatable, Sendable {
+    var id: String
+    var business: String
+    var phone: String
+    var price: String
+    var availability: String
+    var fees: String
+    var summary: String
+    var status: String
+}
+
+struct CallHunt: Decodable, Identifiable, Equatable, Sendable {
+    var id: String
+    var goal: String
+    var status: String
+    var quotes: [CallQuote]
+}
+
+private struct HuntListEnvelope: Decodable {
+    var hunts: [CallHunt]
 }
 
 struct OwnerAlert: Decodable, Identifiable, Equatable, Sendable {

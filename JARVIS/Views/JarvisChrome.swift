@@ -221,6 +221,11 @@ private struct SessionExtras: View {
                 .padding(.horizontal, 20)
                 .padding(.bottom, 8)
         }
+        if !engine.hunts.isEmpty {
+            HuntStrip()
+                .padding(.horizontal, 20)
+                .padding(.bottom, 8)
+        }
         if engine.pendingCallBrief != nil {
             CallBriefBar()
                 .padding(.horizontal, 20)

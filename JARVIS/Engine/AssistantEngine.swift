@@ -60,6 +60,8 @@ final class AssistantEngine {
     private(set) var ownerAlert: OwnerAlert?
     /// Calls shown as cards on the home screen.
     private(set) var deskCalls: [StoredCall] = []
+    /// Quote comparisons waiting on the home screen. Booking stays an approval.
+    private(set) var hunts: [CallHunt] = []
     /// True while a spoken away order is still in force.
     private(set) var awayActive = false
     var interceptor: Bool { inboundCall != nil || awayActive }
@@ -1623,6 +1625,10 @@ final class AssistantEngine {
         Task { await self.sendDecision(id, choice: choice) }
     }
 
+    func chooseHunt(_ huntID: String, quoteID: String) {
+        Task { await self.sendHuntChoice(huntID, quoteID) }
+    }
+
     func playRecording(_ id: String) {
         Task { await self.playCallRecording(id) }
     }
@@ -1648,6 +1654,17 @@ final class AssistantEngine {
         await speakLine(line, userText: text)
         guard !Task.isCancelled else { return }
         afterTurn()
+    }
+
+    private func sendHuntChoice(_ huntID: String, _ quoteID: String) async {
+        guard let client = try? JarvisCloudAPI.client() else { return }
+        let accepted = await client.chooseHunt(huntID: huntID, quoteID: quoteID)
+        statusLine = accepted
+            ? "That's waiting for your approval, Sir. Nothing has been paid."
+            : "I couldn't hold that one, Sir."
+        if let rows = try? await client.callHunts() {
+            hunts = rows
+        }
     }
 
     private func sendDecision(_ id: String, choice: String) async {
@@ -1766,6 +1783,9 @@ final class AssistantEngine {
         await CallDevice.uploadIfNeeded()
         await pullQuestions(client)
         await pullOwnerAlerts(client)
+        if let rows = try? await client.callHunts() {
+            hunts = rows
+        }
         if let away = try? await client.awayStatus() {
             awayActive = away.active
             VoiceMeter.shared.interceptor = interceptor

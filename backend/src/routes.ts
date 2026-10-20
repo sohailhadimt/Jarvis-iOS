@@ -1,5 +1,6 @@
 import { authorize } from "./auth";
 import { handleCallApi, handleCallWebhook, isCallWebhook } from "./calls";
+import { bookApproved, chooseQuoteRoute, listHunts } from "./hunt";
 import { handleOwnerWebhook, isOwnerWebhook, rememberOrigin, routeOwnerApi } from "./owner-alert";
 import { routeRelay } from "./relay";
 import { handleScreenWebhook, inboundFallbackResponse, isScreenWebhook, routeScreeningApi } from "./screening";
@@ -37,6 +38,7 @@ import {
   readJson,
 } from "./http";
 import { markPersonaDraft, routePersona } from "./personas";
+import { saveBusy } from "./sms-desk";
 import { optionalSourceUrls } from "./sources";
 import { isPipelineStage, parseMrr } from "./tools";
 import type {
@@ -99,6 +101,10 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "POST" && parts[0] === "pipeline" && parts[1] && parts.length === 2) {
       return writePipeline(request, env, parts[1]);
     }
+    if (request.method === "GET" && path === "/calls/hunts") return listHunts(env);
+    const huntChoice = /^\/calls\/hunts\/(hunt_[A-Za-z0-9]+)\/choose$/.exec(path);
+    if (request.method === "POST" && huntChoice) return chooseQuoteRoute(request, env, huntChoice[1]);
+    if (request.method === "POST" && path === "/calendar/busy") return saveBusy(request, env);
     const owned = await routeOwnerApi(request, env, path);
     if (owned) return owned;
     const relayed = await routeRelay(request, env, path);
@@ -323,15 +329,25 @@ async function decideApproval(
       );
     }
   }
+  let confirmation = false;
+  let paymentRefused = false;
+  if (status === "approved" && row.action === "book_quote") {
+    const booked = await bookApproved(env, row);
+    confirmation = booked.dialed;
+    paymentRefused = booked.refused;
+  }
+  const approvedLine = confirmation
+    ? `Approval ${id} approved. A confirmation call was placed. Nothing was paid.`
+    : paymentRefused
+      ? `Approval ${id} approved. Payment was requested, so nothing was called or paid.`
+      : `Approval ${id} approved. Nothing was sent, published, or paid.`;
   if (row.task_id) {
     await logProgress(
       env,
       row.task_id,
       row.subtask_id,
       status === "approved" ? "info" : "warn",
-      status === "approved"
-        ? `Approval ${id} approved. Nothing was sent, published, or paid.`
-        : `Approval ${id} rejected.`,
+      status === "approved" ? approvedLine : `Approval ${id} rejected.`,
       { reason },
     );
     await recomputeTaskStatus(env, row.task_id);
@@ -340,9 +356,16 @@ async function decideApproval(
     id,
     reason,
     external_action_taken: false,
+    confirmation_call: confirmation,
+    paid: false,
   });
   const updated = await dbFirst<ApprovalRow>(env, "SELECT * FROM approvals WHERE id = ?", [id]);
-  return json({ approval: updated ? mapApproval(updated) : null, external_action_taken: false });
+  return json({
+    approval: updated ? mapApproval(updated) : null,
+    external_action_taken: false,
+    confirmation_call: confirmation,
+    paid: false,
+  });
 }
 
 async function listMemory(env: Env, url: URL): Promise<Response> {
