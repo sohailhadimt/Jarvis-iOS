@@ -891,6 +891,13 @@ struct CloudClient: Sendable {
         return envelope.alerts
     }
 
+    func pairingTicket(refresh: Bool) async throws -> PairingTicket {
+        if refresh {
+            return try await sendJSON(method: "POST", path: "/calls/pair", body: [:])
+        }
+        return try await sendNoBody(method: "GET", path: "/calls/pair")
+    }
+
     func callHunts() async throws -> [CallHunt] {
         let envelope: HuntListEnvelope = try await sendNoBody(method: "GET", path: "/calls/hunts")
         return envelope.hunts
@@ -1175,6 +1182,18 @@ struct OwnerCallSettings: Codable, Equatable, Sendable {
         case maxCallsPerDay = "max_calls_per_day"
         case urgentOnly = "urgent_only"
         case questionTimeoutSeconds = "question_timeout_seconds"
+    }
+}
+
+struct PairingTicket: Decodable, Equatable, Sendable {
+    var code: String
+    var expiresAt: String
+    var number: String
+    var paired: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case code, number, paired
+        case expiresAt = "expires_at"
     }
 }
 

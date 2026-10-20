@@ -1,15 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { bookingAllowed, extractQuote } from "../src/hunt";
 import {
+  asksCapabilities,
   birthdayNudge,
+  capabilityBubbles,
   learnFacts,
+  menuChoice,
+  pairingDigits,
   parsePhones,
   paymentAsk,
   proposeSlots,
   scheduleEmail,
   screenStranger,
+  smsBubbles,
   wantsHunt,
   wantsSchedule,
+  welcomeBubbles,
 } from "../src/sms-desk";
 
 describe("text desk", () => {
@@ -34,6 +40,31 @@ describe("text desk", () => {
 
   it("screens a stranger without chatting", () => {
     expect(screenStranger()).toBe("Hello, this is JARVIS, Master Hadi's assistant. I'll pass that to him.");
+  });
+
+  it("pairs only a bare 6-digit code and welcomes in separate texts", () => {
+    expect(pairingDigits("482 913")).toBe("482913");
+    expect(pairingDigits("the code is 482913")).toBeNull();
+    const welcome = welcomeBubbles("+440000000000");
+    expect(welcome[0]).toBe("Connected, Sir. I'm JARVIS.");
+    expect(welcome[1]).toBe("Text or call +440000000000 whenever you need me.");
+    expect(welcome[2]).toBe("1. Make a call for me\n2. Book an appointment or service\n3. Help with a subscription or bill");
+    expect(welcome[3]).toBe("Reply 1, 2 or 3, or just tell me what you need.");
+    expect(menuChoice("2")).toBe("2");
+    expect(menuChoice("book a table")).toBeNull();
+  });
+
+  it("answers what it can do in short bubbles", () => {
+    expect(asksCapabilities("What can you do?")).toBe(true);
+    const bubbles = capabilityBubbles();
+    expect(bubbles.join(" ")).toContain("book me a dentist this week");
+    expect(bubbles.join(" ")).toContain("find a plumber who can come today");
+    expect(bubbles.at(-1)).toBe("I'll text or call you when something needs you.");
+    expect(smsBubbles("Of course, Sir. I can do that. Shall I go ahead?")).toEqual([
+      "Of course, Sir.",
+      "I can do that.",
+      "Shall I go ahead?",
+    ]);
   });
 
   it("keeps at most five callable numbers and drops emergency numbers", () => {

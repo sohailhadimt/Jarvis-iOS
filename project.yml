@@ -64,7 +64,7 @@ targets:
         NSSpeechRecognitionUsageDescription: "JARVIS converts your speech to text on your iPhone so it can understand you."
         NSLocationWhenInUseUsageDescription: "JARVIS uses your location while the app is open, so the weather and places near you are about where you actually are."
         NSMotionUsageDescription: "JARVIS checks whether you are driving so a call from me stays short."
-        NSContactsUsageDescription: "JARVIS looks up contacts when you ask it to call, FaceTime or message someone."
+        NSContactsUsageDescription: "JARVIS looks up contacts when you ask it to call, FaceTime or message someone, and adds its own contact card."
         NSCalendarsFullAccessUsageDescription: "JARVIS reads and edits your calendar events when you ask it to."
         NSRemindersFullAccessUsageDescription: "JARVIS reads, creates and completes reminders when you ask it to."
         NSAppleMusicUsageDescription: "JARVIS plays music from your library when you ask it to."

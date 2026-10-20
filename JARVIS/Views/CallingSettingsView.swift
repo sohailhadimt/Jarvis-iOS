@@ -3,6 +3,7 @@ import UIKit
 
 struct CallingSettingsView: View {
     @Environment(AppSettings.self) private var settings
+    @Environment(AssistantEngine.self) private var engine
     @AppStorage("jarvis.call.forwarding") private var forwardingMode = "missed"
     @State private var report = "Calling not set up."
     @State private var fromNumber = ""
@@ -20,6 +21,7 @@ struct CallingSettingsView: View {
     @State private var dailyCap = 3
     @State private var urgentOnly = false
     @State private var questionWait = 40
+    @State private var showingContact = false
 
     var body: some View {
         Form {
@@ -55,6 +57,29 @@ struct CallingSettingsView: View {
                 Text("Carrier forwarding")
             } footer: {
                 Text("iOS cannot intercept a normal carrier call. Forward your mobile to the Twilio UK number, then JARVIS can answer. Dial the code from the Phone app, or copy it. Cancel with ##002#.")
+            }
+
+            Section {
+                if engine.pairCode.isEmpty {
+                    Text("The code appears once calling is set up.")
+                        .font(.footnote)
+                        .foregroundStyle(.white.opacity(0.8))
+                    Button("Show code") { engine.refreshPairing() }
+                } else {
+                    Text(engine.pairCode)
+                        .font(.system(size: 28, weight: .semibold, design: .monospaced))
+                        .tracking(4)
+                    Text(pairInstruction)
+                        .font(.footnote)
+                        .foregroundStyle(.white.opacity(0.8))
+                    Button("New code") { engine.refreshPairing() }
+                    Button("Add JARVIS to Contacts") { showingContact = true }
+                        .disabled(contactNumber.isEmpty)
+                }
+            } header: {
+                Text("Text JARVIS")
+            } footer: {
+                Text("Text the code to the JARVIS number. He replies Connected, Sir, then a short welcome, one text at a time. Add the contact so the thread is named JARVIS, with the ring as the photo.")
             }
 
             Section {
@@ -121,8 +146,21 @@ struct CallingSettingsView: View {
         .onAppear {
             rules = CallPrivacyStore.rules()
             mobile = KeychainStore.get(.ownerPhone) ?? ""
+            if engine.pairCode.isEmpty { engine.refreshPairing() }
             refresh()
         }
+        .sheet(isPresented: $showingContact) {
+            JarvisContactSheet(number: contactNumber)
+        }
+    }
+
+    private var contactNumber: String {
+        engine.pairNumber.isEmpty ? fromNumber : engine.pairNumber
+    }
+
+    private var pairInstruction: String {
+        let number = contactNumber.isEmpty ? "the JARVIS number" : contactNumber
+        return "Text this code to \(number)."
     }
 
     private var modeBlurb: String {

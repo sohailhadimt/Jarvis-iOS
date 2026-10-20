@@ -385,6 +385,15 @@ CREATE TABLE IF NOT EXISTS sms_turns (
 
 CREATE INDEX IF NOT EXISTS idx_sms_turns_phone ON sms_turns (phone, created_at);
 
+-- A one-time code from the app. Texting it links that phone as the owner.
+CREATE TABLE IF NOT EXISTS sms_pairs (
+  id TEXT PRIMARY KEY,
+  code TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_phone TEXT,
+  created_at TEXT NOT NULL
+);
+
 -- A comparison of businesses JARVIS is calling. Booking waits for an approval.
 CREATE TABLE IF NOT EXISTS call_hunts (
   id TEXT PRIMARY KEY,

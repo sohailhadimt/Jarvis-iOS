@@ -62,6 +62,10 @@ final class AssistantEngine {
     private(set) var deskCalls: [StoredCall] = []
     /// Quote comparisons waiting on the home screen. Booking stays an approval.
     private(set) var hunts: [CallHunt] = []
+    /// The 6-digit code for texting JARVIS. Hidden once that phone is linked.
+    private(set) var pairCode = ""
+    private(set) var pairNumber = ""
+    private(set) var pairLinked = true
     /// True while a spoken away order is still in force.
     private(set) var awayActive = false
     var interceptor: Bool { inboundCall != nil || awayActive }
@@ -1629,6 +1633,10 @@ final class AssistantEngine {
         Task { await self.sendHuntChoice(huntID, quoteID) }
     }
 
+    func refreshPairing() {
+        Task { await self.loadPairing(refresh: true) }
+    }
+
     func playRecording(_ id: String) {
         Task { await self.playCallRecording(id) }
     }
@@ -1654,6 +1662,14 @@ final class AssistantEngine {
         await speakLine(line, userText: text)
         guard !Task.isCancelled else { return }
         afterTurn()
+    }
+
+    private func loadPairing(refresh: Bool) async {
+        guard let client = try? JarvisCloudAPI.client() else { return }
+        guard let ticket = try? await client.pairingTicket(refresh: refresh) else { return }
+        pairCode = ticket.code
+        pairNumber = ticket.number
+        pairLinked = ticket.paired
     }
 
     private func sendHuntChoice(_ huntID: String, _ quoteID: String) async {
@@ -1786,6 +1802,7 @@ final class AssistantEngine {
         if let rows = try? await client.callHunts() {
             hunts = rows
         }
+        await loadPairing(refresh: false)
         if let away = try? await client.awayStatus() {
             awayActive = away.active
             VoiceMeter.shared.interceptor = interceptor

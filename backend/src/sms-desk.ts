@@ -63,6 +63,73 @@ export function screenStranger(): string {
   return "Hello, this is JARVIS, Master Hadi's assistant. I'll pass that to him.";
 }
 
+/** The text is only a pairing code, not a sentence that happens to contain digits. */
+export function pairingDigits(text: string): string | null {
+  const compact = text.trim().replace(/[\s-]/g, "");
+  if (!/^\d{6}$/.test(compact)) return null;
+  return compact;
+}
+
+export function menuChoice(text: string): "1" | "2" | "3" | null {
+  const compact = text.trim().toLowerCase().replace(/[.!?]/g, "");
+  if (compact === "1" || compact === "one") return "1";
+  if (compact === "2" || compact === "two") return "2";
+  if (compact === "3" || compact === "three") return "3";
+  return null;
+}
+
+export function asksCapabilities(text: string): boolean {
+  return /\bwhat can you do\b|\bwhat do you do\b|\bwhat can jarvis do\b/i.test(text);
+}
+
+export function welcomeBubbles(lineNumber: string): string[] {
+  const reach = lineNumber
+    ? `Text or call ${lineNumber} whenever you need me.`
+    : "Text or call this number whenever you need me.";
+  return [
+    "Connected, Sir. I'm JARVIS.",
+    reach,
+    "1. Make a call for me\n2. Book an appointment or service\n3. Help with a subscription or bill",
+    "Reply 1, 2 or 3, or just tell me what you need.",
+  ];
+}
+
+export function capabilityBubbles(): string[] {
+  return [
+    "I make calls, book appointments, and sort a bill, Sir.",
+    "You can say 'book me a dentist this week', or 'find a plumber who can come today'.",
+    "I'll text or call you when something needs you.",
+  ];
+}
+
+export function menuBubbles(choice: "1" | "2" | "3"): string[] {
+  if (choice === "1") {
+    return ["Who should I call, Sir?", "Tell me the name and what to say. I'll ask before I confirm anything."];
+  }
+  if (choice === "2") {
+    return ["What should I book, Sir?", "A dentist, a table, a plumber. I'll find a time and check with you first."];
+  }
+  return ["Which subscription or bill, Sir?", "I can look into it. I won't pay anything unless you approve it."];
+}
+
+/** Short sentences become separate texts. Chat replies stay to three bubbles. */
+export function smsBubbles(text: string): string[] {
+  const clean = text.replace(/https?:\/\/\S+/gi, " ").replace(/[ \t]+/g, " ").trim();
+  if (!clean) return ["I'm here, Sir."];
+  const pieces = clean
+    .split(/\n+/)
+    .flatMap((line) => line.split(/(?<=[.!?])\s+/))
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const bubbles: string[] = [];
+  for (const piece of pieces) {
+    if (piece.length <= 160) bubbles.push(piece);
+    else bubbles.push(...chunk(piece, 160));
+    if (bubbles.length >= 3) break;
+  }
+  return bubbles.slice(0, 3);
+}
+
 export function wantsHunt(text: string): boolean {
   const folded = text.toLowerCase();
   if (/\b(call around|ring around|get quotes|compare quotes|find me a)\b/.test(folded)) return true;
@@ -178,6 +245,19 @@ export async function handleInboundSms(env: Env, from: string, body: string): Pr
   const ours = toE164(env.TWILIO_FROM_NUMBER ?? "");
   if (!sender || (ours && sender === ours)) return;
   try {
+    const digits = pairingDigits(text);
+    let claimed = false;
+    if (digits) {
+      try {
+        claimed = await claimPair(env, sender, digits);
+      } catch {
+        claimed = false;
+      }
+    }
+    if (claimed) {
+      await sendBubbles(env, sender, welcomeBubbles(ours ?? ""));
+      return;
+    }
     const owner = await readOwnerMobile(env);
     if (owner && sender === owner) {
       await answerOwner(env, sender, text);
@@ -217,6 +297,15 @@ export async function sweepMemoryNudges(env: Env): Promise<void> {
     }
   } catch {
     console.error("memory nudge failed");
+  }
+}
+
+export async function pairResponse(env: Env, refresh: boolean): Promise<Response> {
+  try {
+    const ticket = await currentPair(env, refresh);
+    return json(ticket);
+  } catch {
+    return apiError(503, "not_ready", "Pairing is not ready. Apply schema.sql on D1.");
   }
 }
 
@@ -280,8 +369,17 @@ export async function sendSms(env: Env, to: string, body: string): Promise<boole
 }
 
 async function answerOwner(env: Env, phone: string, text: string): Promise<void> {
-  await rememberFacts(env, text);
   await rememberTurn(env, phone, "user", text);
+  const choice = menuChoice(text);
+  if (choice) {
+    await sendBubbles(env, phone, menuBubbles(choice));
+    return;
+  }
+  if (asksCapabilities(text)) {
+    await sendBubbles(env, phone, capabilityBubbles());
+    return;
+  }
+  await rememberFacts(env, text);
   if (paymentAsk(text)) {
     await queueApproval(env, "payment", explicitSummary(text), "explicit_authorisation", { kind: "payment" });
     await reply(env, phone, "That needs your approval, Sir. I have not paid anything or minted a card.");
@@ -301,10 +399,73 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
 }
 
 async function reply(env: Env, phone: string, text: string): Promise<void> {
-  const line = clip(text.replace(/https?:\/\/\S+/gi, "").replace(/\s+/g, " ").trim(), 320);
-  const spoken = line || "I'm here, Sir.";
-  await rememberTurn(env, phone, "assistant", spoken);
-  await sendSms(env, phone, spoken);
+  await sendBubbles(env, phone, smsBubbles(text));
+}
+
+async function sendBubbles(env: Env, phone: string, bubbles: string[]): Promise<void> {
+  const lines = bubbles.map((bubble) => bubble.replace(/\s+$/g, "").trim()).filter(Boolean);
+  for (let index = 0; index < lines.length; index++) {
+    if (index > 0) await pause(600);
+    const line = lines[index] ?? "";
+    await rememberTurn(env, phone, "assistant", line);
+    await sendSms(env, phone, line);
+  }
+}
+
+async function currentPair(env: Env, refresh: boolean): Promise<{ code: string; expires_at: string; number: string; paired: boolean }> {
+  const number = toE164(env.TWILIO_FROM_NUMBER ?? "") ?? "";
+  const settings = await readCallSettings(env);
+  const paired = Boolean(settings.mobile_number && toE164(settings.mobile_number));
+  const now = nowIso();
+  if (!refresh) {
+    const existing = await dbFirst<{ code: string; expires_at: string }>(
+      env,
+      "SELECT code, expires_at FROM sms_pairs WHERE used_phone IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 1",
+      [now],
+    );
+    if (existing) return { code: existing.code, expires_at: existing.expires_at, number, paired };
+  }
+  await dbRun(env, "UPDATE sms_pairs SET expires_at = ? WHERE used_phone IS NULL AND expires_at > ?", [now, now]);
+  const code = sixDigits();
+  const expires = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+  await dbRun(env, "INSERT INTO sms_pairs (id, code, expires_at, used_phone, created_at) VALUES (?, ?, ?, NULL, ?)", [
+    newId("pair"),
+    code,
+    expires,
+    now,
+  ]);
+  return { code, expires_at: expires, number, paired };
+}
+
+async function claimPair(env: Env, phone: string, code: string): Promise<boolean> {
+  const now = nowIso();
+  const row = await dbFirst<{ id: string }>(
+    env,
+    "SELECT id FROM sms_pairs WHERE code = ? AND used_phone IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 1",
+    [code, now],
+  );
+  if (!row) return false;
+  const changes = await dbRun(env, "UPDATE sms_pairs SET used_phone = ? WHERE id = ? AND used_phone IS NULL", [phone, row.id]);
+  if (changes !== 1) return false;
+  try {
+    await linkOwner(env, phone);
+  } catch {
+    await dbRun(env, "UPDATE sms_pairs SET used_phone = NULL WHERE id = ?", [row.id]);
+    return false;
+  }
+  return true;
+}
+
+async function linkOwner(env: Env, phone: string): Promise<void> {
+  const now = nowIso();
+  await dbRun(
+    env,
+    `INSERT INTO call_settings
+      (id, mobile_number, quiet_start, quiet_end, max_calls_per_day, urgent_only, question_timeout_seconds, worker_origin, updated_at)
+     VALUES ('default', ?, '22:00', '08:00', 3, 0, 40, '', ?)
+     ON CONFLICT(id) DO UPDATE SET mobile_number = excluded.mobile_number, updated_at = excluded.updated_at`,
+    [phone, now],
+  );
 }
 
 async function draftSchedule(env: Env, goal: string): Promise<string> {
@@ -341,7 +502,7 @@ async function chatReply(env: Env, phone: string): Promise<string> {
       role: "system",
       content: [
         "You are JARVIS, Master Hadi's personal assistant, replying by SMS.",
-        "British English. Call him Sir. One or two short sentences, under 280 characters.",
+        "British English. Call him Sir. Write two or three short sentences. Each sentence ends with a full stop and can stand alone as its own text.",
         "Do not include URLs. Do not invent phone numbers.",
         "Do not pay, buy, charge a card, or mint a card. Do not send email. A draft waits for his approval.",
         facts.length ? `Known facts:\n${facts.map((fact) => `- ${fact.detail}`).join("\n")}` : "No saved facts yet.",
@@ -581,6 +742,34 @@ function overlaps(start: Date, end: Date, busy: BusyWindow[]): boolean {
     if (!Number.isFinite(begins) || !Number.isFinite(finishes)) return false;
     return open < finishes && close > begins;
   });
+}
+
+function sixDigits(): string {
+  const bytes = new Uint8Array(3);
+  crypto.getRandomValues(bytes);
+  const value = ((bytes[0] << 16) | (bytes[1] << 8) | bytes[2]) % 1_000_000;
+  return String(value).padStart(6, "0");
+}
+
+function chunk(value: string, max: number): string[] {
+  const words = value.split(/\s+/);
+  const parts: string[] = [];
+  let current = "";
+  for (const word of words) {
+    const next = current ? `${current} ${word}` : word;
+    if (next.length > max && current) {
+      parts.push(current);
+      current = word;
+    } else {
+      current = next;
+    }
+  }
+  if (current) parts.push(current);
+  return parts;
+}
+
+function pause(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function clip(value: string, max: number): string {

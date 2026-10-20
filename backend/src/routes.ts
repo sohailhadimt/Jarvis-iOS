@@ -38,7 +38,7 @@ import {
   readJson,
 } from "./http";
 import { markPersonaDraft, routePersona } from "./personas";
-import { saveBusy } from "./sms-desk";
+import { pairResponse, saveBusy } from "./sms-desk";
 import { optionalSourceUrls } from "./sources";
 import { isPipelineStage, parseMrr } from "./tools";
 import type {
@@ -101,6 +101,8 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "POST" && parts[0] === "pipeline" && parts[1] && parts.length === 2) {
       return writePipeline(request, env, parts[1]);
     }
+    if (request.method === "GET" && path === "/calls/pair") return pairResponse(env, false);
+    if (request.method === "POST" && path === "/calls/pair") return pairResponse(env, true);
     if (request.method === "GET" && path === "/calls/hunts") return listHunts(env);
     const huntChoice = /^\/calls\/hunts\/(hunt_[A-Za-z0-9]+)\/choose$/.exec(path);
     if (request.method === "POST" && huntChoice) return chooseQuoteRoute(request, env, huntChoice[1]);
