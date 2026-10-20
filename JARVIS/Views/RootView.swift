@@ -68,6 +68,7 @@ struct RootView: View {
             JarvisShortcuts.updateAppShortcutParameters()
             engine.setForeground(scenePhase == .active)
             CloudMonitor.shared.setVisible(scenePhase == .active)
+            deliverCallMessagesIfReady()
             startListeningIfRequested()
             AgentStore.shared.startCloudSync()
             if settings.onboarded, settings.startWithVoice, !engine.isSessionActive {
@@ -119,10 +120,17 @@ struct RootView: View {
                     Task { unlocked = await PrivacyGate.unlock() }
                 }
                 deliverBriefingIfDue()
+                deliverCallMessagesIfReady()
             }
+        }
+        .onChange(of: unlocked) { _, isUnlocked in
+            if isUnlocked { deliverCallMessagesIfReady() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .jarvisDeliverBriefing)) { _ in
             deliverBriefingIfDue(force: true)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .jarvisCallMessage)) { _ in
+            deliverCallMessagesIfReady()
         }
         .onReceive(NotificationCenter.default.publisher(for: JarvisStartListening.notification)) { _ in
             startListeningIfRequested()
@@ -182,6 +190,12 @@ struct RootView: View {
         guard engine.phase == .idle, engine.inboundCall == nil else { return }
         BriefingClock.markDelivered()
         engine.ask("What's been happening")
+    }
+
+    private func deliverCallMessagesIfReady() {
+        guard settings.onboarded, unlocked || !settings.privacyLock else { return }
+        guard scenePhase == .active else { return }
+        engine.deliverCallMessages()
     }
 }
 

@@ -43,11 +43,19 @@ final class JarvisPush: NSObject, UIApplicationDelegate, UNUserNotificationCente
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        [.banner, .sound]
+        if notification.request.content.userInfo["kind"] as? String == "call_message" {
+            NotificationCenter.default.post(name: .jarvisCallMessage, object: nil)
+            return []
+        }
+        return [.banner, .sound]
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let info = response.notification.request.content.userInfo
+        if info["kind"] as? String == "call_message" {
+            NotificationCenter.default.post(name: .jarvisCallMessage, object: nil)
+            return
+        }
         if info["kind"] as? String == "briefing" {
             await MainActor.run {
                 NotificationCenter.default.post(name: .jarvisDeliverBriefing, object: nil)

@@ -322,7 +322,9 @@ async function bridgeCall(twilio: WebSocket, env: Env, callId: string): Promise<
       [summary, JSON.stringify(lines.map((line) => ({ role: line.role, text: line.text }))), nowIso(), callId],
     ).catch(() => undefined);
     await recordHandoff(env, { callId, path: "stream", ok: true, reason, detail: summary });
-    await textOwner(env, summary);
+    const { rememberInboundMessage } = await import("./call-messages");
+    const owned = await rememberInboundMessage(env, callId).catch(() => false);
+    if (!owned) await textOwner(env, summary);
     try {
       agent.close();
     } catch {

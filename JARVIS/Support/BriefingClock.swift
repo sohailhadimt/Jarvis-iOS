@@ -3,6 +3,7 @@ import UserNotifications
 
 extension Notification.Name {
     static let jarvisDeliverBriefing = Notification.Name("jarvisDeliverBriefing")
+    static let jarvisCallMessage = Notification.Name("jarvisCallMessage")
 }
 
 /// Local reminder for the morning briefing. The worker routine stays in Agents and starts off.

@@ -810,10 +810,16 @@ async function updateCall(env: Env, id: string, patch: CallPatch): Promise<void>
     params.push(patch.error);
   }
   params.push(id);
+  let stored = false;
   try {
     await dbRun(env, `UPDATE outbound_calls SET ${sets.join(", ")} WHERE id = ?`, params);
+    stored = true;
   } catch (err) {
     console.error("outbound call update failed", safeError(err instanceof Error ? err.message : "update failed"));
+  }
+  if (stored && patch.status === "completed") {
+    const { rememberInboundMessage } = await import("./call-messages");
+    await rememberInboundMessage(env, id).catch(() => undefined);
   }
 }
 

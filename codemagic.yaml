@@ -2,6 +2,13 @@ workflows:
   ios-testflight:
     name: JARVIS iOS - TestFlight
     max_build_duration: 60
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: 'cursor/inbound-call-screening-afd7'
+          include: true
+          source: true
     instance_type: mac_mini_m2
     integrations:
       # Name of the App Store Connect API key you add in Codemagic (Teams > Integrations).

@@ -926,9 +926,35 @@ struct CloudClient: Sendable {
         return envelope.alerts
     }
 
+    func unreadCallMessages() async throws -> [CallMessage] {
+        struct Envelope: Decodable { var messages: [CallMessage] }
+        let envelope: Envelope = try await sendNoBody(
+            method: "GET",
+            path: "/calls/messages",
+            query: [URLQueryItem(name: "unread", value: "1")]
+        )
+        return envelope.messages
+    }
+
+    func recentCallMessages() async throws -> [CallMessage] {
+        struct Envelope: Decodable { var messages: [CallMessage] }
+        let envelope: Envelope = try await sendNoBody(method: "GET", path: "/calls/messages")
+        return envelope.messages
+    }
+
+    func markCallMessageRead(id: String) async -> Bool {
+        struct Ack: Decodable { var ok: Bool }
+        do {
+            let ack: Ack = try await sendNoBody(method: "POST", path: "/calls/messages/\(Self.path(id))/read")
+            return ack.ok
+        } catch {
+            return false
+        }
+    }
+
     func pairingTicket(refresh: Bool) async throws -> PairingTicket {
         if refresh {
-            return try await sendJSON(method: "POST", path: "/calls/pair", body: [:])
+            return try await sendJSON(method: "POST", path: "/calls/pair", body: [String: Any]())
         }
         return try await sendNoBody(method: "GET", path: "/calls/pair")
     }
@@ -1217,6 +1243,23 @@ struct OwnerCallSettings: Codable, Equatable, Sendable {
         case maxCallsPerDay = "max_calls_per_day"
         case urgentOnly = "urgent_only"
         case questionTimeoutSeconds = "question_timeout_seconds"
+    }
+}
+
+struct CallMessage: Decodable, Identifiable, Equatable, Sendable {
+    var id: String
+    var callId: String
+    var callerName: String
+    var summary: String
+    var spoken: String
+    var calledAt: String
+    var read: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case id, summary, spoken, read
+        case callId = "call_id"
+        case callerName = "caller_name"
+        case calledAt = "called_at"
     }
 }
 

@@ -164,20 +164,24 @@ async function voicemailWebhook(request: Request, env: Env, id: string): Promise
     [summary, nowIso(), id],
   ).catch(() => undefined);
   await recordHandoff(env, { callId: id, path: "voicemail", ok: true, reason: spoken ? "transcribed" : "recorded" });
-  const { readOwnerMobile } = await import("./owner-alert");
-  const to = await readOwnerMobile(env);
-  const from = toE164(env.TWILIO_FROM_NUMBER ?? "");
-  const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
-  if (to && from && account && token) {
-    const form = new URLSearchParams({ From: from, To: to, Body: `Call summary: ${summary}`.slice(0, 320) });
-    await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Messages.json`, {
-      method: "POST",
-      headers: {
-        authorization: `Basic ${btoa(`${account}:${token}`)}`,
-        "content-type": "application/x-www-form-urlencoded",
-      },
-      body: form.toString(),
-    }).catch(() => undefined);
+  const { rememberInboundMessage } = await import("./call-messages");
+  const owned = await rememberInboundMessage(env, id).catch(() => false);
+  if (!owned) {
+    const { readOwnerMobile } = await import("./owner-alert");
+    const to = await readOwnerMobile(env);
+    const from = toE164(env.TWILIO_FROM_NUMBER ?? "");
+    const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
+    if (to && from && account && token) {
+      const form = new URLSearchParams({ From: from, To: to, Body: `Call summary: ${summary}`.slice(0, 320) });
+      await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Messages.json`, {
+        method: "POST",
+        headers: {
+          authorization: `Basic ${btoa(`${account}:${token}`)}`,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: form.toString(),
+      }).catch(() => undefined);
+    }
   }
   return xml("<Response></Response>", 200);
 }

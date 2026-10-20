@@ -117,7 +117,7 @@ struct JarvisShell: View {
         DrawerItem(route: .files, title: "Files", subtitle: "Documents & media", icon: "folder"),
         DrawerItem(route: .agents, title: "Agents", subtitle: "Team & missions", icon: "person.3"),
         DrawerItem(route: .approvals, title: "Approvals", subtitle: "Review & confirm", icon: "checkmark.circle"),
-        DrawerItem(route: .calls, title: "Calls", subtitle: "Log & screening", icon: "phone"),
+        DrawerItem(route: .calls, title: "Calls", subtitle: "Calls & messages", icon: "phone"),
         DrawerItem(route: .memory, title: "Memory", subtitle: "Facts & notes", icon: "brain"),
         DrawerItem(route: .news, title: "News", subtitle: "Headlines & briefings", icon: "newspaper"),
         DrawerItem(route: .settings, title: "Settings", subtitle: "Preferences", icon: "gearshape")

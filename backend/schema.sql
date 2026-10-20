@@ -369,6 +369,21 @@ CREATE TABLE IF NOT EXISTS agent_messages (
 
 CREATE INDEX IF NOT EXISTS idx_agent_messages_conversation ON agent_messages (conversation_id, created_at);
 
+-- Unread notes from finished inbound calls. The app speaks these; SMS stays the backup.
+CREATE TABLE IF NOT EXISTS call_messages (
+  id TEXT PRIMARY KEY,
+  call_id TEXT NOT NULL,
+  caller_name TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT '',
+  spoken TEXT NOT NULL,
+  called_at TEXT NOT NULL,
+  read_at TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_call_messages_call ON call_messages (call_id);
+CREATE INDEX IF NOT EXISTS idx_call_messages_unread ON call_messages (read_at, created_at);
+
 -- Prompt for the media bridge. The signed URL is not stored.
 CREATE TABLE IF NOT EXISTS call_bridges (
   call_id TEXT PRIMARY KEY,

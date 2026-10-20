@@ -242,6 +242,11 @@ private struct SessionExtras: View {
                 .padding(.horizontal, 20)
                 .padding(.bottom, 8)
         }
+        if !engine.callMessages.isEmpty {
+            CallMessageStrip()
+                .padding(.horizontal, 20)
+                .padding(.bottom, 8)
+        }
         if !engine.pairLinked, !engine.pairCode.isEmpty {
             PairingCard()
                 .padding(.horizontal, 20)

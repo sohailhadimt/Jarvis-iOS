@@ -25,6 +25,7 @@ struct CallTaskStrip: View {
 }
 
 private struct CallTaskCard: View {
+    @Environment(AssistantEngine.self) private var engine
     var call: StoredCall
     var dismiss: () -> Void
 

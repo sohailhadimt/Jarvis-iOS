@@ -8,7 +8,15 @@ struct CallLogView: View {
 
     var body: some View {
         List {
-            if rows.isEmpty {
+            if !engine.callMessages.isEmpty {
+                Section("Messages") {
+                    ForEach(engine.callMessages) { message in
+                        CallMessageCard(message: message)
+                            .listRowBackground(Color.black)
+                    }
+                }
+            }
+            if rows.isEmpty && engine.callMessages.isEmpty {
                 Text("No calls yet. Say call someone and tell them the message.")
                     .font(.footnote)
                     .foregroundStyle(.white.opacity(0.7))
@@ -32,6 +40,10 @@ struct CallLogView: View {
         .onAppear {
             rows = CallLogStore.entries()
             engine.refreshOpenCalls()
+            engine.refreshCallMessages()
+        }
+        .onChange(of: engine.callMessages.count) { _, _ in
+            rows = CallLogStore.entries()
         }
         .onChange(of: engine.callLogTick) { _, _ in
             rows = CallLogStore.entries()

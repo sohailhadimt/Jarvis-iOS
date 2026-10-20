@@ -62,6 +62,10 @@ final class AssistantEngine {
     private(set) var deskCalls: [StoredCall] = []
     /// Quote comparisons waiting on the home screen. Booking stays an approval.
     private(set) var hunts: [CallHunt] = []
+    /// Inbound call notes. Shown in Calls, then spoken once and marked read.
+    private(set) var callMessages: [CallMessage] = []
+    @ObservationIgnored private var deliveringCallMessages = false
+    @ObservationIgnored private var heardCallMessageIDs: Set<String> = []
     /// The 6-digit code for texting JARVIS. Hidden once that phone is linked.
     private(set) var pairCode = ""
     private(set) var pairNumber = ""
@@ -1678,6 +1682,20 @@ final class AssistantEngine {
         }
     }
 
+    /// Unread call notes. Speaks each one, shows the card, then marks it read.
+    func deliverCallMessages() {
+        guard appInForeground, !deliveringCallMessages else { return }
+        deliveringCallMessages = true
+        Task {
+            defer { self.deliveringCallMessages = false }
+            await self.speakUnreadCallMessages()
+        }
+    }
+
+    func refreshCallMessages() {
+        Task { await self.loadRecentCallMessages() }
+    }
+
     func startScreenWatch() {
         guard screenWatch == nil else { return }
         screenWatch = Task { [weak self] in
@@ -1854,6 +1872,55 @@ final class AssistantEngine {
         guard let id = inboundCall?.id else { return }
         let note = CallPrivacyStore.note(matching: inboundCall)
         Task { await self.sendPersonal(id: id, allow: allow, note: note) }
+    }
+
+    private func speakUnreadCallMessages() async {
+        guard appInForeground else { return }
+        guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else { return }
+        var spoke = false
+        var passes = 0
+        while appInForeground, passes < 3 {
+            passes += 1
+            guard let unread = try? await client.unreadCallMessages() else { return }
+            let fresh = unread.filter { !heardCallMessageIDs.contains($0.id) }
+            if fresh.isEmpty { break }
+            for message in fresh where !callMessages.contains(where: { $0.id == message.id }) {
+                callMessages.insert(message, at: 0)
+            }
+            for message in fresh {
+                guard appInForeground, !Task.isCancelled else { return }
+                await waitToSpeak()
+                guard appInForeground, !Task.isCancelled else { return }
+                let line = message.spoken.trimmingCharacters(in: .whitespacesAndNewlines)
+                let spoken = line.isEmpty ? "Sir, you have a message." : line
+                await speakLine(spoken, userText: "")
+                errorMessage = nil
+                spoke = true
+                heardCallMessageIDs.insert(message.id)
+                let saved = await client.markCallMessageRead(id: message.id)
+                if !saved { heardCallMessageIDs.remove(message.id) }
+            }
+        }
+        guard spoke, !Task.isCancelled else { return }
+        afterTurn()
+    }
+
+    private func loadRecentCallMessages() async {
+        guard let client = try? JarvisCloudAPI.client() else { return }
+        guard let rows = try? await client.recentCallMessages() else { return }
+        var merged = rows
+        for local in callMessages where !merged.contains(where: { $0.id == local.id }) {
+            merged.insert(local, at: 0)
+        }
+        callMessages = merged
+    }
+
+    private func waitToSpeak() async {
+        let deadline = Date().addingTimeInterval(12)
+        while Date() < deadline {
+            if phase == .idle || phase == .listening { return }
+            try? await Task.sleep(for: .milliseconds(300))
+        }
     }
 
     private func pullInbound() async {

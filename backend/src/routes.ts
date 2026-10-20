@@ -1,4 +1,5 @@
 import { agentChat, agentMessages, agentReply } from "./agent-chat";
+import { listCallMessages, markCallMessageRead } from "./call-messages";
 import { authorize } from "./auth";
 import { handleCallApi, handleCallWebhook, isCallWebhook } from "./calls";
 import { bookApproved, chooseQuoteRoute, listHunts } from "./hunt";
@@ -108,6 +109,9 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "GET" && path === "/calls/pair") return pairResponse(env, false);
     if (request.method === "POST" && path === "/calls/pair") return pairResponse(env, true);
     if (request.method === "GET" && path === "/calls/hunts") return listHunts(env);
+    if (request.method === "GET" && path === "/calls/messages") return listCallMessages(env, url);
+    const readMessage = /^\/calls\/messages\/(cmsg_[A-Za-z0-9]+)\/read$/.exec(path);
+    if (request.method === "POST" && readMessage) return markCallMessageRead(env, readMessage[1]);
     const huntChoice = /^\/calls\/hunts\/(hunt_[A-Za-z0-9]+)\/choose$/.exec(path);
     if (request.method === "POST" && huntChoice) return chooseQuoteRoute(request, env, huntChoice[1]);
     if (request.method === "POST" && path === "/calendar/busy") return saveBusy(request, env);
