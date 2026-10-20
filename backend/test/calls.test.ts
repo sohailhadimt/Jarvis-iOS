@@ -17,6 +17,7 @@ import {
   outboundOpening,
   readConversation,
   clearElevenLabsTelephonyCache,
+  registerElevenLabsCall,
   safeError,
   screeningScript,
   smsAction,
@@ -78,6 +79,19 @@ function callingEnv(): Env {
   env.ELEVENLABS_API_KEY = "elevenlabs-key-example-value";
   env.ELEVENLABS_AGENT_ID = "agent_example";
   return env;
+}
+
+function sampleCall() {
+  return {
+    id: "call_abc",
+    from: "+447700900123",
+    to: "+447700900000",
+    direction: "inbound" as const,
+    first: INBOUND_GREETING,
+    prompt: "Screen the call.",
+    contact: "Caller",
+    brief: "Find out who is calling.",
+  };
 }
 
 function inboundRequest(params: Record<string, string>, signature: string): Request {
@@ -412,11 +426,13 @@ describe("Twilio webhooks", () => {
       );
       expect(response.status).toBe(200);
       const xml = await response.text();
-      expect(xml).toContain("<Connect>");
-      expect(xml).toContain("<Stream");
-      expect(xml).toContain("wss://");
+      expect(xml).not.toContain("<Connect>");
+      expect(xml).not.toContain("<Stream");
+      expect(xml).not.toContain("wss://");
+      expect(xml).not.toContain("/calls/stream/");
       expect(xml).toContain(`voice="${FALLBACK_SAY_VOICE}"`);
       expect(xml).toContain("<Record");
+      expect(xml).toContain("transcribeCallback=");
       expect(xml.indexOf("<Record")).toBeLessThan(xml.indexOf("<Hangup"));
       expect(xml).not.toContain("can't continue");
       expect(xml).not.toContain("twilio-auth-token-example");
@@ -466,15 +482,11 @@ describe("Twilio webhooks", () => {
       expect(xml).toBe(twiml);
       expect(xml).toContain("conv_test123");
       expect(xml).not.toContain("elevenlabs-key-example-value");
-      const patch = seen.find((call) => call.url.includes("/convai/agents/") && call.method === "PATCH");
-      expect(patch?.body).toMatchObject({
-        conversation_config: {
-          asr: { user_input_audio_format: "ulaw_8000" },
-          tts: { agent_output_audio_format: "ulaw_8000", voice_id: JARVIS_VOICE_ID },
-        },
-      });
+      expect(seen.some((call) => call.url.includes("/convai/agents/"))).toBe(false);
       const registrations = seen.filter((call) => call.url.includes("register-call"));
       expect(registrations).toHaveLength(1);
+      expect(registrations[0]?.url).toBe("https://api.elevenlabs.io/v1/convai/twilio/register-call");
+      expect(registrations[0]?.method).toBe("POST");
       const registered = registrations[0];
       expect(registered?.body).toMatchObject({
         from_number: "+447700900123",
@@ -486,6 +498,109 @@ describe("Twilio webhooks", () => {
       };
       expect(initiation.conversation_config_override.agent.first_message).toBe(INBOUND_GREETING);
       expect(initiation.conversation_config_override.tts.voice_id).toBe(JARVIS_VOICE_ID);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("patches the agent to μ-law only after register-call reports the audio format", async () => {
+    clearElevenLabsTelephonyCache();
+    const env = callingEnv();
+    const seen: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
+    const twiml = "<Response><Connect><Stream url=\"wss://example.test/media\"></Stream></Connect></Response>";
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const method = init?.method ?? "GET";
+      const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
+      seen.push({ url, method, body });
+      if (url.includes("register-call")) {
+        if (seen.filter((call) => call.url.includes("register-call")).length === 1) {
+          return new Response(JSON.stringify({ detail: "Agent audio format must be ulaw_8000 for Twilio." }), { status: 422 });
+        }
+        return new Response(twiml, { status: 200, headers: { "content-type": "text/xml" } });
+      }
+      if (url.includes("/convai/agents/") && method === "GET") {
+        return new Response(
+          JSON.stringify({
+            conversation_config: {
+              asr: { user_input_audio_format: "pcm_16000" },
+              tts: { agent_output_audio_format: "pcm_16000", voice_id: "other-voice" },
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("/convai/agents/") && method === "PATCH") return new Response("{}", { status: 200 });
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const result = await registerElevenLabsCall(env, sampleCall());
+      expect(result.twiml).toBe(twiml);
+      expect(seen[0]?.url).toContain("register-call");
+      const patch = seen.find((call) => call.method === "PATCH");
+      expect(patch?.body).toMatchObject({
+        conversation_config: {
+          asr: { user_input_audio_format: "ulaw_8000" },
+          tts: { agent_output_audio_format: "ulaw_8000", voice_id: JARVIS_VOICE_ID },
+        },
+      });
+      expect(seen.filter((call) => call.url.includes("register-call"))).toHaveLength(2);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("keeps the thrown register-call error instead of the word network", async () => {
+    clearElevenLabsTelephonyCache();
+    const env = callingEnv();
+    const original = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      throw new TypeError("Network connection lost.");
+    }) as typeof fetch;
+    try {
+      const result = await registerElevenLabsCall(env, sampleCall());
+      expect(result.twiml).toBeNull();
+      expect(result.reason).toBe("network");
+      expect(result.error).toContain("register-call");
+      expect(result.error).toContain("TypeError");
+      expect(result.error).toContain("Network connection lost.");
+      expect(result.error).not.toBe("network");
+      expect(calls).toBe(2);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("records the register-call HTTP status and body", async () => {
+    clearElevenLabsTelephonyCache();
+    const env = callingEnv();
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      expect(url).toBe("https://api.elevenlabs.io/v1/convai/twilio/register-call");
+      expect(init?.method).toBe("POST");
+      const headers = new Headers(init?.headers);
+      expect(headers.get("xi-api-key")).toBe("elevenlabs-key-example-value");
+      expect(headers.get("content-type")).toContain("application/json");
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      expect(body).toMatchObject({
+        agent_id: "agent_example",
+        from_number: "+447700900123",
+        to_number: "+447700900000",
+        direction: "inbound",
+      });
+      return new Response(JSON.stringify({ detail: "bad gateway" }), { status: 502 });
+    }) as typeof fetch;
+    try {
+      const result = await registerElevenLabsCall(env, sampleCall());
+      expect(result.twiml).toBeNull();
+      expect(result.reason).toBe("http_502");
+      expect(result.error).toContain("register-call HTTP 502");
+      expect(result.error).toContain("bad gateway");
+      expect(result.error).not.toContain("elevenlabs-key-example-value");
     } finally {
       globalThis.fetch = original;
     }

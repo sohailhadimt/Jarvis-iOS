@@ -1,4 +1,4 @@
-import { recordHandoff, saveBridge, streamSocketUrl, streamTwiml } from "./stream";
+import { recordHandoff } from "./stream";
 import {
   attachConfirmCall,
   callStage,
@@ -597,20 +597,7 @@ async function voiceWebhook(request: Request, env: Env, id: string): Promise<Res
       const reason = connected.error || connected.reason || "ElevenLabs could not start the call.";
       await updateCall(env, id, { error: reason });
       await recordHandoff(env, { callId: id, path: "register", ok: false, reason: connected.reason || "no_twiml", detail: reason });
-      await saveBridge(env, id, spoken.first, spoken.prompt);
-      const voicemail = new URL(request.url);
-      voicemail.protocol = "https:";
-      voicemail.pathname = `/calls/voicemail/${id}`;
-      voicemail.search = "";
-      return xml(
-        streamTwiml({
-          streamUrl: streamSocketUrl(request, id),
-          say: `${spoken.first} Please leave a message after the tone.`,
-          voice: FALLBACK_SAY_VOICE,
-          voicemailUrl: voicemail.toString(),
-        }),
-        200,
-      );
+      return xml(leaveMessage(`${spoken.first} Please leave a message after the tone.`, voicemailCallback(request, id)), 200);
     }
     await recordHandoff(env, { callId: id, path: "register", ok: true, reason: "twiml" });
     await updateCall(env, id, {
@@ -619,23 +606,10 @@ async function voiceWebhook(request: Request, env: Env, id: string): Promise<Res
     });
     return new Response(connected.twiml, { status: 200, headers: { "content-type": "text/xml; charset=utf-8" } });
   } catch (err) {
-    const reason = safeError(err instanceof Error ? err.message : "ElevenLabs could not be reached.");
+    const reason = safeError(err instanceof Error ? `${err.name}: ${err.message}` : "ElevenLabs could not be reached.");
     await updateCall(env, id, { error: reason });
     await recordHandoff(env, { callId: id, path: "register", ok: false, reason: "exception", detail: reason });
-    await saveBridge(env, id, spoken.first, spoken.prompt);
-    const voicemail = new URL(request.url);
-    voicemail.protocol = "https:";
-    voicemail.pathname = `/calls/voicemail/${id}`;
-    voicemail.search = "";
-    return xml(
-      streamTwiml({
-        streamUrl: streamSocketUrl(request, id),
-        say: `${spoken.first} Please leave a message after the tone.`,
-        voice: FALLBACK_SAY_VOICE,
-        voicemailUrl: voicemail.toString(),
-      }),
-      200,
-    );
+    return xml(leaveMessage(`${spoken.first} Please leave a message after the tone.`, voicemailCallback(request, id)), 200);
   }
 }
 
@@ -1272,9 +1246,9 @@ export function clearElevenLabsTelephonyCache(): void {
 
 /**
  * Register a Twilio call with ElevenLabs and return the TwiML Twilio should speak.
- * register-call is the bring-your-own-Twilio path. Its TwiML contains the authenticated
- * Media Stream URL. A conversational signed URL is a different websocket and is not used here.
- * For inbound, from is the caller and to is the Twilio number.
+ * POST /v1/convai/twilio/register-call is the bring-your-own-Twilio path. Its TwiML
+ * contains ElevenLabs' own Media Stream URL, so Twilio connects to ElevenLabs directly.
+ * The Worker does not open that socket. For inbound, from is the caller and to is the Twilio number.
  */
 export async function registerElevenLabsCall(env: Env, input: ElevenCallInput): Promise<ElevenCallResult> {
   const agentId = (env.ELEVENLABS_AGENT_ID ?? "").trim();
@@ -1294,21 +1268,27 @@ export async function registerElevenLabsCall(env: Env, input: ElevenCallInput): 
     console.error("elevenlabs hand-off failed", JSON.stringify({ ...meta, reason: "missing_number", prepare: "skipped" }));
     return { twiml: null, conversationId: null, error: "missing_number", reason: "missing_number" };
   }
-  const prepare = await prepareTelephonyAgent(apiKey, agentId);
-  let withOverrides = await postRegister(apiKey, agentId, input, true, 5_000);
-  if (!withOverrides.twiml && withOverrides.reason === "audio_format" && prepare === "patched") {
-    withOverrides = await postRegister(apiKey, agentId, input, true, 4_000);
+  // Register first. A preceding agent GET/PATCH whose body is left unread makes the next
+  // Worker fetch throw "Network connection lost." before any HTTP status exists.
+  let attempt = await postRegister(apiKey, agentId, input, true, 6_000);
+  if (!attempt.twiml && (attempt.reason === "network" || attempt.reason === "timeout")) {
+    attempt = await postRegister(apiKey, agentId, input, true, 5_000);
   }
-  if (withOverrides.twiml) {
+  let prepare = "skipped";
+  if (!attempt.twiml && attempt.reason === "audio_format") {
+    prepare = await prepareTelephonyAgent(apiKey, agentId);
+    attempt = await postRegister(apiKey, agentId, input, true, 5_000);
+  }
+  if (attempt.twiml) {
     console.log("elevenlabs connected", JSON.stringify({ call: input.id, direction: input.direction, overrides: true, prepare }));
-    return withOverrides;
+    return attempt;
   }
-  if (withOverrides.reason === "override_not_allowed") {
-    const bare = await postRegister(apiKey, agentId, input, false, 3_000);
+  if (attempt.reason === "override_not_allowed") {
+    const bare = await postRegister(apiKey, agentId, input, false, 5_000);
     if (bare.twiml) {
       console.error(
         "elevenlabs connected without screening overrides",
-        JSON.stringify({ ...meta, reason: withOverrides.reason, prepare }),
+        JSON.stringify({ ...meta, reason: attempt.reason, prepare }),
       );
       return bare;
     }
@@ -1320,9 +1300,9 @@ export async function registerElevenLabsCall(env: Env, input: ElevenCallInput): 
   }
   console.error(
     "elevenlabs hand-off failed",
-    JSON.stringify({ ...meta, reason: withOverrides.reason, prepare, detail: clip(withOverrides.error, 180) }),
+    JSON.stringify({ ...meta, reason: attempt.reason, prepare, detail: clip(attempt.error, 180) }),
   );
-  return withOverrides;
+  return attempt;
 }
 
 async function postRegister(
@@ -1335,7 +1315,7 @@ async function postRegister(
   try {
     const response = await fetch(REGISTER_CALL_URL, {
       method: "POST",
-      redirect: "error",
+      redirect: "manual",
       signal: AbortSignal.timeout(timeoutMs),
       headers: {
         "xi-api-key": apiKey,
@@ -1343,15 +1323,34 @@ async function postRegister(
       },
       body: JSON.stringify(registerPayload(agentId, input, overrides)),
     });
-    const text = await response.text();
+    if (response.status >= 300 && response.status < 400) {
+      await readBody(response);
+      return {
+        twiml: null,
+        conversationId: null,
+        error: safeError(`register-call HTTP ${response.status} redirect`),
+        reason: `http_${response.status}`,
+      };
+    }
+    const text = await readBody(response);
     if (!response.ok) {
       const detail = elevenDetail(text);
       const reason = classifyEleven(response.status, detail);
-      return { twiml: null, conversationId: null, error: `${reason}: ${safeError(detail)}`, reason };
+      return {
+        twiml: null,
+        conversationId: null,
+        error: safeError(`register-call HTTP ${response.status}: ${detail}`),
+        reason,
+      };
     }
     const twiml = unwrapTwiml(text);
     if (!twiml) {
-      return { twiml: null, conversationId: null, error: "non_twiml", reason: "non_twiml" };
+      return {
+        twiml: null,
+        conversationId: null,
+        error: safeError(`register-call HTTP ${response.status}: non-twiml ${clip(text, 120)}`),
+        reason: "non_twiml",
+      };
     }
     return {
       twiml,
@@ -1361,9 +1360,41 @@ async function postRegister(
       reason: "",
     };
   } catch (err) {
-    const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
-    const reason = timedOut ? "timeout" : "network";
-    return { twiml: null, conversationId: null, error: reason, reason };
+    return fetchFailure("register-call", err);
+  }
+}
+
+function fetchFailure(call: string, err: unknown): ElevenCallResult {
+  const described = describeThrown(err);
+  return {
+    twiml: null,
+    conversationId: null,
+    error: safeError(`${call} ${described.summary}`),
+    reason: described.timedOut ? "timeout" : "network",
+  };
+}
+
+function describeThrown(err: unknown): { summary: string; timedOut: boolean } {
+  if (!(err instanceof Error)) {
+    const summary = String(err);
+    return { summary, timedOut: /timeout|aborted/i.test(summary) };
+  }
+  const cause = err.cause instanceof Error ? ` cause ${err.cause.name}: ${err.cause.message}` : "";
+  const frame = (err.stack ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("at "));
+  const summary = `${err.name || "Error"}: ${err.message}${cause}${frame ? ` | ${frame}` : ""}`;
+  const timedOut =
+    err.name === "TimeoutError" || err.name === "AbortError" || /aborted|timeout|timed out/i.test(`${err.message}${cause}`);
+  return { summary, timedOut };
+}
+
+async function readBody(response: Response): Promise<string> {
+  try {
+    return await response.text();
+  } catch {
+    return "";
   }
 }
 
@@ -1407,15 +1438,16 @@ async function prepareTelephonyAgent(apiKey: string, agentId: string): Promise<s
   try {
     const got = await fetch(url, {
       method: "GET",
-      redirect: "error",
+      redirect: "manual",
       signal: AbortSignal.timeout(2_500),
       headers: { "xi-api-key": apiKey },
     });
+    const raw = await readBody(got);
     if (!got.ok) {
       if (got.status === 401 || got.status === 403 || got.status === 404) prepareBlockedAgentId = agentId;
       return `get_${got.status}`;
     }
-    current = (await got.json()) as unknown;
+    current = JSON.parse(raw) as unknown;
   } catch {
     return "get_failed";
   }
@@ -1449,13 +1481,14 @@ async function patchAgent(
 ): Promise<{ ok: boolean; status: number; detail: string }> {
   const response = await fetch(url, {
     method: "PATCH",
-    redirect: "error",
+    redirect: "manual",
     signal: AbortSignal.timeout(2_500),
     headers: { "xi-api-key": apiKey, "content-type": "application/json" },
     body: JSON.stringify(body),
   });
+  const text = await readBody(response);
   if (response.ok) return { ok: true, status: response.status, detail: "" };
-  return { ok: false, status: response.status, detail: elevenDetail(await response.text()) };
+  return { ok: false, status: response.status, detail: elevenDetail(text) };
 }
 
 function agentTelephonyReady(payload: unknown): boolean {
@@ -1573,6 +1606,18 @@ function classifyEleven(status: number, detail: string): string {
   if (status === 404) return "agent_not_found";
   if (status === 400 || status === 422) return "validation";
   return `http_${status}`;
+}
+
+function voicemailCallback(request: Request, id: string): string {
+  const voicemail = new URL(request.url);
+  voicemail.protocol = "https:";
+  voicemail.pathname = `/calls/voicemail/${id}`;
+  voicemail.search = "";
+  return voicemail.toString();
+}
+
+function leaveMessage(line: string, voicemailUrl: string): string {
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-GB" voice="${FALLBACK_SAY_VOICE}">${escapeXml(line)}</Say><Record maxLength="120" playBeep="true" timeout="8" transcribe="true" transcribeCallback="${escapeXml(voicemailUrl)}"/><Hangup/></Response>`;
 }
 
 function sayAndHangup(line: string): string {

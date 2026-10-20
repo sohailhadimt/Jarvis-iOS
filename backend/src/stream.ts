@@ -36,7 +36,7 @@ export function redactDebug(text: string): string {
     .replace(/\+\d{8,15}/g, "[number]")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 180);
+    .slice(0, 400);
 }
 
 export function streamSocketUrl(request: Request, callId: string): string {

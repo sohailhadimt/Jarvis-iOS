@@ -1,5 +1,5 @@
 import { awayFirstMessage, awayPrompt, readActiveAway, rememberRecording } from "./call-desk";
-import { recordHandoff, saveBridge, streamSocketUrl, streamTwiml } from "./stream";
+import { recordHandoff } from "./stream";
 import { dbAll, dbFirst, dbRun } from "./db";
 import {
   FALLBACK_SAY_VOICE,
@@ -116,14 +116,19 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
   if (!connected.twiml) {
     const reason = connected.reason || "no_twiml";
     const detail = connected.error || "ElevenLabs did not return TwiML.";
-    await dbRun(env, "UPDATE outbound_calls SET status = 'screening', error = ?, updated_at = ? WHERE id = ?", [
+    await dbRun(env, "UPDATE outbound_calls SET status = 'message', error = ?, updated_at = ? WHERE id = ?", [
       detail,
       nowIso(),
       id,
     ]).catch(() => undefined);
     await recordHandoff(env, { callId: id, path: "register", ok: false, reason, detail });
-    await saveBridge(env, id, first, prompt);
-    return xml(bridgeResponse(request, id, first), 200);
+    return xml(
+      takeMessage(
+        `${first} Please leave your name and a message after the tone, and I will pass it to Master Hadi.`,
+        voicemailCallback(request, id),
+      ),
+      200,
+    );
   }
   await recordHandoff(env, { callId: id, path: "register", ok: true, reason: "twiml" });
   if (connected.conversationId) {
@@ -136,17 +141,12 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
   return new Response(connected.twiml, { status: 200, headers: { "content-type": "text/xml; charset=utf-8" } });
 }
 
-function bridgeResponse(request: Request, id: string, first: string): string {
+function voicemailCallback(request: Request, id: string): string {
   const voicemail = new URL(request.url);
   voicemail.protocol = "https:";
   voicemail.pathname = `/calls/voicemail/${id}`;
   voicemail.search = "";
-  return streamTwiml({
-    streamUrl: streamSocketUrl(request, id),
-    say: `${first} Please leave your name and a message after the tone.`,
-    voice: FALLBACK_SAY_VOICE,
-    voicemailUrl: voicemail.toString(),
-  });
+  return voicemail.toString();
 }
 
 async function voicemailWebhook(request: Request, env: Env, id: string): Promise<Response> {
@@ -730,8 +730,9 @@ function say(line: string): string {
   return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-GB" voice="${FALLBACK_SAY_VOICE}">${escapeXml(line)}</Say><Hangup/></Response>`;
 }
 
-function takeMessage(line: string): string {
-  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-GB" voice="${FALLBACK_SAY_VOICE}">${escapeXml(line)}</Say><Record maxLength="120" playBeep="true"/><Hangup/></Response>`;
+function takeMessage(line: string, voicemailUrl = ""): string {
+  const callback = voicemailUrl ? ` transcribe="true" transcribeCallback="${escapeXml(voicemailUrl)}"` : "";
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-GB" voice="${FALLBACK_SAY_VOICE}">${escapeXml(line)}</Say><Record maxLength="120" playBeep="true"${callback}/><Hangup/></Response>`;
 }
 
 function xml(body: string, status: number): Response {
