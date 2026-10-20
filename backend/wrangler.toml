@@ -18,3 +18,4 @@ crons = ["*/5 * * * *"]
 
 [vars]
 ENVIRONMENT = "production"
+ELEVENLABS_FORCE_POLLY = "true"
