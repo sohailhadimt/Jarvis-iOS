@@ -1,3 +1,4 @@
+import { agentChat, agentMessages, agentReply } from "./agent-chat";
 import { authorize } from "./auth";
 import { handleCallApi, handleCallWebhook, isCallWebhook } from "./calls";
 import { bookApproved, chooseQuoteRoute, listHunts } from "./hunt";
@@ -78,6 +79,9 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
 
     const parts = path.split("/").filter(Boolean);
     if (request.method === "POST" && path === "/chat") return chatResponse(request, env);
+    if (request.method === "POST" && path === "/agent/chat") return agentChat(request, env, ctx);
+    if (request.method === "POST" && path === "/agent/reply") return agentReply(request, env);
+    if (request.method === "GET" && path === "/agent/messages") return agentMessages(env, url);
     if (request.method === "POST" && path === "/tasks") return createTask(request, env, ctx);
     if (request.method === "GET" && path === "/tasks") return listTasks(env, url);
     if (request.method === "GET" && parts[0] === "tasks" && parts[1] && parts.length === 2) return getTask(env, parts[1]);

@@ -190,6 +190,8 @@ private struct LiveCaption: View {
             } else {
                 caption(JarvisLines.listening, color: Color(hex: "#7EB6FF"))
             }
+        } else if engine.phase == .thinking, engine.reply.isEmpty, engine.statusLine == "JARVIS is thinking…" {
+            ThinkingLine(text: "JARVIS is thinking…")
         } else if !engine.reply.isEmpty {
             caption(engine.reply, color: Color(hex: "#C9C6D4"))
         } else if let error = engine.errorMessage, !error.isEmpty {
@@ -207,6 +209,25 @@ private struct LiveCaption: View {
             .lineLimit(4)
             .padding(.horizontal, 32)
             .padding(.top, 12)
+    }
+}
+
+/// A slow breath under the ring while the assistant reply is on its way.
+private struct ThinkingLine: View {
+    var text: String
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+            let wave = 0.5 + 0.5 * sin(context.date.timeIntervalSinceReferenceDate * 1.6)
+            Text(text)
+                .font(.system(size: 15, weight: .regular))
+                .foregroundStyle(Color(hex: "#7EB6FF").opacity(0.55 + 0.45 * wave))
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .padding(.horizontal, 32)
+                .padding(.top, 12)
+        }
+        .transition(.opacity)
     }
 }
 
@@ -319,7 +340,7 @@ private struct AskBar: View {
         draft = ""
         focused = false
         JarvisHaptics.tap()
-        engine.ask(text)
+        engine.ask(text, agent: true)
     }
 
     private func micTapped() {

@@ -155,6 +155,8 @@ jobs:
           APNS_PRIVATE_KEY: ${{ secrets.APNS_PRIVATE_KEY }}
           APNS_BUNDLE_ID: ${{ secrets.APNS_BUNDLE_ID }}
           APNS_ENVIRONMENT: ${{ secrets.APNS_ENVIRONMENT }}
+          JARVIS_WEBHOOK_URL: ${{ secrets.JARVIS_WEBHOOK_URL }}
+          JARVIS_WEBHOOK_KEY: ${{ secrets.JARVIS_WEBHOOK_KEY }}
         run: |
           set -euo pipefail
           put_if_present() {
@@ -188,6 +190,8 @@ jobs:
             APNS_PRIVATE_KEY
             APNS_BUNDLE_ID
             APNS_ENVIRONMENT
+            JARVIS_WEBHOOK_URL
+            JARVIS_WEBHOOK_KEY
           )
           missing_required=()
           missing_optional=()

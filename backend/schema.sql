@@ -356,6 +356,19 @@ CREATE TABLE IF NOT EXISTS call_handoffs (
 
 CREATE INDEX IF NOT EXISTS idx_call_handoffs_created ON call_handoffs (created_at);
 
+-- Text chat with the assistant. The webhook URL and key are Worker secrets, never rows.
+CREATE TABLE IF NOT EXISTS agent_messages (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+  text TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'done')),
+  reply_to TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_messages_conversation ON agent_messages (conversation_id, created_at);
+
 -- Prompt for the media bridge. The signed URL is not stored.
 CREATE TABLE IF NOT EXISTS call_bridges (
   call_id TEXT PRIMARY KEY,

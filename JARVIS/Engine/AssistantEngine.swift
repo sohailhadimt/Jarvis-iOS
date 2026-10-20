@@ -75,6 +75,7 @@ final class AssistantEngine {
         switch phase {
         case .listening: return "LISTENING"
         case .speaking: return "SPEAKING"
+        case .thinking: return "THINKING"
         default: return nil
         }
     }
@@ -478,8 +479,8 @@ final class AssistantEngine {
         return StagedFile(name: name, mime: mime, data: data)
     }
 
-    /// Typed request from the Tasks screen. Same turn pipeline as a finished utterance.
-    func ask(_ text: String) {
+    /// Typed request. The home chat uses the assistant webhook. Other screens keep the on-device brain.
+    func ask(_ text: String, agent: Bool = false) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         if !Reachability.shared.online {
@@ -510,7 +511,7 @@ final class AssistantEngine {
             level = 0
             errorMessage = nil
             pushActivity()
-            turnTask = Task { await respond(to: trimmed) }
+            turnTask = Task { await respond(to: trimmed, agent: agent) }
         }
     }
 
@@ -1106,6 +1107,61 @@ final class AssistantEngine {
         await say(ResponsesClient.spokenText(line))
     }
 
+    /// Home text chat. The worker stores the line and the assistant replies through the webhook.
+    private func deliverAgentChat(userText: String) async {
+        let fallback = "I'm still with you, sir. That one is taking longer than it should. Ask me again in a moment."
+        statusLine = "JARVIS is thinking…"
+        phase = .thinking
+        errorMessage = nil
+        pushActivity()
+        guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else {
+            await finishAgentLine(fallback, userText: userText)
+            return
+        }
+        do {
+            let pending = try await client.postAgentChat(message: userText, conversationId: agentConversationID)
+            let deadline = Date().addingTimeInterval(90)
+            while Date() < deadline {
+                try Task.checkCancellation()
+                let messages = try? await client.agentMessages(conversationId: agentConversationID, since: pending.messageId)
+                if let line = messages?.last(where: { message in
+                    message.role == "assistant"
+                        && message.replyTo == pending.messageId
+                        && !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                })?.text {
+                    await finishAgentLine(line, userText: userText)
+                    return
+                }
+                let remaining = deadline.timeIntervalSinceNow
+                if remaining <= 0 { break }
+                try await Task.sleep(for: .seconds(min(2, remaining)))
+            }
+        } catch {
+            if Task.isCancelled { return }
+        }
+        guard !Task.isCancelled else { return }
+        await finishAgentLine(fallback, userText: userText)
+    }
+
+    private func finishAgentLine(_ line: String, userText: String) async {
+        statusLine = nil
+        errorMessage = nil
+        await speakLine(line.trimmingCharacters(in: .whitespacesAndNewlines), userText: userText)
+        errorMessage = nil
+    }
+
+    /// One conversation for the home text chat. The id is not a phone number.
+    private var agentConversationID: String {
+        let key = "jarvis.agentConversation"
+        if let saved = UserDefaults.standard.string(forKey: key),
+           saved.range(of: #"^[A-Za-z0-9_-]{1,80}$"#, options: .regularExpression) != nil {
+            return saved
+        }
+        let made = "conv_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        UserDefaults.standard.set(made, forKey: key)
+        return made
+    }
+
     /// Weather, news, facts and nearby questions are answered on the worker in one spoken line.
     private func deliverLiveAnswer(userText: String) async -> Bool {
         guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else { return false }
@@ -1174,9 +1230,9 @@ final class AssistantEngine {
         refreshWake()
     }
 
-    private func respond(to text: String) async {
+    private func respond(to text: String, agent: Bool = false) async {
         phase = .thinking
-        statusLine = nil
+        statusLine = agent ? "JARVIS is thinking…" : nil
         errorMessage = nil
         reply = ""
         pushActivity()
@@ -1247,6 +1303,13 @@ final class AssistantEngine {
         if await resolveCallChoice(text) { return }
         if await handleLocalCall(text) { return }
         callChoices = []
+
+        if agent {
+            await deliverAgentChat(userText: text)
+            guard !Task.isCancelled else { return }
+            afterTurn()
+            return
+        }
 
         if wantsCloudTool(text) && CloudMonitor.shared.hasRunningWork {
             cloudExecuting = true

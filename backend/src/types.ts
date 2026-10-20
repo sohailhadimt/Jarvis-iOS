@@ -55,6 +55,9 @@ export interface Env {
   GEMINI_API_KEY?: string;
   GROQ_API_KEY?: string;
   JARVIS_APP_TOKEN?: string;
+  /** Grok Bot routine webhook. Set with `npx wrangler secret put`. Never commit the values. */
+  JARVIS_WEBHOOK_URL?: string;
+  JARVIS_WEBHOOK_KEY?: string;
   TAVILY_API_KEY?: string;
   BRAVE_API_KEY?: string;
   ENVIRONMENT?: string;

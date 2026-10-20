@@ -64,6 +64,21 @@ enum CloudTime {
     }
 }
 
+struct AgentPending: Decodable, Sendable {
+    var messageId: String
+    var status: String
+}
+
+struct AgentMessage: Decodable, Sendable {
+    var id: String
+    var conversationId: String
+    var role: String
+    var text: String
+    var status: String
+    var replyTo: String?
+    var createdAt: String
+}
+
 struct CloudChatReply: Decodable, Sendable {
     var ok: Bool
     var reply: String
@@ -532,6 +547,26 @@ private struct ListEnvelope<Item: Decodable>: Decodable {
 struct CloudClient: Sendable {
     var base: URL
     var token: String
+
+    func postAgentChat(message: String, conversationId: String) async throws -> AgentPending {
+        try await sendJSON(method: "POST", path: "/agent/chat", body: [
+            "message": message,
+            "conversationId": conversationId,
+        ])
+    }
+
+    func agentMessages(conversationId: String, since: String) async throws -> [AgentMessage] {
+        struct Envelope: Decodable { var messages: [AgentMessage] }
+        let envelope: Envelope = try await sendNoBody(
+            method: "GET",
+            path: "/agent/messages",
+            query: [
+                URLQueryItem(name: "conversationId", value: conversationId),
+                URLQueryItem(name: "since", value: since),
+            ]
+        )
+        return envelope.messages
+    }
 
     func converse(messages: [[String: String]], location: (lat: Double, lon: Double)? = nil) async -> String? {
         do {
