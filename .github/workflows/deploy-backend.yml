@@ -163,13 +163,22 @@ jobs:
           put_if_present() {
             local name="$1"
             local value="${!name-}"
+            local attempt=1
             if [ -z "$value" ]; then
               echo "missing $name"
               return 1
             fi
-            printf '%s' "$value" | npx wrangler secret put "$name"
-            echo "set $name"
-            return 0
+            while [ "$attempt" -le 4 ]; do
+              if printf '%s' "$value" | npx wrangler secret put "$name"; then
+                echo "set $name"
+                return 0
+              fi
+              echo "retry $name ($attempt)"
+              sleep $((attempt * 4))
+              attempt=$((attempt + 1))
+            done
+            echo "failed $name"
+            return 1
           }
           required=(
             GEMINI_API_KEY
