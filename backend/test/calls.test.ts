@@ -482,7 +482,6 @@ describe("Twilio webhooks", () => {
       expect(xml).toBe(twiml);
       expect(xml).toContain("conv_test123");
       expect(xml).not.toContain("elevenlabs-key-example-value");
-      expect(seen.some((call) => call.url.includes("/convai/agents/"))).toBe(false);
       const registrations = seen.filter((call) => call.url.includes("register-call"));
       expect(registrations).toHaveLength(1);
       expect(registrations[0]?.url).toBe("https://api.elevenlabs.io/v1/convai/twilio/register-call");
@@ -494,16 +493,32 @@ describe("Twilio webhooks", () => {
         direction: "inbound",
       });
       const initiation = registered?.body?.conversation_initiation_client_data as {
-        conversation_config_override: { agent: { first_message: string }; tts: { voice_id: string } };
+        user_id?: string;
+        dynamic_variables?: { opening_line?: string };
+        conversation_config_override?: unknown;
       };
-      expect(initiation.conversation_config_override.agent.first_message).toBe(INBOUND_GREETING);
-      expect(initiation.conversation_config_override.tts.voice_id).toBe(JARVIS_VOICE_ID);
+      expect(initiation.conversation_config_override).toBeUndefined();
+      expect(initiation.dynamic_variables?.opening_line).toBe(INBOUND_GREETING);
+      expect(typeof initiation.user_id).toBe("string");
+      const patch = seen.find((call) => call.method === "PATCH");
+      expect(patch?.body).toMatchObject({
+        conversation_config: {
+          asr: { user_input_audio_format: "ulaw_8000" },
+          tts: { agent_output_audio_format: "ulaw_8000", voice_id: JARVIS_VOICE_ID },
+        },
+        platform_settings: {
+          overrides: {
+            enable_conversation_initiation_client_data_from_webhook: true,
+            conversation_config_override: { agent: { first_message: false } },
+          },
+        },
+      });
     } finally {
       globalThis.fetch = original;
     }
   });
 
-  it("patches the agent to μ-law only after register-call reports the audio format", async () => {
+  it("patches μ-law and webhook initiation data before a bare register", async () => {
     clearElevenLabsTelephonyCache();
     const env = callingEnv();
     const seen: Array<{ url: string; method: string; body: Record<string, unknown> | null }> = [];
@@ -515,9 +530,6 @@ describe("Twilio webhooks", () => {
       const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
       seen.push({ url, method, body });
       if (url.includes("register-call")) {
-        if (seen.filter((call) => call.url.includes("register-call")).length === 1) {
-          return new Response(JSON.stringify({ detail: "Agent audio format must be ulaw_8000 for Twilio." }), { status: 422 });
-        }
         return new Response(twiml, { status: 200, headers: { "content-type": "text/xml" } });
       }
       if (url.includes("/convai/agents/") && method === "GET") {
@@ -537,15 +549,20 @@ describe("Twilio webhooks", () => {
     try {
       const result = await registerElevenLabsCall(env, sampleCall());
       expect(result.twiml).toBe(twiml);
-      expect(seen[0]?.url).toContain("register-call");
       const patch = seen.find((call) => call.method === "PATCH");
       expect(patch?.body).toMatchObject({
         conversation_config: {
           asr: { user_input_audio_format: "ulaw_8000" },
           tts: { agent_output_audio_format: "ulaw_8000", voice_id: JARVIS_VOICE_ID },
         },
+        platform_settings: {
+          overrides: { enable_conversation_initiation_client_data_from_webhook: true },
+        },
       });
-      expect(seen.filter((call) => call.url.includes("register-call"))).toHaveLength(2);
+      const registered = seen.find((call) => call.url.includes("register-call"));
+      const initiation = registered?.body?.conversation_initiation_client_data as { conversation_config_override?: unknown };
+      expect(initiation.conversation_config_override).toBeUndefined();
+      expect(seen.filter((call) => call.url.includes("register-call"))).toHaveLength(1);
     } finally {
       globalThis.fetch = original;
     }
@@ -568,7 +585,7 @@ describe("Twilio webhooks", () => {
       expect(result.error).toContain("TypeError");
       expect(result.error).toContain("Network connection lost.");
       expect(result.error).not.toBe("network");
-      expect(calls).toBe(2);
+      expect(calls).toBeGreaterThanOrEqual(2);
     } finally {
       globalThis.fetch = original;
     }
@@ -580,6 +597,18 @@ describe("Twilio webhooks", () => {
     const original = globalThis.fetch;
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes("/convai/agents/")) {
+        return new Response(
+          JSON.stringify({
+            conversation_config: {
+              asr: { user_input_audio_format: "ulaw_8000" },
+              tts: { agent_output_audio_format: "ulaw_8000", voice_id: "JBFqnCBsd6RMkjVDRZzb" },
+            },
+            platform_settings: { overrides: { enable_conversation_initiation_client_data_from_webhook: true } },
+          }),
+          { status: 200 },
+        );
+      }
       expect(url).toBe("https://api.elevenlabs.io/v1/convai/twilio/register-call");
       expect(init?.method).toBe("POST");
       const headers = new Headers(init?.headers);
@@ -606,7 +635,7 @@ describe("Twilio webhooks", () => {
     }
   });
 
-  it("retries an inbound call without overrides when the agent refuses them", async () => {
+  it("registers an inbound call without conversation overrides", async () => {
     clearElevenLabsTelephonyCache();
     const env = callingEnv();
     const params = { CallSid: "CA123", From: "+447700900123", To: "+447700900000" };
@@ -621,9 +650,6 @@ describe("Twilio webhooks", () => {
       if (url.includes("register-call")) {
         const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
         bodies.push(body);
-        if (bodies.length === 1) {
-          return new Response(JSON.stringify({ detail: "Override for first_message is not allowed by config." }), { status: 400 });
-        }
         return new Response(twiml, { status: 200, headers: { "content-type": "text/xml" } });
       }
       return new Response("{}", { status: 200 });
@@ -634,15 +660,13 @@ describe("Twilio webhooks", () => {
       const xml = await response.text();
       expect(xml).toBe(twiml);
       expect(xml).not.toContain("<Record");
-      expect(bodies).toHaveLength(2);
-      const first = bodies[0]?.conversation_initiation_client_data as { conversation_config_override?: unknown };
-      const second = bodies[1]?.conversation_initiation_client_data as {
+      expect(bodies).toHaveLength(1);
+      const sent = bodies[0]?.conversation_initiation_client_data as {
         conversation_config_override?: unknown;
         dynamic_variables: { opening_line: string };
       };
-      expect(first.conversation_config_override).toBeTruthy();
-      expect(second.conversation_config_override).toBeUndefined();
-      expect(second.dynamic_variables.opening_line).toBe(INBOUND_GREETING);
+      expect(sent.conversation_config_override).toBeUndefined();
+      expect(sent.dynamic_variables.opening_line).toBe(INBOUND_GREETING);
       expect(JSON.stringify(bodies)).not.toContain("elevenlabs-key-example-value");
     } finally {
       globalThis.fetch = original;

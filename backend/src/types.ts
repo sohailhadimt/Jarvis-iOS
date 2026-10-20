@@ -68,6 +68,8 @@ export interface Env {
   ELEVENLABS_API_KEY?: string;
   ELEVENLABS_AGENT_ID?: string;
   ELEVENLABS_WEBHOOK_SECRET?: string;
+  /** Set to "true" to send conversation_config_override on register-call. Off by default. */
+  ELEVENLABS_CALL_OVERRIDES?: string;
   /**
    * Sohail's own mobile for put-through, take-over, SMS, and problem calls.
    * Set at deploy with `npx wrangler secret put OWNER_PHONE`. Never commit the number.

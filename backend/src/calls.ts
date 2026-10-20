@@ -1248,7 +1248,8 @@ export function clearElevenLabsTelephonyCache(): void {
  * Register a Twilio call with ElevenLabs and return the TwiML Twilio should speak.
  * POST /v1/convai/twilio/register-call is the bring-your-own-Twilio path. Its TwiML
  * contains ElevenLabs' own Media Stream URL, so Twilio connects to ElevenLabs directly.
- * The Worker does not open that socket. For inbound, from is the caller and to is the Twilio number.
+ * Overrides stay off unless ELEVENLABS_CALL_OVERRIDES is "true": the stream rejects them
+ * after TwiML is returned. For inbound, from is the caller and to is the Twilio number.
  */
 export async function registerElevenLabsCall(env: Env, input: ElevenCallInput): Promise<ElevenCallResult> {
   const agentId = (env.ELEVENLABS_AGENT_ID ?? "").trim();
@@ -1268,22 +1269,23 @@ export async function registerElevenLabsCall(env: Env, input: ElevenCallInput): 
     console.error("elevenlabs hand-off failed", JSON.stringify({ ...meta, reason: "missing_number", prepare: "skipped" }));
     return { twiml: null, conversationId: null, error: "missing_number", reason: "missing_number" };
   }
-  // Register first. A preceding agent GET/PATCH whose body is left unread makes the next
-  // Worker fetch throw "Network connection lost." before any HTTP status exists.
-  let attempt = await postRegister(apiKey, agentId, input, true, 6_000);
+  // The live agent already has George, μ-law, and the screening prompt. Sending
+  // conversation_config_override makes the stream reject the call after TwiML is returned,
+  // so the default register is bare. A worker var can turn overrides back on later.
+  const overrides = callOverridesEnabled(env);
+  const prepare = await prepareTelephonyAgent(apiKey, agentId);
+  let attempt = await postRegister(apiKey, agentId, input, overrides, 6_000);
   if (!attempt.twiml && (attempt.reason === "network" || attempt.reason === "timeout")) {
-    attempt = await postRegister(apiKey, agentId, input, true, 5_000);
+    attempt = await postRegister(apiKey, agentId, input, overrides, 5_000);
   }
-  let prepare = "skipped";
   if (!attempt.twiml && attempt.reason === "audio_format") {
-    prepare = await prepareTelephonyAgent(apiKey, agentId);
-    attempt = await postRegister(apiKey, agentId, input, true, 5_000);
+    if (prepare !== "patched") {
+      preparedAgentId = "";
+      await prepareTelephonyAgent(apiKey, agentId);
+    }
+    attempt = await postRegister(apiKey, agentId, input, false, 5_000);
   }
-  if (attempt.twiml) {
-    console.log("elevenlabs connected", JSON.stringify({ call: input.id, direction: input.direction, overrides: true, prepare }));
-    return attempt;
-  }
-  if (attempt.reason === "override_not_allowed") {
+  if (!attempt.twiml && overrides && attempt.reason === "override_not_allowed") {
     const bare = await postRegister(apiKey, agentId, input, false, 5_000);
     if (bare.twiml) {
       console.error(
@@ -1298,11 +1300,19 @@ export async function registerElevenLabsCall(env: Env, input: ElevenCallInput): 
     );
     return bare;
   }
+  if (attempt.twiml) {
+    console.log("elevenlabs connected", JSON.stringify({ call: input.id, direction: input.direction, overrides, prepare }));
+    return attempt;
+  }
   console.error(
     "elevenlabs hand-off failed",
     JSON.stringify({ ...meta, reason: attempt.reason, prepare, detail: clip(attempt.error, 180) }),
   );
   return attempt;
+}
+
+function callOverridesEnabled(env: Env): boolean {
+  return (env.ELEVENLABS_CALL_OVERRIDES ?? "").trim() === "true";
 }
 
 async function postRegister(
@@ -1427,8 +1437,8 @@ function registerPayload(agentId: string, input: ElevenCallInput, overrides: boo
 }
 
 /**
- * Turn on μ-law 8000 Hz, the app voice, and the security switches register-call needs.
- * The agent's prompt text is not sent. A failed update is logged and the call still tries.
+ * Turn on μ-law 8000 Hz, the app voice, and webhook initiation data.
+ * Existing override flags are copied through. The agent's prompt text is not sent.
  */
 async function prepareTelephonyAgent(apiKey: string, agentId: string): Promise<string> {
   if (preparedAgentId === agentId) return "cached";
@@ -1498,35 +1508,19 @@ function agentTelephonyReady(payload: unknown): boolean {
   const tts = config && isRecord(config.tts) ? config.tts : null;
   const platform = isRecord(payload.platform_settings) ? payload.platform_settings : null;
   const overrides = platform && isRecord(platform.overrides) ? platform.overrides : null;
-  const conv = overrides && isRecord(overrides.conversation_config_override) ? overrides.conversation_config_override : null;
-  const agent = conv && isRecord(conv.agent) ? conv.agent : null;
-  const prompt = agent && isRecord(agent.prompt) ? agent.prompt : null;
-  const ttsOverride = conv && isRecord(conv.tts) ? conv.tts : null;
   return (
     asr?.user_input_audio_format === "ulaw_8000" &&
     tts?.agent_output_audio_format === "ulaw_8000" &&
     tts?.voice_id === JARVIS_VOICE_ID &&
-    agent?.first_message === true &&
-    agent?.language === true &&
-    prompt?.prompt === true &&
-    ttsOverride?.voice_id === true
+    overrides?.enable_conversation_initiation_client_data_from_webhook === true
   );
 }
 
 function telephonyPatch(current: unknown): Record<string, unknown> {
-  const platform: Record<string, unknown> = {
-    overrides: {
-      conversation_config_override: {
-        agent: {
-          first_message: true,
-          language: true,
-          prompt: { prompt: true },
-        },
-        tts: { voice_id: true },
-      },
-    },
-  };
   const existing = isRecord(current) && isRecord(current.platform_settings) ? current.platform_settings : null;
+  const overrides: Record<string, unknown> = existing && isRecord(existing.overrides) ? { ...existing.overrides } : {};
+  overrides.enable_conversation_initiation_client_data_from_webhook = true;
+  const platform: Record<string, unknown> = { overrides };
   if (existing && isRecord(existing.workspace_overrides)) platform.workspace_overrides = existing.workspace_overrides;
   return {
     conversation_config: {
