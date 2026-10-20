@@ -26,6 +26,12 @@ export function isScreenWebhook(method: string, path: string): boolean {
   return /^\/calls\/(?:join|voicemail)\/[A-Za-z0-9_]+$/.test(path);
 }
 
+/** Polly answers inbound calls unless this secret is explicitly turned off. */
+export function pollyInbound(env: Env): boolean {
+  const flag = (env.ELEVENLABS_FORCE_POLLY ?? "").trim().toLowerCase();
+  return flag !== "false" && flag !== "0" && flag !== "off" && flag !== "no";
+}
+
 export function inboundFallbackResponse(): Response {
   return xml(takeMessage(`${INBOUND_GREETING} Please leave your name and a message after the tone, and I will pass it to Master Hadi.`), 200);
 }
@@ -97,6 +103,17 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
   } catch (err) {
     console.error("inbound call was not stored", safeError(err instanceof Error ? err.message : "insert failed"));
   }
+  if (pollyInbound(env)) {
+    await dbRun(env, "UPDATE outbound_calls SET status = 'message', updated_at = ? WHERE id = ?", [nowIso(), id]).catch(() => undefined);
+    await recordHandoff(env, { callId: id, path: "polly", ok: true, reason: "say_record" });
+    return xml(
+      takeMessage(
+        `${INBOUND_GREETING} Please leave your name and a message after the tone.`,
+        voicemailCallback(request, id),
+      ),
+      200,
+    );
+  }
   ctx.waitUntil(notify(env, id, caller, "", ""));
   ctx.waitUntil(learnCaller(env, id, new URL(request.url).origin));
   if (sid) ctx.waitUntil(startCallRecording(env, sid, id));
@@ -155,33 +172,21 @@ async function voicemailWebhook(request: Request, env: Env, id: string): Promise
   const valid = await twilioRequestSigned(request, params, token);
   if (!valid) return xml("<Response></Response>", 403);
   const spoken = (params.TranscriptionText || "").replace(/\s+/g, " ").trim();
-  const summary = spoken
-    ? `They left a message: ${spoken.slice(0, 220)} I'll get back to them.`
-    : "A caller left a message. The recording is with Twilio.";
-  await dbRun(
-    env,
-    "UPDATE outbound_calls SET status = 'completed', summary = ?, updated_at = ? WHERE id = ? AND (summary IS NULL OR summary = '')",
-    [summary, nowIso(), id],
-  ).catch(() => undefined);
+  const transcript = spoken.slice(0, 300);
+  const prior = await dbFirst<{ summary: string | null }>(env, "SELECT summary FROM outbound_calls WHERE id = ?", [id]).catch(() => null);
+  const already = Boolean(transcript && prior?.summary?.includes(transcript.slice(0, 80)));
   await recordHandoff(env, { callId: id, path: "voicemail", ok: true, reason: spoken ? "transcribed" : "recorded" });
-  const { rememberInboundMessage } = await import("./call-messages");
-  const owned = await rememberInboundMessage(env, id).catch(() => false);
-  if (!owned) {
+  if (!already) {
+    const stored = transcript || "A caller left a message.";
+    await dbRun(
+      env,
+      "UPDATE outbound_calls SET status = 'completed', summary = ?, updated_at = ? WHERE id = ?",
+      [stored, nowIso(), id],
+    ).catch(() => undefined);
     const { readOwnerMobile } = await import("./owner-alert");
+    const { sendSms } = await import("./sms-desk");
     const to = await readOwnerMobile(env);
-    const from = toE164(env.TWILIO_FROM_NUMBER ?? "");
-    const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
-    if (to && from && account && token) {
-      const form = new URLSearchParams({ From: from, To: to, Body: `Call summary: ${summary}`.slice(0, 320) });
-      await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Messages.json`, {
-        method: "POST",
-        headers: {
-          authorization: `Basic ${btoa(`${account}:${token}`)}`,
-          "content-type": "application/x-www-form-urlencoded",
-        },
-        body: form.toString(),
-      }).catch(() => undefined);
-    }
+    if (to) await sendSms(env, to, stored);
   }
   return xml("<Response></Response>", 200);
 }

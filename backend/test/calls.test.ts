@@ -401,6 +401,57 @@ describe("Twilio webhooks", () => {
     expect(await twilioSignatureValid(url, params, "twilio-auth-token-example", "wrong")).toBe(false);
   });
 
+  it("answers an inbound call with Polly and texts the transcript", async () => {
+    const env = callingEnv();
+    env.OWNER_PHONE = "+15557654321";
+    const params = { CallSid: "CA123", From: "+15551230000", To: "+447700900000" };
+    const signed = "https://jarvis-backend.jarvis-hadi.workers.dev/calls/inbound";
+    const signature = await twilioSignature(signed, params, "twilio-auth-token-example");
+    const seen: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      seen.push(String(input));
+      return new Response("{}", { status: 201 });
+    }) as typeof fetch;
+    try {
+      const response = await route(inboundRequest(params, signature), env, ctx());
+      expect(response.status).toBe(200);
+      const xml = await response.text();
+      expect(xml).toContain('<Say language="en-GB" voice="Polly.Brian-Neural">');
+      expect(xml).toContain("Please leave your name and a message after the tone.");
+      expect(xml).toContain(INBOUND_GREETING.slice(0, 24));
+      expect(xml).toContain("<Record");
+      expect(xml).toContain('transcribe="true"');
+      expect(xml).toContain("transcribeCallback=");
+      expect(seen.some((url) => url.includes("register-call"))).toBe(false);
+      const callback = /transcribeCallback="([^"]+)"/.exec(xml)?.[1];
+      expect(callback).toBeTruthy();
+      const transcript = "This is Sam. Please ring me back about the boiler.";
+      const voiceParams = { TranscriptionText: transcript, CallSid: "CA123" };
+      const voiceSignature = await twilioSignature(callback ?? "", voiceParams, "twilio-auth-token-example");
+      const bodies: string[] = [];
+      globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        bodies.push(String(init?.body ?? ""));
+        return new Response("{}", { status: 201 });
+      }) as typeof fetch;
+      const saved = await route(
+        new Request(callback ?? "", {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded", "X-Twilio-Signature": voiceSignature },
+          body: new URLSearchParams(voiceParams).toString(),
+        }),
+        env,
+        ctx(),
+      );
+      expect(saved.status).toBe(200);
+      const sent = bodies.map((body) => new URLSearchParams(body));
+      expect(sent.some((form) => form.get("To") === "+15557654321" && form.get("Body") === transcript)).toBe(true);
+      expect(sent.some((form) => form.get("From") === "+447700900000")).toBe(true);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it("accepts the public inbound URL and takes a message when ElevenLabs fails", async () => {
     clearElevenLabsTelephonyCache();
     const env = mockEnv("secret-token");
@@ -409,6 +460,7 @@ describe("Twilio webhooks", () => {
     env.TWILIO_FROM_NUMBER = "+447700900000";
     env.ELEVENLABS_API_KEY = "elevenlabs-key-example-value";
     env.ELEVENLABS_AGENT_ID = "agent_example";
+    env.ELEVENLABS_FORCE_POLLY = "false";
     const params = { CallSid: "CA123", From: "+447700900123", To: "+447700900000" };
     const signed = "https://jarvis-backend.jarvis-hadi.workers.dev/calls/inbound";
     const signature = await twilioSignature(signed, params, "twilio-auth-token-example");
@@ -445,6 +497,7 @@ describe("Twilio webhooks", () => {
   it("hands an inbound call to ElevenLabs with the caller as from and the app voice", async () => {
     clearElevenLabsTelephonyCache();
     const env = callingEnv();
+    env.ELEVENLABS_FORCE_POLLY = "false";
     const params = { CallSid: "CA123", From: "+447700900123", To: "+447700900000" };
     const signed = "https://jarvis-backend.jarvis-hadi.workers.dev/calls/inbound";
     const signature = await twilioSignature(signed, params, "twilio-auth-token-example");
@@ -638,6 +691,7 @@ describe("Twilio webhooks", () => {
   it("registers an inbound call without conversation overrides", async () => {
     clearElevenLabsTelephonyCache();
     const env = callingEnv();
+    env.ELEVENLABS_FORCE_POLLY = "false";
     const params = { CallSid: "CA123", From: "+447700900123", To: "+447700900000" };
     const signed = "https://jarvis-backend.jarvis-hadi.workers.dev/calls/inbound";
     const signature = await twilioSignature(signed, params, "twilio-auth-token-example");

@@ -71,6 +71,11 @@ export interface Env {
   /** Set to "true" to send conversation_config_override on register-call. Off by default. */
   ELEVENLABS_CALL_OVERRIDES?: string;
   /**
+   * Inbound calls use Polly Brian and a recorded message. On unless this is
+   * "false", "0", "off", or "no". Set "false" to use the ElevenLabs hand-off.
+   */
+  ELEVENLABS_FORCE_POLLY?: string;
+  /**
    * Sohail's own mobile for put-through, take-over, SMS, and problem calls.
    * Set at deploy with `npx wrangler secret put OWNER_PHONE`. Never commit the number.
    */
