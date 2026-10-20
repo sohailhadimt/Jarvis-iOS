@@ -71,8 +71,9 @@ export interface Env {
   /** Set to "true" to send conversation_config_override on register-call. Off by default. */
   ELEVENLABS_CALL_OVERRIDES?: string;
   /**
-   * Inbound calls use Polly Brian and a recorded message. On unless this is
-   * "false", "0", "off", or "no". Set "false" to use the ElevenLabs hand-off.
+   * When "true", "1", "yes", or "on", inbound calls skip ElevenLabs and use
+   * Polly Brian plus a recorded message. Unset (or anything else) tries the
+   * register-call hand-off first. A failed hand-off still records with Polly.
    */
   ELEVENLABS_FORCE_POLLY?: string;
   /**

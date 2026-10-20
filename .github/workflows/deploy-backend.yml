@@ -148,6 +148,7 @@ jobs:
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
           ELEVENLABS_AGENT_ID: ${{ secrets.ELEVENLABS_AGENT_ID }}
           ELEVENLABS_WEBHOOK_SECRET: ${{ secrets.ELEVENLABS_WEBHOOK_SECRET }}
+          ELEVENLABS_FORCE_POLLY: ${{ secrets.ELEVENLABS_FORCE_POLLY }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
           APNS_KEY_ID: ${{ secrets.APNS_KEY_ID }}
@@ -183,6 +184,7 @@ jobs:
           )
           optional=(
             ELEVENLABS_WEBHOOK_SECRET
+            ELEVENLABS_FORCE_POLLY
             TAVILY_API_KEY
             BRAVE_API_KEY
             APNS_KEY_ID

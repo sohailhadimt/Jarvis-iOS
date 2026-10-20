@@ -26,21 +26,25 @@ export function isScreenWebhook(method: string, path: string): boolean {
   return /^\/calls\/(?:join|voicemail)\/[A-Za-z0-9_]+$/.test(path);
 }
 
-/** Polly answers inbound calls unless this secret is explicitly turned off. */
+/**
+ * Polly answers inbound calls only when this secret is on.
+ * Unset keeps the ElevenLabs hand-off. A failed register-call still records with Polly.
+ * Character quota is not probed on the webhook path; set the flag when the free tier is nearly used.
+ */
 export function pollyInbound(env: Env): boolean {
   const flag = (env.ELEVENLABS_FORCE_POLLY ?? "").trim().toLowerCase();
-  return flag !== "false" && flag !== "0" && flag !== "off" && flag !== "no";
+  return flag === "true" || flag === "1" || flag === "yes" || flag === "on";
 }
 
 export function inboundFallbackResponse(): Response {
-  return xml(takeMessage(`${INBOUND_GREETING} Please leave your name and a message after the tone, and I will pass it to Master Hadi.`), 200);
+  return xml(takeMessage(`${INBOUND_GREETING} Please leave a message after the tone, and I will pass it to Master Hadi.`), 200);
 }
 
 export async function handleScreenWebhook(request: Request, env: Env, path: string, ctx: ExecutionContext): Promise<Response> {
   const setup = callingSecrets(env);
   if (!setup.configured) {
     console.error("inbound call is not configured", setup.missing.join(","));
-    if (path === "/calls/inbound") return xml(takeMessage(`${INBOUND_GREETING} Please leave your name and a message after the tone, and I will pass it to Master Hadi.`), 200);
+    if (path === "/calls/inbound") return xml(takeMessage(`${INBOUND_GREETING} Please leave a message after the tone, and I will pass it to Master Hadi.`), 200);
     return xml(say(`${INBOUND_GREETING} I'm sorry, call screening is not set up. Goodbye.`), 503);
   }
   if (path === "/calls/inbound") {
@@ -108,7 +112,7 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
     await recordHandoff(env, { callId: id, path: "polly", ok: true, reason: "say_record" });
     return xml(
       takeMessage(
-        `${INBOUND_GREETING} Please leave your name and a message after the tone.`,
+        `${INBOUND_GREETING} Please leave a message after the tone.`,
         voicemailCallback(request, id),
       ),
       200,
@@ -141,7 +145,7 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
     await recordHandoff(env, { callId: id, path: "register", ok: false, reason, detail });
     return xml(
       takeMessage(
-        `${first} Please leave your name and a message after the tone, and I will pass it to Master Hadi.`,
+        `${first} Please leave a message after the tone, and I will pass it to Master Hadi.`,
         voicemailCallback(request, id),
       ),
       200,
@@ -173,6 +177,8 @@ async function voicemailWebhook(request: Request, env: Env, id: string): Promise
   if (!valid) return xml("<Response></Response>", 403);
   const spoken = (params.TranscriptionText || "").replace(/\s+/g, " ").trim();
   const transcript = spoken.slice(0, 300);
+  const recordingSid = (params.RecordingSid || "").trim();
+  if (recordingSid) await rememberRecording(env, id, recordingSid).catch(() => undefined);
   const prior = await dbFirst<{ summary: string | null }>(env, "SELECT summary FROM outbound_calls WHERE id = ?", [id]).catch(() => null);
   const already = Boolean(transcript && prior?.summary?.includes(transcript.slice(0, 80)));
   await recordHandoff(env, { callId: id, path: "voicemail", ok: true, reason: spoken ? "transcribed" : "recorded" });
@@ -183,10 +189,14 @@ async function voicemailWebhook(request: Request, env: Env, id: string): Promise
       "UPDATE outbound_calls SET status = 'completed', summary = ?, updated_at = ? WHERE id = ?",
       [stored, nowIso(), id],
     ).catch(() => undefined);
-    const { readOwnerMobile } = await import("./owner-alert");
-    const { sendSms } = await import("./sms-desk");
-    const to = await readOwnerMobile(env);
-    if (to) await sendSms(env, to, stored);
+    const { rememberInboundMessage } = await import("./call-messages");
+    const owned = await rememberInboundMessage(env, id).catch(() => false);
+    if (!owned) {
+      const { readOwnerMobile } = await import("./owner-alert");
+      const { sendSms } = await import("./sms-desk");
+      const to = await readOwnerMobile(env);
+      if (to) await sendSms(env, to, stored);
+    }
   }
   return xml("<Response></Response>", 200);
 }
@@ -741,7 +751,7 @@ function say(line: string): string {
 
 function takeMessage(line: string, voicemailUrl = ""): string {
   const callback = voicemailUrl ? ` transcribe="true" transcribeCallback="${escapeXml(voicemailUrl)}"` : "";
-  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-GB" voice="${FALLBACK_SAY_VOICE}">${escapeXml(line)}</Say><Record maxLength="120" playBeep="true"${callback}/><Hangup/></Response>`;
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Say language="en-GB" voice="${FALLBACK_SAY_VOICE}">${escapeXml(line)}</Say><Record maxLength="120" playBeep="true" timeout="5"${callback}/><Hangup/></Response>`;
 }
 
 function xml(body: string, status: number): Response {

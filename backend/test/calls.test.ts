@@ -25,7 +25,7 @@ import {
   twilioSignature,
   twilioSignatureValid,
 } from "../src/calls";
-import { isScreenWebhook } from "../src/screening";
+import { isScreenWebhook, pollyInbound } from "../src/screening";
 import type { Env } from "../src/types";
 
 function request(path: string, init: RequestInit = {}): Request {
@@ -401,9 +401,56 @@ describe("Twilio webhooks", () => {
     expect(await twilioSignatureValid(url, params, "twilio-auth-token-example", "wrong")).toBe(false);
   });
 
+  it("forces Polly only when the flag is on", () => {
+    const env = callingEnv();
+    expect(pollyInbound(env)).toBe(false);
+    for (const value of ["true", "TRUE", "1", "yes", "on"]) {
+      env.ELEVENLABS_FORCE_POLLY = value;
+      expect(pollyInbound(env)).toBe(true);
+    }
+    for (const value of ["false", "0", "off", "no", ""]) {
+      env.ELEVENLABS_FORCE_POLLY = value;
+      expect(pollyInbound(env)).toBe(false);
+    }
+  });
+
   it("answers an inbound call with Polly and texts the transcript", async () => {
     const env = callingEnv();
+    env.ELEVENLABS_FORCE_POLLY = "true";
     env.OWNER_PHONE = "+15557654321";
+    const stored = { summary: null as string | null, status: "screening" };
+    const messages: string[] = [];
+    const recordings: string[] = [];
+    env.DB = {
+      prepare(sql: string) {
+        let bound: unknown[] = [];
+        const statement = {
+          bind(...args: unknown[]) {
+            bound = args;
+            return statement;
+          },
+          async all() {
+            return { results: [], success: true, meta: {} };
+          },
+          async first() {
+            if (sql.includes("call_messages")) return messages.length ? { id: messages[0] } : null;
+            if (sql.includes("outbound_calls")) {
+              return { summary: stored.summary, status: stored.status, created_at: "2026-10-20T10:06:00.000Z" };
+            }
+            if (sql.includes("call_screen")) return { direction: "inbound", caller_name: "", reason: "" };
+            return null;
+          },
+          async run() {
+            if (sql.includes("summary = ?")) stored.summary = String(bound[0] ?? "");
+            if (sql.includes("SET status = 'completed'")) stored.status = "completed";
+            if (sql.includes("INSERT INTO call_messages")) messages.push(String(bound[0] ?? ""));
+            if (sql.includes("INSERT INTO call_recordings")) recordings.push(String(bound[1] ?? ""));
+            return { success: true, meta: { changes: 1 } };
+          },
+        };
+        return statement;
+      },
+    } as unknown as Env["DB"];
     const params = { CallSid: "CA123", From: "+15551230000", To: "+447700900000" };
     const signed = "https://jarvis-backend.jarvis-hadi.workers.dev/calls/inbound";
     const signature = await twilioSignature(signed, params, "twilio-auth-token-example");
@@ -418,16 +465,20 @@ describe("Twilio webhooks", () => {
       expect(response.status).toBe(200);
       const xml = await response.text();
       expect(xml).toContain('<Say language="en-GB" voice="Polly.Brian-Neural">');
-      expect(xml).toContain("Please leave your name and a message after the tone.");
+      expect(xml).toContain("Please leave a message after the tone.");
       expect(xml).toContain(INBOUND_GREETING.slice(0, 24));
-      expect(xml).toContain("<Record");
+      expect(xml).toContain('<Record maxLength="120" playBeep="true" timeout="5"');
       expect(xml).toContain('transcribe="true"');
       expect(xml).toContain("transcribeCallback=");
       expect(seen.some((url) => url.includes("register-call"))).toBe(false);
       const callback = /transcribeCallback="([^"]+)"/.exec(xml)?.[1];
       expect(callback).toBeTruthy();
       const transcript = "This is Sam. Please ring me back about the boiler.";
-      const voiceParams = { TranscriptionText: transcript, CallSid: "CA123" };
+      const voiceParams = {
+        TranscriptionText: transcript,
+        CallSid: "CA123",
+        RecordingSid: "RE0123456789abcdef0123456789abcdef",
+      };
       const voiceSignature = await twilioSignature(callback ?? "", voiceParams, "twilio-auth-token-example");
       const bodies: string[] = [];
       globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -445,8 +496,25 @@ describe("Twilio webhooks", () => {
       );
       expect(saved.status).toBe(200);
       const sent = bodies.map((body) => new URLSearchParams(body));
-      expect(sent.some((form) => form.get("To") === "+15557654321" && form.get("Body") === transcript)).toBe(true);
-      expect(sent.some((form) => form.get("From") === "+447700900000")).toBe(true);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]?.get("To")).toBe("+15557654321");
+      expect(sent[0]?.get("From")).toBe("+447700900000");
+      expect(sent[0]?.get("Body")).toContain("Sir, you have a message.");
+      expect(sent[0]?.get("Body")).toContain(transcript);
+      expect(messages).toHaveLength(1);
+      expect(recordings).toEqual(["RE0123456789abcdef0123456789abcdef"]);
+      expect(stored.summary).toBe(transcript);
+      const again = await route(
+        new Request(callback ?? "", {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded", "X-Twilio-Signature": voiceSignature },
+          body: new URLSearchParams(voiceParams).toString(),
+        }),
+        env,
+        ctx(),
+      );
+      expect(again.status).toBe(200);
+      expect(bodies).toHaveLength(1);
     } finally {
       globalThis.fetch = original;
     }
@@ -460,12 +528,15 @@ describe("Twilio webhooks", () => {
     env.TWILIO_FROM_NUMBER = "+447700900000";
     env.ELEVENLABS_API_KEY = "elevenlabs-key-example-value";
     env.ELEVENLABS_AGENT_ID = "agent_example";
-    env.ELEVENLABS_FORCE_POLLY = "false";
     const params = { CallSid: "CA123", From: "+447700900123", To: "+447700900000" };
     const signed = "https://jarvis-backend.jarvis-hadi.workers.dev/calls/inbound";
     const signature = await twilioSignature(signed, params, "twilio-auth-token-example");
+    const seen: string[] = [];
     const original = globalThis.fetch;
-    globalThis.fetch = (async () => new Response("upstream failed", { status: 502 })) as typeof fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      seen.push(String(input));
+      return new Response("upstream failed", { status: 502 });
+    }) as typeof fetch;
     try {
       const response = await route(
         new Request("http://internal.local/calls/inbound", {
@@ -483,8 +554,11 @@ describe("Twilio webhooks", () => {
       expect(xml).not.toContain("wss://");
       expect(xml).not.toContain("/calls/stream/");
       expect(xml).toContain(`voice="${FALLBACK_SAY_VOICE}"`);
+      expect(xml).toContain("Please leave a message after the tone");
+      expect(xml).toContain('timeout="5"');
       expect(xml).toContain("<Record");
       expect(xml).toContain("transcribeCallback=");
+      expect(seen.some((url) => url.includes("register-call"))).toBe(true);
       expect(xml.indexOf("<Record")).toBeLessThan(xml.indexOf("<Hangup"));
       expect(xml).not.toContain("can't continue");
       expect(xml).not.toContain("twilio-auth-token-example");
