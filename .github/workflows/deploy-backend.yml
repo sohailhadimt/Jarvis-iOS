@@ -318,7 +318,10 @@ jobs:
           console.log(`webhook step=${webhook.step || ""} ok=${Boolean(webhook.ok)} created=${Boolean(webhook.created)} attached=${Boolean(webhook.attached)} status=${webhook.status ?? 0} error=${webhook.error || ""}`);
           console.log(`target found=${Boolean(seen.found)} status=${seen.status || ""} conversation=${Boolean(seen.has_conversation)} screen=${seen.screen || ""}`);
           if (body.note) console.log(`sweep ${body.note}`);
-          if (hit && hit.message_id && webhook.attached) process.exit(0);
+          if (hit && hit.message_id && webhook.attached) {
+            if (/…|They said|The user|you have a message/i.test(hit.spoken || "")) process.exit(1);
+            process.exit(0);
+          }
           for (const row of settled) {
             if (!row) continue;
             console.error(`${row.call_id} ${row.status} message=${row.message_id || "none"}`);
@@ -353,6 +356,10 @@ jobs:
           }
           console.log(`${target} ${hit.message_id} ${hit.status}`);
           console.log(hit.spoken || "");
+          if (/…|They said|The user|you have a message/i.test(hit.spoken || "")) {
+            console.error("Spoken line is still unpolished.");
+            process.exit(1);
+          }
           if (!webhook.attached) {
             console.error("Post-call webhook was not attached.");
             process.exit(1);

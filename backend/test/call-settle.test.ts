@@ -66,6 +66,27 @@ function memoryDb(calls: CallRec[], screens: ScreenRec[], messages: MsgRec[], kv
           return null;
         },
         async all() {
+          if (sql.includes("call_messages m") && sql.includes("read_at IS NULL")) {
+            const results = messages
+              .filter((row) => row.read_at == null)
+              .map((row) => {
+                const call = calls.find((item) => item.id === row.call_id);
+                const screen = screens.find((item) => item.call_id === row.call_id);
+                return {
+                  id: row.id,
+                  call_id: row.call_id,
+                  caller_name: row.caller_name,
+                  summary: row.summary,
+                  spoken: row.spoken,
+                  called_at: row.called_at,
+                  transcript_json: call?.transcript_json ?? "[]",
+                  call_summary: call?.summary ?? null,
+                  created_at: call?.created_at ?? row.called_at,
+                  screen_name: screen?.caller_name ?? "",
+                };
+              });
+            return { results, success: true, meta: {} };
+          }
           if (sql.includes("LEFT JOIN call_screen")) {
             const rows = calls.filter((call) => {
               const screen = screens.find((item) => item.call_id === call.id);
@@ -120,6 +141,9 @@ function memoryDb(calls: CallRec[], screens: ScreenRec[], messages: MsgRec[], kv
           } else if (sql.includes("status = 'failed'")) {
             const call = calls.find((item) => item.id === String(bound[2]));
             if (call) call.status = "failed";
+          } else if (sql.includes("UPDATE outbound_calls SET summary = ?")) {
+            const call = calls.find((item) => item.id === String(bound[2]));
+            if (call) call.summary = String(bound[0]);
           } else if (sql.includes("status = 'completed'")) {
             const call = calls.find((item) => item.id === String(bound[2]));
             if (call) {
@@ -260,7 +284,10 @@ describe("post-call delivery", () => {
       expect(body.message_id).toBeTruthy();
       expect(calls[0]?.status).toBe("completed");
       expect(messages).toHaveLength(1);
-      expect(messages[0]?.spoken).toBe("Sir, you have a message from Amira. They said The boiler is leaking.");
+      expect(messages[0]?.spoken).toContain("Sir, Amira rang at");
+      expect(messages[0]?.spoken).toContain("The boiler is leaking.");
+      expect(messages[0]?.spoken).not.toContain("…");
+      expect(messages[0]?.spoken).not.toContain("They said");
       expect(sms).toHaveLength(1);
       const sent = new URLSearchParams(sms[0]);
       expect(sent.get("To")).toBe("+15557654321");
@@ -376,8 +403,9 @@ describe("post-call delivery", () => {
       expect(kv.get("elevenlabs_post_call_secret")).toBe("super-secret-value");
       const hit = body.settled.find((row) => row.call_id === "call_open");
       expect(hit?.message_id).toBeTruthy();
-      expect(hit?.spoken).toContain("from Amira");
-      expect(hit?.spoken).toContain("They said The boiler is leaking.");
+      expect(hit?.spoken).toContain("Sir, Amira rang at");
+      expect(hit?.spoken).toContain("The boiler is leaking.");
+      expect(hit?.spoken).not.toContain("…");
       expect(calls[0]?.conversation_id).toBe("conv_listed");
       expect(sms).toHaveLength(1);
       expect(seen.some((line) => line.startsWith("GET ") && line.includes("/conversations?"))).toBe(true);
@@ -442,8 +470,9 @@ describe("post-call delivery", () => {
       );
       expect(response.status).toBe(200);
       expect(messages[0]?.summary).toContain("boiler is leaking");
-      expect(messages[0]?.spoken).toContain("They said");
+      expect(messages[0]?.spoken).toContain("Sir, an unknown caller rang at");
       expect(messages[0]?.spoken).toContain("boiler is leaking");
+      expect(messages[0]?.spoken).not.toContain("…");
       expect(messages[0]?.spoken).not.toContain("A caller left a message");
       expect(sms).toHaveLength(1);
     } finally {
@@ -506,7 +535,95 @@ describe("post-call delivery", () => {
       expect(saved.status).toBe(200);
       expect(calls[0]?.summary).toBe("The boiler is leaking.");
       expect(messages).toHaveLength(1);
-      expect(messages[0]?.spoken).toContain("They said The boiler is leaking.");
+      expect(messages[0]?.spoken).toContain("rang at");
+      expect(messages[0]?.spoken).toContain("The boiler is leaking.");
+      expect(messages[0]?.spoken).not.toContain("…");
+      expect(sms).toHaveLength(1);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("rewrites an unread analyst summary into two butler sentences and texts that once", async () => {
+    const calls: CallRec[] = [
+      {
+        id: "call_polish",
+        contact_name: "Incoming call",
+        status: "completed",
+        summary: "The user, identified as Master Hadi, initiated a call with JARVIS.",
+        transcript_json: JSON.stringify([
+          { role: "assistant", text: "Who is calling?" },
+          { role: "them", text: "This is Adz. Please call me back about the boiler." },
+        ]),
+        conversation_id: "conv_old",
+        created_at: "2026-10-20T23:17:48.000Z",
+      },
+    ];
+    const screens: ScreenRec[] = [{ call_id: "call_polish", direction: "inbound", caller_name: "A Test Call", reason: "" }];
+    const messages: MsgRec[] = [
+      {
+        id: "cmsg_polish",
+        call_id: "call_polish",
+        caller_name: "A Test Call",
+        summary: "The user, identified as Master Hadi, initiated a call with JARVIS.",
+        spoken: "Sir, you have a message from A Test Call. They said The user, identified as Master Hadi, initiated a call with JARVIS.",
+        called_at: "2026-10-20T23:17:48.000Z",
+        read_at: null,
+        created_at: "2026-10-20T23:20:00.000Z",
+      },
+    ];
+    const env = settleEnv(calls, screens, messages);
+    const sms: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url.includes("chat/completions")) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: '{"name":"Adz","spoken":"Sir, Adz rang at 00:17. He\'d like you to call him back about the boiler."}',
+                },
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("/v1/workspace/webhooks") && method === "POST") {
+        return new Response(JSON.stringify({ webhook_id: "wh_test", webhook_secret: "super-secret-value" }), { status: 200 });
+      }
+      if (url.includes("api.elevenlabs.io")) return new Response(JSON.stringify({ webhooks: [] }), { status: 200 });
+      if (url.includes("api.twilio.com")) {
+        sms.push(String(init?.body ?? ""));
+        return new Response("{}", { status: 201 });
+      }
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+    try {
+      const response = await route(
+        new Request("https://jarvis.example/calls/settle", { method: "POST", headers: { authorization: "Bearer secret-token" } }),
+        env,
+        ctx(),
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { settled: Array<{ call_id: string; spoken: string | null }> };
+      const hit = body.settled.find((row) => row.call_id === "call_polish");
+      expect(hit?.spoken).toBe("Sir, Adz rang at 00:17. He'd like you to call him back about the boiler.");
+      expect(hit?.spoken).not.toContain("…");
+      expect(messages[0]?.caller_name).toBe("Adz");
+      expect(messages[0]?.spoken).toBe(hit?.spoken);
+      expect(sms).toHaveLength(1);
+      expect(new URLSearchParams(sms[0]).get("Body")).toBe(hit?.spoken);
+
+      const again = await route(
+        new Request("https://jarvis.example/calls/settle", { method: "POST", headers: { authorization: "Bearer secret-token" } }),
+        env,
+        ctx(),
+      );
+      expect(again.status).toBe(200);
       expect(sms).toHaveLength(1);
     } finally {
       globalThis.fetch = original;

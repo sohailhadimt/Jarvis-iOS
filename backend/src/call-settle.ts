@@ -1,8 +1,10 @@
-import { isPlaceholderSummary, rememberInboundMessage } from "./call-messages";
+import { isPlaceholderSummary, messageClock, rememberInboundMessage, spokenCallMessage } from "./call-messages";
 import { elevenLabsSignatureValid, guessCaller, readConversation, safeError, type CallLine } from "./calls";
 import { dbAll, dbFirst, dbRun, getState, setState } from "./db";
 import { clip, isRecord, json, parseJsonValue } from "./http";
 import { completeChat } from "./llm";
+import { readOwnerMobile } from "./owner-alert";
+import { sendSms } from "./sms-desk";
 import type { Env } from "./types";
 
 const PUBLIC_POST_CALL_URL = "https://jarvis-backend.jarvis-hadi.workers.dev/calls/elevenlabs/post-call";
@@ -58,6 +60,7 @@ interface Brief {
   name: string;
   reason: string;
   said: string;
+  spoken: string;
 }
 
 /** ElevenLabs post-call webhook. HMAC is required. Audio events are acknowledged and discarded. */
@@ -95,7 +98,7 @@ export async function settleOpenCalls(env: Env): Promise<Response> {
   let note = "";
   let settled: SettleHit[] = [];
   try {
-    settled = await settleOpenInbound(env);
+    settled = await deliverInbound(env);
   } catch (err) {
     note = safeError(err instanceof Error ? err.message : "sweep");
   }
@@ -107,11 +110,25 @@ export async function settleOpenCalls(env: Env): Promise<Response> {
 export async function sweepInboundCalls(env: Env): Promise<SettleHit[]> {
   await ensurePostCallWebhook(env, 6 * 60 * 60 * 1000);
   try {
-    return await settleOpenInbound(env);
+    return await deliverInbound(env);
   } catch (err) {
     console.error("inbound call sweep failed", safeError(err instanceof Error ? err.message : "sweep"));
     return [];
   }
+}
+
+async function deliverInbound(env: Env): Promise<SettleHit[]> {
+  const settled = await settleOpenInbound(env);
+  const polished = await refreshUnread(env);
+  const merged = [...settled];
+  for (const hit of polished) {
+    const index = merged.findIndex((row) => row.call_id === hit.call_id);
+    if (index >= 0) merged[index] = hit;
+    else merged.push(hit);
+  }
+  const backfill = await storedHit(env, BACKFILL_CALL);
+  if (backfill && !merged.some((row) => row.call_id === backfill.call_id)) merged.push(backfill);
+  return merged;
 }
 
 async function settleOpenInbound(env: Env): Promise<SettleHit[]> {
@@ -143,6 +160,80 @@ async function describeCall(env: Env, id: string): Promise<{ found: boolean; sta
   } catch (err) {
     return { found: false, status: "error", has_conversation: false, screen: safeError(err instanceof Error ? err.message : "read") };
   }
+}
+
+interface UnreadRow {
+  id: string;
+  call_id: string;
+  caller_name: string;
+  summary: string;
+  spoken: string;
+  called_at: string;
+  transcript_json: string | null;
+  call_summary: string | null;
+  created_at: string;
+  screen_name: string | null;
+}
+
+async function refreshUnread(env: Env): Promise<SettleHit[]> {
+  const rows = await dbAll<UnreadRow>(
+    env,
+    `SELECT m.id, m.call_id, m.caller_name, m.summary, m.spoken, m.called_at,
+            c.transcript_json, c.summary AS call_summary, c.created_at, s.caller_name AS screen_name
+     FROM call_messages m
+     JOIN outbound_calls c ON c.id = m.call_id
+     LEFT JOIN call_screen s ON s.call_id = m.call_id
+     WHERE m.read_at IS NULL
+     ORDER BY m.created_at DESC
+     LIMIT 20`,
+  ).catch(() => []);
+  const hits: SettleHit[] = [];
+  for (const row of rows) {
+    if (!needsPolish(row)) continue;
+    const lines = linesFromJson(row.transcript_json);
+    const calledAt = row.called_at || row.created_at;
+    const brief = await summariseCall(env, lines, row.call_summary, calledAt);
+    const spoken = brief.spoken || spokenCallMessage(brief.name || row.screen_name || "", calledAt, row.summary);
+    const name = brief.name || "an unknown caller";
+    if (spoken === row.spoken && name === row.caller_name) continue;
+    await dbRun(env, "UPDATE call_messages SET caller_name = ?, summary = ?, spoken = ? WHERE id = ?", [
+      name,
+      spoken,
+      spoken,
+      row.id,
+    ]);
+    await noteCaller(env, row.call_id, { name: brief.name, reason: brief.reason });
+    await dbRun(env, "UPDATE outbound_calls SET summary = ?, updated_at = ? WHERE id = ?", [
+      spoken,
+      new Date().toISOString(),
+      row.call_id,
+    ]).catch(() => undefined);
+    if (spoken !== row.spoken) {
+      const owner = await readOwnerMobile(env);
+      if (owner) await sendSms(env, owner, spoken);
+    }
+    hits.push({ call_id: row.call_id, message_id: row.id, spoken, summary: spoken, status: "completed" });
+  }
+  return hits;
+}
+
+function needsPolish(row: UnreadRow): boolean {
+  const blob = `${row.spoken} ${row.summary} ${row.caller_name}`;
+  if (/…|\.{3}|they said|you have a message|the user|identified as/i.test(blob)) return true;
+  if (!/^Sir, .+ rang at \d{2}:\d{2}\./.test(row.spoken)) return true;
+  if ((row.spoken.match(/[.!?]/g) ?? []).length > 2) return true;
+  if (/\btest call\b/i.test(row.caller_name) || /^(someone|caller|unknown|a test call)$/i.test(row.caller_name.trim())) return true;
+  return false;
+}
+
+async function storedHit(env: Env, callId: string): Promise<SettleHit | null> {
+  const message = await dbFirst<{ id: string; spoken: string; summary: string }>(
+    env,
+    "SELECT id, spoken, summary FROM call_messages WHERE call_id = ?",
+    [callId],
+  ).catch(() => null);
+  if (!message) return null;
+  return { call_id: callId, message_id: message.id, spoken: message.spoken, summary: message.summary, status: "completed" };
 }
 
 async function loadOpenCalls(env: Env): Promise<OpenCall[]> {
@@ -357,9 +448,9 @@ async function settlePayload(env: Env, payload: unknown, preferredId = ""): Prom
     ]);
     return { call_id: row.id, message_id: null, spoken: null, summary: null, status: "failed" };
   }
-  const brief = await summariseCall(env, read.lines, read.summary);
-  const said = brief.said || brief.reason || stripPhones(read.summary ?? "") || guessCaller(read.lines).reason;
-  const clean = clip(stripPhones(said), 500);
+  const brief = await summariseCall(env, read.lines, read.summary, row.created_at);
+  const said = brief.spoken || brief.said || brief.reason || stripPhones(read.summary ?? "") || guessCaller(read.lines).reason;
+  const clean = spokenCallMessage(brief.name, row.created_at, said);
   if (!clean || isPlaceholderSummary(clean)) {
     if (failed) {
       await dbRun(env, "UPDATE outbound_calls SET status = 'failed', error = ?, updated_at = ? WHERE id = ?", [
@@ -449,48 +540,82 @@ async function noteCaller(env: Env, callId: string, guess: { name: string; reaso
   ).catch(() => undefined);
 }
 
-async function summariseCall(env: Env, lines: CallLine[], analysis: string | null): Promise<Brief> {
+async function summariseCall(env: Env, lines: CallLine[], analysis: string | null, calledAt: string): Promise<Brief> {
   const guessed = guessCaller(lines);
+  const name = realName(guessed.name);
+  const fallbackBody = callerSentence(lines) || plainAnalysis(analysis);
+  const fallbackSpoken = spokenCallMessage(name, calledAt, fallbackBody);
   const fallback: Brief = {
-    name: realName(guessed.name),
-    reason: clip(stripPhones(guessed.reason), 240),
-    said: clip(stripPhones(analysis ?? ""), 500),
+    name,
+    reason: stripPhones(guessed.reason).slice(0, 240),
+    said: fallbackBody,
+    spoken: fallbackSpoken,
   };
   const transcript = lines
     .map((line) => `${line.role === "them" ? "Caller" : "JARVIS"}: ${line.text}`)
     .join("\n")
     .slice(0, 4000);
   if (!transcript && !analysis) return fallback;
+  const time = messageClock(calledAt);
   const result = await completeChat(
     env,
     [
       {
         role: "system",
         content: [
-          "You write a phone message for a British butler.",
-          'Reply with JSON only, no markdown: {"name":"","reason":"","said":""}',
+          "You are JARVIS, Master Hadi's butler, telling him about a call that just finished.",
+          'Reply with JSON only, no markdown: {"name":"","spoken":""}',
           "name is the caller's name if they gave one, otherwise an empty string.",
-          "reason is a few words on why they called.",
-          "said is one sentence of what to pass on. Do not include phone numbers.",
-          "Do not invent a name or a message.",
+          "Never use Master Hadi, a test label, or the word caller as the name.",
+          `spoken is what you will say aloud. At most two sentences. The first sentence must be: Sir, {name or "an unknown caller"} rang at ${time}.`,
+          "The second sentence is the message in your own voice, for example: He'd like you to call him back about the boiler.",
+          "No phone numbers. No ellipsis. Do not analyse the transcript. Do not say the user or identified as.",
+          "Do not invent a name or a request.",
         ].join(" "),
       },
       {
         role: "user",
-        content: `Analysis: ${analysis ?? ""}\n\n${transcript}`,
+        content: `Time: ${time}\nAnalysis: ${plainAnalysis(analysis)}\n\n${transcript}`,
       },
     ],
     null,
-    { timeoutMs: 12_000, maxTokens: 180 },
+    { timeoutMs: 12_000, maxTokens: 220 },
   );
   if (!result.ok) return fallback;
   const parsed = readBrief(result.message.content ?? "");
   if (!parsed) return fallback;
+  const picked = realName(parsed.name) || name;
+  const body = usableMessage(parsed.spoken) ? parsed.spoken : usableMessage(parsed.said) ? parsed.said : fallbackBody;
   return {
-    name: realName(parsed.name) || fallback.name,
-    reason: clip(stripPhones(parsed.reason), 240) || fallback.reason,
-    said: clip(stripPhones(parsed.said), 500) || fallback.said,
+    name: picked,
+    reason: stripPhones(parsed.reason).slice(0, 240),
+    said: body,
+    spoken: spokenCallMessage(picked, calledAt, body),
   };
+}
+
+function plainAnalysis(analysis: string | null): string {
+  const text = stripPhones(analysis ?? "");
+  if (!text || /\b(the user|identified as)\b/i.test(text)) return "";
+  return text;
+}
+
+function callerSentence(lines: CallLine[]): string {
+  const text = lines
+    .filter((line) => line.role === "them")
+    .map((line) => line.text.trim())
+    .filter(Boolean)
+    .join(" ");
+  const first = text.split(/(?<=[.!?])\s+/)[0] ?? "";
+  return stripPhones(first).replace(/…/g, "").trim();
+}
+
+function usableMessage(text: string): boolean {
+  const clean = text.replace(/\s+/g, " ").trim();
+  if (!clean) return false;
+  if (/…|\.{3}/.test(clean)) return false;
+  if (/\b(the user|identified as|they said)\b/i.test(clean)) return false;
+  return true;
 }
 
 function readBrief(text: string): Brief | null {
@@ -503,6 +628,7 @@ function readBrief(text: string): Brief | null {
     name: typeof parsed.name === "string" ? parsed.name : "",
     reason: typeof parsed.reason === "string" ? parsed.reason : "",
     said: typeof parsed.said === "string" ? parsed.said : "",
+    spoken: typeof parsed.spoken === "string" ? parsed.spoken : "",
   };
 }
 
@@ -531,7 +657,8 @@ function linesFromJson(raw: string | null): CallLine[] {
 
 function realName(name: string): string {
   const clean = name.replace(/\+\d+/g, "").replace(/\s+/g, " ").trim();
-  if (!clean || /^(someone|caller|unknown|incoming call|user|master hadi)$/i.test(clean)) return "";
+  if (!clean || /^(someone|caller|unknown|an unknown caller|incoming call|user|test|test call|a test call|master hadi)$/i.test(clean)) return "";
+  if (/\btest call\b/i.test(clean)) return "";
   if (!/^[A-Za-z][A-Za-z' .-]{0,60}$/.test(clean)) return "";
   return clean.slice(0, 80);
 }

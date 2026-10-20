@@ -118,9 +118,7 @@ describe("call messages", () => {
       "2026-10-20T10:06:00.000Z",
       "to check you're well and asked you to ring him back on +15550001111",
     );
-    expect(line).toBe(
-      "Sir, you have a message from Sohil. They said to check you're well and asked you to ring him back on.",
-    );
+    expect(line).toBe("Sir, Sohil rang at 11:06. To check you're well and asked you to ring him back.");
     expect(line).not.toContain("+1555");
   });
 
@@ -148,9 +146,7 @@ describe("call messages", () => {
       expect(await rememberInboundMessage(env, "call_abc")).toBe(true);
       expect(await rememberInboundMessage(env, "call_abc")).toBe(true);
       expect(messages).toHaveLength(1);
-      expect(messages[0]?.spoken).toBe(
-        "Sir, you have a message from Sohil. They said to check you're well and asked you to ring him back.",
-      );
+      expect(messages[0]?.spoken).toBe("Sir, Sohil rang at 11:06. To check you're well and asked you to ring him back.");
       expect(bodies).toHaveLength(1);
       const sent = new URLSearchParams(bodies[0]);
       expect(sent.get("To")).toBe("+15557654321");
@@ -161,8 +157,7 @@ describe("call messages", () => {
       const listed = (await unread.json()) as { messages: Array<{ id: string; read: boolean; spoken: string }> };
       expect(listed.messages).toHaveLength(1);
       expect(listed.messages[0]?.read).toBe(false);
-      expect(listed.messages[0]?.spoken).toContain("from Sohil");
-      expect(listed.messages[0]?.spoken).toContain("They said");
+      expect(listed.messages[0]?.spoken).toContain("Sir, Sohil rang at 11:06.");
 
       const read = await route(
         new Request(`https://jarvis.example/calls/messages/${listed.messages[0]?.id}/read`, { method: "POST", headers: bearer }),
@@ -217,7 +212,8 @@ describe("call messages", () => {
       expect(await rememberInboundMessage(env, "call_vm")).toBe(true);
       expect(messages[0]?.summary).toBe("The boiler is leaking.");
       expect(messages[0]?.caller_name).toBe("Sam");
-      expect(messages[0]?.spoken).toBe("Sir, you have a message from Sam. They said The boiler is leaking.");
+      expect(messages[0]?.spoken).toBe("Sir, Sam rang at 11:06. The boiler is leaking.");
+      expect(messages[0]?.spoken).not.toContain("…");
       expect(bodies).toHaveLength(1);
     } finally {
       globalThis.fetch = original;

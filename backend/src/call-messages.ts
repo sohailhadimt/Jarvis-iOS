@@ -39,14 +39,19 @@ export function isPlaceholderSummary(text: string): boolean {
   return !clean || /^a caller left a message\.?$/i.test(clean);
 }
 
-/** Spoken line for one finished inbound call. No phone numbers. */
+/** London time used in the spoken line, so the model cannot invent the clock. */
+export function messageClock(iso: string): string {
+  return londonClock(iso);
+}
+
+/**
+ * Spoken line for one finished inbound call. Two sentences at most, no phone numbers,
+ * and no ellipsis. The same text is what the app speaks and what the SMS sends.
+ */
 export function spokenCallMessage(name: string, calledAtIso: string, summary: string): string {
   const who = callerLabel(name);
   const time = londonClock(calledAtIso);
-  const detail = tidyDetail(summary);
-  if (!detail) return `Sir, you have a message from ${who} at ${time}.`;
-  const sentence = /[.!?…]$/u.test(detail) ? detail : `${detail}.`;
-  return `Sir, you have a message from ${who}. They said ${sentence}`;
+  return butlerLine(who, time, summary);
 }
 
 /**
@@ -161,18 +166,73 @@ function present(row: MessageRow): {
 
 function callerLabel(name: string): string {
   const clean = name.replace(/\+\d{6,}/g, "").replace(/\s+/g, " ").trim();
-  if (!clean || /^(incoming call|someone|caller|unknown)$/i.test(clean)) return "Someone";
-  return clean.slice(0, 80);
+  if (junkCaller(clean)) return "an unknown caller";
+  return clean.slice(0, 40);
+}
+
+function junkCaller(name: string): boolean {
+  if (!name) return true;
+  if (/^(incoming call|someone|caller|unknown|an unknown caller|user|test|test call|a test call|master hadi)$/i.test(name)) {
+    return true;
+  }
+  return /\btest call\b/i.test(name);
 }
 
 function tidyDetail(summary: string): string {
   let text = summary.replace(/^call summary:\s*/i, "").replace(/^they left a message:\s*/i, "");
+  text = text.replace(/…+/g, " ").replace(/\.{3,}/g, " ");
   text = text.replace(/\+\d{6,}/g, " ");
   text = text.replace(/\s+/g, " ").trim();
   if (!text) return "";
   if (/\b(typeerror|syntaxerror|referenceerror|network connection|status code)\b/i.test(text)) return "";
-  if (text.length > 180) return `${text.slice(0, 179).trimEnd()}…`;
+  if (text.length > 280) {
+    const cut = text.slice(0, 280);
+    const space = cut.lastIndexOf(" ");
+    return (space > 40 ? cut.slice(0, space) : cut).replace(/[,:;]$/u, "").trim();
+  }
   return text;
+}
+
+function butlerLine(who: string, time: string, summary: string): string {
+  const lead = `Sir, ${who} rang at ${time}.`;
+  const second = secondSentence(summary);
+  const line = second ? `${lead} ${second}` : lead;
+  return fitSentences(line, 320);
+}
+
+function secondSentence(summary: string): string {
+  let text = summary.replace(/…+/g, " ").replace(/\.{3,}/g, " ");
+  text = text.replace(/\+\d[\d\s()-]{5,}/g, " ").replace(/\s+/g, " ").trim();
+  text = text.replace(/\s+on$/i, "").trim();
+  if (!text || /^a caller left a message\.?$/i.test(text)) return "";
+  if (/\b(typeerror|syntaxerror|referenceerror|network connection|status code)\b/i.test(text)) return "";
+  if (/^(the user|the caller|analysis)\b/i.test(text) || /\bidentified as\b/i.test(text)) return "";
+  const parts = sentences(text);
+  const body = parts.length >= 2 && /^sir,/i.test(parts[0]) ? parts[1] : /^sir,/i.test(parts[0] ?? "") ? "" : (parts[0] ?? "");
+  const clean = body.replace(/[.!?]+$/u, "").trim();
+  if (!clean) return "";
+  return `${clean.charAt(0).toUpperCase()}${clean.slice(1)}.`;
+}
+
+function sentences(text: string): string[] {
+  const bits = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) ?? [];
+  return bits.map((part) => part.replace(/\s+/g, " ").trim()).filter(Boolean);
+}
+
+function fitSentences(line: string, max: number): string {
+  const parts = sentences(line)
+    .slice(0, 2)
+    .map((part) => part.replace(/…/g, "").trim())
+    .filter(Boolean);
+  let text = parts.join(" ").replace(/\s+/g, " ").trim().replace(/…/g, "");
+  if (text && !/[.!?]$/u.test(text)) text += ".";
+  if (text.length <= max) return text;
+  const first = parts[0] ?? "";
+  if (first && first.length <= max) return /[.!?]$/u.test(first) ? first : `${first}.`;
+  const cut = first.slice(0, Math.max(0, max - 1));
+  const space = cut.lastIndexOf(" ");
+  const base = (space > 20 ? cut.slice(0, space) : cut).replace(/[,:;]$/u, "").trim();
+  return /[.!?]$/u.test(base) ? base : `${base}.`;
 }
 
 function londonClock(iso: string): string {

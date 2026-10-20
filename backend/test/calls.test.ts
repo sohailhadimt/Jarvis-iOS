@@ -705,7 +705,7 @@ describe("Twilio webhooks", () => {
       expect(sent).toHaveLength(1);
       expect(sent[0]?.get("To")).toBe("+15557654321");
       expect(sent[0]?.get("From")).toBe("+447700900000");
-      expect(sent[0]?.get("Body")).toContain("Sir, you have a message from");
+      expect(sent[0]?.get("Body")).toContain("rang at");
       expect(sent[0]?.get("Body")).toContain("boiler");
       const repeat = await route(signedForm(action, bye, byeSignature), env, ctx());
       expect(repeat.status).toBe(200);
