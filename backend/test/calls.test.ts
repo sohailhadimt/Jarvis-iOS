@@ -412,9 +412,13 @@ describe("Twilio webhooks", () => {
       );
       expect(response.status).toBe(200);
       const xml = await response.text();
-      expect(xml).toContain("<Response>");
+      expect(xml).toContain("<Connect>");
+      expect(xml).toContain("<Stream");
+      expect(xml).toContain("wss://");
       expect(xml).toContain(`voice="${FALLBACK_SAY_VOICE}"`);
       expect(xml).toContain("<Record");
+      expect(xml.indexOf("<Record")).toBeLessThan(xml.indexOf("<Hangup"));
+      expect(xml).not.toContain("can't continue");
       expect(xml).not.toContain("twilio-auth-token-example");
       expect(xml).not.toContain("elevenlabs-key-example-value");
     } finally {
@@ -681,5 +685,22 @@ describe("Twilio webhooks", () => {
     } finally {
       globalThis.fetch = original;
     }
+  });
+});
+
+describe("call hand-off debug", () => {
+  it("requires the app token and returns no phone numbers", async () => {
+    const env = mockEnv("secret-token");
+    const denied = await route(request("/debug/last-calls"), env, ctx());
+    expect(denied.status).toBe(401);
+    const allowed = await route(
+      request("/debug/last-calls", { headers: { authorization: "Bearer secret-token" } }),
+      env,
+      ctx(),
+    );
+    expect(allowed.status).toBe(200);
+    const body = (await allowed.json()) as { calls: unknown[] };
+    expect(body.calls).toEqual([]);
+    expect(JSON.stringify(body)).not.toContain("+447");
   });
 });

@@ -1,4 +1,5 @@
 import { awayFirstMessage, awayPrompt, readActiveAway, rememberRecording } from "./call-desk";
+import { recordHandoff, saveBridge, streamSocketUrl, streamTwiml } from "./stream";
 import { dbAll, dbFirst, dbRun } from "./db";
 import {
   FALLBACK_SAY_VOICE,
@@ -22,18 +23,18 @@ const ACTIVE = ["screening", "listening", "handling", "message", "connecting", "
 export function isScreenWebhook(method: string, path: string): boolean {
   if (method !== "POST") return false;
   if (path === "/calls/inbound" || path === "/calls/sms") return true;
-  return /^\/calls\/join\/[A-Za-z0-9_]+$/.test(path);
+  return /^\/calls\/(?:join|voicemail)\/[A-Za-z0-9_]+$/.test(path);
 }
 
 export function inboundFallbackResponse(): Response {
-  return xml(takeMessage(`${INBOUND_GREETING} I'm sorry, I can't continue this call right now. Please leave a message after the tone.`), 200);
+  return xml(takeMessage(`${INBOUND_GREETING} Please leave your name and a message after the tone, and I will pass it to Master Hadi.`), 200);
 }
 
 export async function handleScreenWebhook(request: Request, env: Env, path: string, ctx: ExecutionContext): Promise<Response> {
   const setup = callingSecrets(env);
   if (!setup.configured) {
     console.error("inbound call is not configured", setup.missing.join(","));
-    if (path === "/calls/inbound") return xml(takeMessage(`${INBOUND_GREETING} I'm sorry, call screening is not set up. Please leave a message after the tone.`), 200);
+    if (path === "/calls/inbound") return xml(takeMessage(`${INBOUND_GREETING} Please leave your name and a message after the tone, and I will pass it to Master Hadi.`), 200);
     return xml(say(`${INBOUND_GREETING} I'm sorry, call screening is not set up. Goodbye.`), 503);
   }
   if (path === "/calls/inbound") {
@@ -46,6 +47,7 @@ export async function handleScreenWebhook(request: Request, env: Env, path: stri
   }
   if (path === "/calls/sms") return smsWebhook(request, env);
   const id = path.split("/").pop() ?? "";
+  if (path.startsWith("/calls/voicemail/")) return voicemailWebhook(request, env, id);
   return joinWebhook(request, env, id);
 }
 
@@ -99,24 +101,31 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
   ctx.waitUntil(learnCaller(env, id, new URL(request.url).origin));
   if (sid) ctx.waitUntil(startCallRecording(env, sid, id));
   const away = await readActiveAway(env);
+  const first = away ? awayFirstMessage(away.instruction) : INBOUND_GREETING;
+  const prompt = away ? awayPrompt(away.instruction) : permission.allow ? approvedScreening(permission.note) : screeningScript();
   const connected = await registerElevenLabsCall(env, {
     id,
     from: caller,
     to: dialed || caller,
     direction: "inbound",
-    first: away ? awayFirstMessage(away.instruction) : INBOUND_GREETING,
-    prompt: away ? awayPrompt(away.instruction) : permission.allow ? approvedScreening(permission.note) : screeningScript(),
+    first,
+    prompt,
     contact: "Caller",
     brief: away ? away.instruction : "Find out who is calling and why. Do not reveal personal information.",
   });
   if (!connected.twiml) {
-    await dbRun(env, "UPDATE outbound_calls SET status = 'message', error = ?, updated_at = ? WHERE id = ?", [
-      connected.error || "ElevenLabs did not return TwiML.",
+    const reason = connected.reason || "no_twiml";
+    const detail = connected.error || "ElevenLabs did not return TwiML.";
+    await dbRun(env, "UPDATE outbound_calls SET status = 'screening', error = ?, updated_at = ? WHERE id = ?", [
+      detail,
       nowIso(),
       id,
     ]).catch(() => undefined);
-    return xml(takeMessage(`${INBOUND_GREETING} I'm sorry, I can't continue this call right now. Please leave a message after the tone.`), 200);
+    await recordHandoff(env, { callId: id, path: "register", ok: false, reason, detail });
+    await saveBridge(env, id, first, prompt);
+    return xml(bridgeResponse(request, id, first), 200);
   }
+  await recordHandoff(env, { callId: id, path: "register", ok: true, reason: "twiml" });
   if (connected.conversationId) {
     await dbRun(env, "UPDATE outbound_calls SET conversation_id = ?, status = 'screening', updated_at = ? WHERE id = ?", [
       connected.conversationId,
@@ -125,6 +134,52 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
     ]).catch(() => undefined);
   }
   return new Response(connected.twiml, { status: 200, headers: { "content-type": "text/xml; charset=utf-8" } });
+}
+
+function bridgeResponse(request: Request, id: string, first: string): string {
+  const voicemail = new URL(request.url);
+  voicemail.protocol = "https:";
+  voicemail.pathname = `/calls/voicemail/${id}`;
+  voicemail.search = "";
+  return streamTwiml({
+    streamUrl: streamSocketUrl(request, id),
+    say: `${first} Please leave your name and a message after the tone.`,
+    voice: FALLBACK_SAY_VOICE,
+    voicemailUrl: voicemail.toString(),
+  });
+}
+
+async function voicemailWebhook(request: Request, env: Env, id: string): Promise<Response> {
+  const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
+  const params = await formParams(request);
+  const valid = await twilioRequestSigned(request, params, token);
+  if (!valid) return xml("<Response></Response>", 403);
+  const spoken = (params.TranscriptionText || "").replace(/\s+/g, " ").trim();
+  const summary = spoken
+    ? `They left a message: ${spoken.slice(0, 220)} I'll get back to them.`
+    : "A caller left a message. The recording is with Twilio.";
+  await dbRun(
+    env,
+    "UPDATE outbound_calls SET status = 'completed', summary = ?, updated_at = ? WHERE id = ? AND (summary IS NULL OR summary = '')",
+    [summary, nowIso(), id],
+  ).catch(() => undefined);
+  await recordHandoff(env, { callId: id, path: "voicemail", ok: true, reason: spoken ? "transcribed" : "recorded" });
+  const { readOwnerMobile } = await import("./owner-alert");
+  const to = await readOwnerMobile(env);
+  const from = toE164(env.TWILIO_FROM_NUMBER ?? "");
+  const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
+  if (to && from && account && token) {
+    const form = new URLSearchParams({ From: from, To: to, Body: `Call summary: ${summary}`.slice(0, 320) });
+    await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Messages.json`, {
+      method: "POST",
+      headers: {
+        authorization: `Basic ${btoa(`${account}:${token}`)}`,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: form.toString(),
+    }).catch(() => undefined);
+  }
+  return xml("<Response></Response>", 200);
 }
 
 async function smsWebhook(request: Request, env: Env): Promise<Response> {

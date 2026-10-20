@@ -1,3 +1,4 @@
+import { recordHandoff, saveBridge, streamSocketUrl, streamTwiml } from "./stream";
 import {
   attachConfirmCall,
   callStage,
@@ -33,6 +34,9 @@ export const JARVIS_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb";
 export const FALLBACK_SAY_VOICE = "Polly.Brian-Neural";
 
 export const PERSONAL_CHECK = "I'll need to check with Master Hadi before I share that.";
+
+/** Said once a caller has left a message. */
+export const PASS_ALONG = "I'll pass that to Master Hadi and get back to you.";
 
 export const CALL_SECRET_NAMES = [
   "TWILIO_ACCOUNT_SID",
@@ -184,6 +188,7 @@ export function approvedScreening(note: string): string {
     "If the notes do not contain the answer, say exactly: \"One moment please.\" Then wait. Do not invent schedule, location, or personal facts.",
     `Approved notes: ${approved || "none"}`,
     "Once you know who is calling and why, tell them you will see if he can take the call, then wait.",
+    `When they leave a message, or the conversation is finished, say exactly: "${PASS_ALONG}" Then thank them and end the call.`,
     "British English. Short turns.",
   ].join("\n");
 }
@@ -198,6 +203,7 @@ export function screeningScript(): string {
     "Do not invent facts about him.",
     "If they ask anything else you cannot answer, say exactly: \"One moment please.\" Then wait.",
     "Once you know who is calling and why, tell them you will see if he can take the call, then wait.",
+    `When they leave a message, or the conversation is finished, say exactly: "${PASS_ALONG}" Then thank them and end the call.`,
     "British English. Short turns.",
   ].join("\n");
 }
@@ -232,7 +238,7 @@ export function messageScript(): string {
     "You are JARVIS, Master Hadi's personal assistant.",
     'Your first words are: "Of course. I will take a message for Master Hadi."',
     "Collect their name, number, and message if you do not already have them.",
-    "Read the message back in one sentence, thank them, and say goodbye.",
+    `Read the message back in one sentence, then say exactly: "${PASS_ALONG}"`,
     "Do not reveal any personal information about Master Hadi.",
     "British English. Short turns.",
   ].join("\n");
@@ -589,10 +595,24 @@ async function voiceWebhook(request: Request, env: Env, id: string): Promise<Res
     });
     if (!connected.twiml) {
       const reason = connected.error || connected.reason || "ElevenLabs could not start the call.";
-      await updateCall(env, id, { status: "failed", error: reason });
-      reportCallFailure(env, row, reason);
-      return xml(sayAndHangup("Hello, this is JARVIS, Master Hadi's personal assistant. I'm sorry, I can't continue this call right now. Goodbye."), 200);
+      await updateCall(env, id, { error: reason });
+      await recordHandoff(env, { callId: id, path: "register", ok: false, reason: connected.reason || "no_twiml", detail: reason });
+      await saveBridge(env, id, spoken.first, spoken.prompt);
+      const voicemail = new URL(request.url);
+      voicemail.protocol = "https:";
+      voicemail.pathname = `/calls/voicemail/${id}`;
+      voicemail.search = "";
+      return xml(
+        streamTwiml({
+          streamUrl: streamSocketUrl(request, id),
+          say: `${spoken.first} Please leave a message after the tone.`,
+          voice: FALLBACK_SAY_VOICE,
+          voicemailUrl: voicemail.toString(),
+        }),
+        200,
+      );
     }
+    await recordHandoff(env, { callId: id, path: "register", ok: true, reason: "twiml" });
     await updateCall(env, id, {
       status: "in_progress",
       conversation_id: connected.conversationId,
@@ -600,9 +620,22 @@ async function voiceWebhook(request: Request, env: Env, id: string): Promise<Res
     return new Response(connected.twiml, { status: 200, headers: { "content-type": "text/xml; charset=utf-8" } });
   } catch (err) {
     const reason = safeError(err instanceof Error ? err.message : "ElevenLabs could not be reached.");
-    await updateCall(env, id, { status: "failed", error: reason });
-    reportCallFailure(env, row, reason);
-    return xml(sayAndHangup("Hello, this is JARVIS, Master Hadi's personal assistant. I'm sorry, I can't continue this call right now. Goodbye."), 200);
+    await updateCall(env, id, { error: reason });
+    await recordHandoff(env, { callId: id, path: "register", ok: false, reason: "exception", detail: reason });
+    await saveBridge(env, id, spoken.first, spoken.prompt);
+    const voicemail = new URL(request.url);
+    voicemail.protocol = "https:";
+    voicemail.pathname = `/calls/voicemail/${id}`;
+    voicemail.search = "";
+    return xml(
+      streamTwiml({
+        streamUrl: streamSocketUrl(request, id),
+        say: `${spoken.first} Please leave a message after the tone.`,
+        voice: FALLBACK_SAY_VOICE,
+        voicemailUrl: voicemail.toString(),
+      }),
+      200,
+    );
   }
 }
 

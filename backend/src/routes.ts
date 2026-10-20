@@ -3,6 +3,7 @@ import { handleCallApi, handleCallWebhook, isCallWebhook } from "./calls";
 import { handleOwnerWebhook, isOwnerWebhook, rememberOrigin, routeOwnerApi } from "./owner-alert";
 import { routeRelay } from "./relay";
 import { handleScreenWebhook, inboundFallbackResponse, isScreenWebhook, routeScreeningApi } from "./screening";
+import { handleCallStream, lastCallDebug } from "./stream";
 import { buildBriefing } from "./briefing";
 import { chatResponse } from "./llm";
 import { computeNextRun, parseCron } from "./cron";
@@ -61,12 +62,17 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
 
   try {
     if (request.method === "GET" && path === "/health") return health(env);
+    const streamId = /^\/calls\/stream\/(call_[A-Za-z0-9]+)$/.exec(path);
+    if (streamId && request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+      return handleCallStream(request, env, streamId[1]);
+    }
     if (isOwnerWebhook(request.method, path)) return handleOwnerWebhook(request, env, path);
     if (isScreenWebhook(request.method, path)) return handleScreenWebhook(request, env, path, ctx);
     if (isCallWebhook(request.method, path)) return handleCallWebhook(request, env, path);
     const auth = authorize(request, env.JARVIS_APP_TOKEN);
     if (!auth.ok) return auth.response;
     ctx.waitUntil(rememberOrigin(env, url.origin));
+    if (request.method === "GET" && path === "/debug/last-calls") return lastCallDebug(env);
 
     const parts = path.split("/").filter(Boolean);
     if (request.method === "POST" && path === "/chat") return chatResponse(request, env);

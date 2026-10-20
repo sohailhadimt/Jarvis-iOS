@@ -343,6 +343,27 @@ CREATE TABLE IF NOT EXISTS call_recordings (
   updated_at TEXT NOT NULL
 );
 
+-- Why a hand-off succeeded or failed. No phone numbers and no provider secrets.
+CREATE TABLE IF NOT EXISTS call_handoffs (
+  id TEXT PRIMARY KEY,
+  call_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  ok INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_call_handoffs_created ON call_handoffs (created_at);
+
+-- Prompt for the media bridge. The signed URL is not stored.
+CREATE TABLE IF NOT EXISTS call_bridges (
+  call_id TEXT PRIMARY KEY,
+  first_message TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS call_permissions (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,

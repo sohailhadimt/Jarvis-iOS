@@ -74,7 +74,8 @@ export function awayPrompt(instruction: string): string {
     `Your first spoken words are exactly: "${awayFirstMessage(instruction)}"`,
     "Take their name and a short message. Stay polite.",
     "Do not reveal his schedule, location, or any personal information.",
-    "British English. Short turns. Then thank them and end the call.",
+    "When they have left a message, say exactly: \"I'll pass that to Master Hadi and get back to you.\" Then thank them and end the call.",
+    "British English. Short turns.",
   ].join("\n");
 }
 
