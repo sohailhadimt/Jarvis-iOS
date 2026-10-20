@@ -299,12 +299,42 @@ jobs:
             exit 1
           fi
           base="${WORKER_URL%/}"
-          code=$(curl -sS -o /tmp/settle.json -w "%{http_code}" \
-            -X POST "${base}/calls/settle" \
-            -H "authorization: Bearer ${JARVIS_APP_TOKEN}" \
-            -H "content-type: application/json" \
-            --data '{}')
-          echo "settle HTTP ${code}"
+          attempt=1
+          while [ "$attempt" -le 4 ]; do
+            code=$(curl -sS -o /tmp/settle.json -w "%{http_code}" \
+              -X POST "${base}/calls/settle" \
+              -H "authorization: Bearer ${JARVIS_APP_TOKEN}" \
+              -H "content-type: application/json" \
+              --data '{}')
+            echo "settle HTTP ${code} attempt ${attempt}"
+            if node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          const body = JSON.parse(readFileSync("/tmp/settle.json", "utf8"));
+          const target = "call_2fe78971459946b3bd5bdcd82c15b378";
+          const settled = Array.isArray(body.settled) ? body.settled : [];
+          const hit = settled.find((row) => row && row.call_id === target);
+          const webhook = body.webhook || {};
+          const seen = body.target || {};
+          console.log(`webhook step=${webhook.step || ""} ok=${Boolean(webhook.ok)} created=${Boolean(webhook.created)} attached=${Boolean(webhook.attached)} status=${webhook.status ?? 0} error=${webhook.error || ""}`);
+          console.log(`target found=${Boolean(seen.found)} status=${seen.status || ""} conversation=${Boolean(seen.has_conversation)} screen=${seen.screen || ""}`);
+          if (body.note) console.log(`sweep ${body.note}`);
+          if (hit && hit.message_id && webhook.attached) process.exit(0);
+          for (const row of settled) {
+            if (!row) continue;
+            console.error(`${row.call_id} ${row.status} message=${row.message_id || "none"}`);
+          }
+          process.exit(1);
+          NODE
+            then
+              break
+            fi
+            if [ "$attempt" -eq 4 ]; then
+              echo "Settle did not store the backfill message."
+              exit 1
+            fi
+            sleep $((attempt * 8))
+            attempt=$((attempt + 1))
+          done
           node --input-type=module <<'NODE'
           import { readFileSync } from "node:fs";
           const body = JSON.parse(readFileSync("/tmp/settle.json", "utf8"));

@@ -34,6 +34,8 @@ export interface WebhookEnsure {
   created: boolean;
   attached: boolean;
   status: number;
+  step: string;
+  error: string;
 }
 
 interface OpenCall {
@@ -85,64 +87,106 @@ export async function handleElevenPostCall(request: Request, env: Env): Promise<
   });
 }
 
+const BACKFILL_CALL = "call_2fe78971459946b3bd5bdcd82c15b378";
+
 /** App route. Registers the workspace webhook, then settles open inbound calls. */
 export async function settleOpenCalls(env: Env): Promise<Response> {
   const webhook = await ensurePostCallWebhook(env, 0);
-  const settled = await settleOpenInbound(env);
-  return json({ ok: true, webhook, settled });
+  let note = "";
+  let settled: SettleHit[] = [];
+  try {
+    settled = await settleOpenInbound(env);
+  } catch (err) {
+    note = safeError(err instanceof Error ? err.message : "sweep");
+  }
+  const target = await describeCall(env, BACKFILL_CALL);
+  return json({ ok: true, webhook, settled, note, target });
 }
 
 /** Cron backup. Webhook registration is throttled; the conversation sweep runs every tick. */
 export async function sweepInboundCalls(env: Env): Promise<SettleHit[]> {
   await ensurePostCallWebhook(env, 6 * 60 * 60 * 1000);
-  return settleOpenInbound(env);
+  try {
+    return await settleOpenInbound(env);
+  } catch (err) {
+    console.error("inbound call sweep failed", safeError(err instanceof Error ? err.message : "sweep"));
+    return [];
+  }
 }
 
 async function settleOpenInbound(env: Env): Promise<SettleHit[]> {
   const hits: SettleHit[] = [];
-  let open: OpenCall[] = [];
-  try {
-    open = await loadOpenCalls(env);
-    for (const row of open) {
-      const local = await repairFromStored(env, row);
-      if (local) hits.push(local);
-    }
-    const pending = open.filter((row) => !hits.some((hit) => hit.call_id === row.id && hit.message_id));
-    const networked = await settleFromElevenLabs(env, pending);
-    hits.push(...networked);
-  } catch (err) {
-    console.error("inbound call sweep failed", safeError(err instanceof Error ? err.message : "sweep"));
+  const open = await loadOpenCalls(env);
+  const target = await loadOpenRow(env, BACKFILL_CALL);
+  if (target && !open.some((row) => row.id === target.id)) open.push(target);
+  for (const row of open) {
+    const local = await repairFromStored(env, row);
+    if (local) hits.push(local);
   }
+  const pending = open.filter((row) => !hits.some((hit) => hit.call_id === row.id && hit.message_id));
+  const networked = await settleFromElevenLabs(env, pending);
+  hits.push(...networked);
   return hits;
+}
+
+async function describeCall(env: Env, id: string): Promise<{ found: boolean; status: string; has_conversation: boolean; screen: string }> {
+  try {
+    const row = await loadOpenRow(env, id);
+    if (!row) return { found: false, status: "", has_conversation: false, screen: "" };
+    const screen = await dbFirst<{ direction: string }>(env, "SELECT direction FROM call_screen WHERE call_id = ?", [id]);
+    return {
+      found: true,
+      status: row.status,
+      has_conversation: Boolean(row.conversation_id),
+      screen: screen?.direction ?? "",
+    };
+  } catch (err) {
+    return { found: false, status: "error", has_conversation: false, screen: safeError(err instanceof Error ? err.message : "read") };
+  }
 }
 
 async function loadOpenCalls(env: Env): Promise<OpenCall[]> {
   const since = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
   const statusList = OPEN_STATUSES.map((status) => `'${status}'`).join(", ");
-  return dbAll<OpenCall>(
-    env,
-    `SELECT c.id, c.contact_name, c.conversation_id, c.status, c.summary, c.transcript_json, c.created_at
-     FROM outbound_calls c
-     LEFT JOIN call_screen s ON s.call_id = c.id
-     WHERE c.created_at >= ?
-       AND (s.direction = 'inbound' OR c.contact_name = 'Incoming call')
-       AND (
-         c.status IN (${statusList})
-         OR lower(trim(ifnull(c.summary, ''))) IN ('a caller left a message.', 'a caller left a message')
-         OR (
-           c.status = 'completed'
-           AND NOT EXISTS (SELECT 1 FROM call_messages m WHERE m.call_id = c.id)
+  const columns = "c.id, c.contact_name, c.conversation_id, c.status, c.summary, c.transcript_json, c.created_at";
+  try {
+    return await dbAll<OpenCall>(
+      env,
+      `SELECT ${columns}
+       FROM outbound_calls c
+       LEFT JOIN call_screen s ON s.call_id = c.id
+       WHERE c.created_at >= ?
+         AND (s.direction = 'inbound' OR c.contact_name = 'Incoming call')
+         AND (
+           c.status IN (${statusList})
+           OR lower(trim(ifnull(c.summary, ''))) IN ('a caller left a message.', 'a caller left a message')
+           OR (
+             c.status = 'completed'
+             AND NOT EXISTS (SELECT 1 FROM call_messages m WHERE m.call_id = c.id)
+           )
+           OR EXISTS (
+             SELECT 1 FROM call_messages m
+             WHERE m.call_id = c.id
+               AND lower(trim(m.summary)) IN ('a caller left a message.', 'a caller left a message', '')
+           )
          )
-         OR EXISTS (
-           SELECT 1 FROM call_messages m
-           WHERE m.call_id = c.id
-             AND lower(trim(m.summary)) IN ('a caller left a message.', 'a caller left a message', '')
-         )
-       )
-     ORDER BY c.created_at DESC
-     LIMIT 25`,
-    [since],
-  );
+       ORDER BY c.created_at DESC
+       LIMIT 25`,
+      [since],
+    );
+  } catch (err) {
+    console.error("open call query failed", safeError(err instanceof Error ? err.message : "query"));
+    const rows = await dbAll<OpenCall>(
+      env,
+      `SELECT id, contact_name, conversation_id, status, summary, transcript_json, created_at
+       FROM outbound_calls
+       WHERE created_at >= ? AND contact_name = 'Incoming call'
+       ORDER BY created_at DESC
+       LIMIT 25`,
+      [since],
+    );
+    return rows;
+  }
 }
 
 function explicitPlaceholder(text: string): boolean {
@@ -510,15 +554,22 @@ async function webhookSecrets(env: Env): Promise<string[]> {
 }
 
 async function ensurePostCallWebhook(env: Env, minIntervalMs: number): Promise<WebhookEnsure> {
-  const failed: WebhookEnsure = { ok: false, created: false, attached: false, status: 0 };
+  const failed = (step: string, status = 0, error = ""): WebhookEnsure => ({
+    ok: false,
+    created: false,
+    attached: false,
+    status,
+    step,
+    error,
+  });
   const key = (env.ELEVENLABS_API_KEY ?? "").trim();
-  if (!key) return failed;
+  if (!key) return failed("no_key");
   try {
     if (minIntervalMs > 0) {
       const last = await getState(env, WEBHOOK_ENSURED_KEY);
       const stamp = last ? Date.parse(last) : 0;
       if (Number.isFinite(stamp) && Date.now() - stamp < minIntervalMs) {
-        return { ok: true, created: false, attached: true, status: 200 };
+        return { ok: true, created: false, attached: true, status: 200, step: "cached", error: "" };
       }
     }
     const storedId = (await getState(env, WEBHOOK_ID_KEY))?.trim() ?? "";
@@ -526,18 +577,18 @@ async function ensurePostCallWebhook(env: Env, minIntervalMs: number): Promise<W
     let webhookId = storedId;
     let created = false;
     if (!webhookId || !storedSecret) {
-      const listed = await elevenJson(env, "https://api.elevenlabs.io/v1/workspace/webhooks");
-      const existing = listedWebhookId(listed);
+      const listed = await elevenSend(env, "GET", "https://api.elevenlabs.io/v1/workspace/webhooks");
+      const existing = listed.ok ? listedWebhookId(listed.payload) : "";
       if (existing && storedSecret) webhookId = existing;
     }
     if (!webhookId || !(await getState(env, WEBHOOK_SECRET_KEY))?.trim()) {
       const made = await elevenSend(env, "POST", "https://api.elevenlabs.io/v1/workspace/webhooks", {
         settings: { auth_type: "hmac", name: "JARVIS post-call", webhook_url: PUBLIC_POST_CALL_URL },
       });
-      if (!made.ok || !isRecord(made.payload)) return { ...failed, status: made.status };
+      if (!made.ok || !isRecord(made.payload)) return failed("create", made.status, made.error);
       const id = typeof made.payload.webhook_id === "string" ? made.payload.webhook_id : "";
       const secret = typeof made.payload.webhook_secret === "string" ? made.payload.webhook_secret : "";
-      if (!id || !secret) return { ...failed, status: made.status };
+      if (!id || !secret) return failed("create", made.status, "Webhook id or secret was missing.");
       await setState(env, WEBHOOK_ID_KEY, id);
       await setState(env, WEBHOOK_SECRET_KEY, secret);
       webhookId = id;
@@ -546,12 +597,13 @@ async function ensurePostCallWebhook(env: Env, minIntervalMs: number): Promise<W
     const attached = await elevenSend(env, "PATCH", "https://api.elevenlabs.io/v1/convai/settings", {
       webhooks: { post_call_webhook_id: webhookId, events: ["transcript"], transcript_format: "json" },
     });
-    if (!attached.ok) return { ok: false, created, attached: false, status: attached.status };
+    if (!attached.ok) return failed("attach", attached.status, attached.error);
     await setState(env, WEBHOOK_ENSURED_KEY, new Date().toISOString());
-    return { ok: true, created, attached: true, status: attached.status };
+    return { ok: true, created, attached: true, status: attached.status, step: created ? "created" : "attached", error: "" };
   } catch (err) {
-    console.error("elevenlabs post-call webhook ensure failed", safeError(err instanceof Error ? err.message : "webhook"));
-    return failed;
+    const error = safeError(err instanceof Error ? err.message : "webhook");
+    console.error("elevenlabs post-call webhook ensure failed", error);
+    return failed("exception", 0, error);
   }
 }
 
@@ -576,28 +628,26 @@ async function elevenSend(
   method: "GET" | "POST" | "PATCH",
   url: string,
   body?: unknown,
-): Promise<{ ok: boolean; status: number; payload: unknown }> {
+): Promise<{ ok: boolean; status: number; payload: unknown; error: string }> {
   const key = (env.ELEVENLABS_API_KEY ?? "").trim();
-  if (!key) return { ok: false, status: 0, payload: null };
+  if (!key) return { ok: false, status: 0, payload: null, error: "no_key" };
   try {
-    const response = await fetch(url, {
-      method,
-      redirect: "error",
-      signal: AbortSignal.timeout(20_000),
-      headers: {
-        "xi-api-key": key,
-        ...(body ? { "content-type": "application/json" } : {}),
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    const headers: Record<string, string> = { "xi-api-key": key };
+    const init: RequestInit = { method, redirect: "follow", signal: AbortSignal.timeout(20_000), headers };
+    if (body) {
+      headers["content-type"] = "application/json";
+      init.body = JSON.stringify(body);
+    }
+    const response = await fetch(url, init);
     const text = await response.text();
     if (!response.ok) {
       console.error("elevenlabs request failed", method, response.status);
-      return { ok: false, status: response.status, payload: null };
+      return { ok: false, status: response.status, payload: null, error: `HTTP ${response.status}` };
     }
-    return { ok: true, status: response.status, payload: parseJsonValue(text) };
+    return { ok: true, status: response.status, payload: parseJsonValue(text), error: "" };
   } catch (err) {
-    console.error("elevenlabs request failed", method, safeError(err instanceof Error ? err.message : "network"));
-    return { ok: false, status: 0, payload: null };
+    const error = safeError(err instanceof Error ? err.message : "network");
+    console.error("elevenlabs request failed", method, error);
+    return { ok: false, status: 0, payload: null, error };
   }
 }
