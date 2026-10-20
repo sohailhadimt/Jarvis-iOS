@@ -16,6 +16,7 @@ import {
   type CallLine,
 } from "./calls";
 import { apiError, asString, isRecord, json, newId, nowIso } from "./http";
+import { forcePolly } from "./outbound-speech";
 import type { Env } from "./types";
 
 const ACTIVE = ["screening", "listening", "handling", "message", "connecting", "ringing", "in_progress", "wrapping"];
@@ -32,8 +33,7 @@ export function isScreenWebhook(method: string, path: string): boolean {
  * Character quota is not probed on the webhook path; set the flag when the free tier is nearly used.
  */
 export function pollyInbound(env: Env): boolean {
-  const flag = (env.ELEVENLABS_FORCE_POLLY ?? "").trim().toLowerCase();
-  return flag === "true" || flag === "1" || flag === "yes" || flag === "on";
+  return forcePolly(env);
 }
 
 export function inboundFallbackResponse(): Response {

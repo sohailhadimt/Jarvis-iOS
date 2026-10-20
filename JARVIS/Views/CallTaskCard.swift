@@ -82,9 +82,9 @@ private struct CallTaskCard: View {
 
     private var label: String {
         switch stage {
-        case .dialing: "DIALING"
-        case .live: "ON THE CALL"
-        case .ended: "ENDED"
+        case .dialing: "Dialling"
+        case .live: "On the call"
+        case .ended: "Summary"
         }
     }
 

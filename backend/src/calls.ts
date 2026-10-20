@@ -358,7 +358,7 @@ export async function twilioRequestSigned(request: Request, params: Record<strin
 export function isCallWebhook(method: string, path: string): boolean {
   if (method !== "POST") return false;
   if (path === "/calls/elevenlabs") return true;
-  return /^\/calls\/(?:voice|twilio-status)\/[A-Za-z0-9_]+$/.test(path);
+  return /^\/calls\/(?:voice|twilio-status|gather)\/[A-Za-z0-9_]+$/.test(path);
 }
 
 export async function handleCallWebhook(request: Request, env: Env, path: string): Promise<Response> {
@@ -368,6 +368,7 @@ export async function handleCallWebhook(request: Request, env: Env, path: string
   }
   if (path === "/calls/elevenlabs") return elevenLabsWebhook(request, env);
   const id = path.split("/").pop() ?? "";
+  if (path.includes("/gather/")) return pollyGatherWebhook(request, env, id);
   if (path.includes("/voice/")) return voiceWebhook(request, env, id);
   return twilioStatusWebhook(request, env, id);
 }
@@ -375,7 +376,7 @@ export async function handleCallWebhook(request: Request, env: Env, path: string
 export async function handleCallApi(request: Request, env: Env, path: string): Promise<Response | null> {
   const url = new URL(request.url);
   if (request.method === "GET" && path === "/calls/config") return configResponse(env);
-  if (request.method === "POST" && path === "/calls") return createCall(request, env);
+  if (request.method === "POST" && (path === "/calls" || path === "/calls/outbound")) return createCall(request, env, path === "/calls/outbound");
   if (request.method === "GET" && path === "/calls") return listCalls(env);
   if (path === "/calls/away") return awayRoute(request, env);
   if (request.method === "POST" && path === "/calls/presence") return presenceRoute(request, env);
@@ -411,7 +412,7 @@ async function configResponse(env: Env): Promise<Response> {
   });
 }
 
-async function createCall(request: Request, env: Env): Promise<Response> {
+async function createCall(request: Request, env: Env, approvedRoute = false): Promise<Response> {
   const setup = callingSecrets(env);
   if (!setup.configured) {
     return json(
@@ -431,11 +432,12 @@ async function createCall(request: Request, env: Env): Promise<Response> {
     return apiError(400, "bad_request", "Request body must be JSON.");
   }
   if (!isRecord(body)) return apiError(400, "bad_request", "JSON body must be an object.");
-  const contact = asString(body.contact_name, 120);
-  const brief = asString(body.brief, 2000);
+  if (body.approved === false) return apiError(403, "not_approved", "That call was not approved.");
+  const contact = asString(body.contact_name, 120) || (approvedRoute ? "Them" : "");
+  const brief = approvedRoute ? asString(body.purpose, 2000) || asString(body.brief, 2000) : asString(body.brief, 2000);
   const rawTo = asString(body.to, 40);
   if (!contact || !brief || !rawTo) {
-    return apiError(400, "bad_request", "to, contact_name, and brief are required.");
+    return apiError(400, "bad_request", approvedRoute ? "to and purpose are required." : "to, contact_name, and brief are required.");
   }
   const to = toE164(rawTo);
   if (!to) return apiError(400, "bad_request", "That number is not a valid phone number.");
@@ -582,6 +584,11 @@ async function voiceWebhook(request: Request, env: Env, id: string): Promise<Res
   const spoken = scriptForMode(mode, row, screen, relayAnswer);
   const from = params.From || toE164(env.TWILIO_FROM_NUMBER ?? "") || "";
   const to = params.To || row.to;
+  const outboundTalk = !mode && screen?.direction !== "inbound";
+  if (outboundTalk) {
+    const { forcePolly } = await import("./outbound-speech");
+    if (forcePolly(env)) return pollyOutbound(env, request, row, spoken.first);
+  }
   try {
     const connected = await registerElevenLabsCall(env, {
       id: row.id,
@@ -597,6 +604,7 @@ async function voiceWebhook(request: Request, env: Env, id: string): Promise<Res
       const reason = connected.error || connected.reason || "ElevenLabs could not start the call.";
       await updateCall(env, id, { error: reason });
       await recordHandoff(env, { callId: id, path: "register", ok: false, reason: connected.reason || "no_twiml", detail: reason });
+      if (outboundTalk) return pollyOutbound(env, request, row, spoken.first);
       return xml(leaveMessage(`${spoken.first} Please leave a message after the tone.`, voicemailCallback(request, id)), 200);
     }
     await recordHandoff(env, { callId: id, path: "register", ok: true, reason: "twiml" });
@@ -609,8 +617,27 @@ async function voiceWebhook(request: Request, env: Env, id: string): Promise<Res
     const reason = safeError(err instanceof Error ? `${err.name}: ${err.message}` : "ElevenLabs could not be reached.");
     await updateCall(env, id, { error: reason });
     await recordHandoff(env, { callId: id, path: "register", ok: false, reason: "exception", detail: reason });
+    if (outboundTalk) return pollyOutbound(env, request, row, spoken.first);
     return xml(leaveMessage(`${spoken.first} Please leave a message after the tone.`, voicemailCallback(request, id)), 200);
   }
+}
+
+async function pollyOutbound(env: Env, request: Request, row: StoredCall, opening: string): Promise<Response> {
+  const transcript = row.transcript.some((line) => line.text === opening) ? row.transcript : [...row.transcript, { role: "assistant" as const, text: opening }];
+  await updateCall(env, row.id, { status: "in_progress", transcript, error: null });
+  await recordHandoff(env, { callId: row.id, path: "polly", ok: true, reason: "gather" });
+  const { pollyGatherTwiml } = await import("./outbound-speech");
+  return xml(pollyGatherTwiml(opening, gatherCallback(request, row.id)), 200);
+}
+
+async function pollyGatherWebhook(request: Request, env: Env, id: string): Promise<Response> {
+  const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
+  const params = await formParams(request);
+  const valid = await twilioRequestSigned(request, params, token);
+  if (!valid) return xml(sayAndHangup("Hello, this is JARVIS, Master Hadi's personal assistant. This call could not be verified. Goodbye."), 403);
+  const speech = params.SpeechResult || "";
+  const { continuePollyGather } = await import("./outbound-speech");
+  return xml(await continuePollyGather(env, id, speech, gatherCallback(request, id)), 200);
 }
 
 async function twilioStatusWebhook(request: Request, env: Env, id: string): Promise<Response> {
@@ -1606,6 +1633,14 @@ function classifyEleven(status: number, detail: string): string {
   if (status === 404) return "agent_not_found";
   if (status === 400 || status === 422) return "validation";
   return `http_${status}`;
+}
+
+function gatherCallback(request: Request, id: string): string {
+  const gather = new URL(request.url);
+  gather.protocol = "https:";
+  gather.pathname = `/calls/gather/${id}`;
+  gather.search = "";
+  return gather.toString();
 }
 
 function voicemailCallback(request: Request, id: string): string {

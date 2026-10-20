@@ -267,6 +267,8 @@ describe("Twilio webhooks", () => {
     expect(isCallWebhook("POST", "/calls/voice/call_abc")).toBe(true);
     expect(isCallWebhook("GET", "/calls/voice/call_abc")).toBe(false);
     expect(isCallWebhook("POST", "/calls/elevenlabs")).toBe(true);
+    expect(isCallWebhook("POST", "/calls/gather/call_abc")).toBe(true);
+    expect(isCallWebhook("GET", "/calls/gather/call_abc")).toBe(false);
     expect(isScreenWebhook("POST", "/calls/inbound")).toBe(true);
     expect(isScreenWebhook("POST", "/calls/sms")).toBe(true);
     expect(isScreenWebhook("GET", "/calls/inbound")).toBe(false);
@@ -399,6 +401,172 @@ describe("Twilio webhooks", () => {
     const signature = await twilioSignature(url, params, "twilio-auth-token-example");
     expect(await twilioSignatureValid(url, params, "twilio-auth-token-example", signature)).toBe(true);
     expect(await twilioSignatureValid(url, params, "twilio-auth-token-example", "wrong")).toBe(false);
+  });
+
+  it("dials an approved outbound call from the Twilio number and never without a purpose", async () => {
+    const env = callingEnv();
+    const seen: string[] = [];
+    const bodies: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push(String(input));
+      bodies.push(String(init?.body ?? ""));
+      return new Response(JSON.stringify({ sid: "CA123" }), { status: 201 });
+    }) as typeof fetch;
+    try {
+      const refused = await route(
+        request("/calls/outbound", {
+          method: "POST",
+          headers: bearer,
+          body: JSON.stringify({ to: "+447700900123", purpose: "the meeting moved", approved: false }),
+        }),
+        env,
+        ctx(),
+      );
+      expect(refused.status).toBe(403);
+      const missing = await route(
+        request("/calls/outbound", {
+          method: "POST",
+          headers: bearer,
+          body: JSON.stringify({ to: "+447700900123" }),
+        }),
+        env,
+        ctx(),
+      );
+      expect(missing.status).toBe(400);
+      const open = await route(
+        request("/calls/outbound", {
+          method: "POST",
+          body: JSON.stringify({ to: "+447700900123", purpose: "the meeting moved" }),
+        }),
+        env,
+        ctx(),
+      );
+      expect(open.status).toBe(401);
+      expect(seen).toEqual([]);
+      const response = await route(
+        request("/calls/outbound", {
+          method: "POST",
+          headers: bearer,
+          body: JSON.stringify({ to: "+447700900123", purpose: "the meeting moved to four", contact_name: "Ada" }),
+        }),
+        env,
+        ctx(),
+      );
+      expect(response.status).toBe(201);
+      const payload = (await response.json()) as { call: { brief: string; to: string; status: string; stage: string } };
+      expect(payload.call.brief).toContain("meeting moved");
+      expect(payload.call.to).toBe("+447700900123");
+      expect(payload.call.stage).toBe("dialing");
+      const form = new URLSearchParams(bodies.at(-1) ?? "");
+      expect(form.get("From")).toBe("+447700900000");
+      expect(form.get("To")).toBe("+447700900123");
+      expect(form.get("Record")).toBe("true");
+      expect(form.get("Url")).toContain("/calls/voice/");
+      expect(seen.some((url) => url.includes("Calls.json"))).toBe(true);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("speaks an outbound call with Polly when ElevenLabs is forced or unavailable", async () => {
+    const env = callingEnv();
+    env.ELEVENLABS_FORCE_POLLY = "true";
+    env.GROQ_API_KEY = "groq-test-key";
+    const stored = { transcript: "[]", status: "placing", summary: "" };
+    env.DB = {
+      prepare(sql: string) {
+        let bound: unknown[] = [];
+        const statement = {
+          bind(...args: unknown[]) {
+            bound = args;
+            return statement;
+          },
+          async all() {
+            return { results: [], success: true, meta: {} };
+          },
+          async first() {
+            if (!sql.includes("outbound_calls")) return null;
+            return {
+              id: "call_abc",
+              contact_name: "Ada",
+              to_number: "+447700900123",
+              brief: "the meeting moved to four",
+              status: stored.status,
+              twilio_sid: null,
+              conversation_id: null,
+              transcript_json: stored.transcript,
+              summary: stored.summary || null,
+              error: null,
+              created_at: "2026-10-20T10:00:00.000Z",
+              updated_at: "2026-10-20T10:00:00.000Z",
+            };
+          },
+          async run() {
+            if (sql.includes("transcript_json = ?") && sql.includes("summary = CASE")) {
+              stored.transcript = String(bound[0] ?? "[]");
+              stored.status = String(bound[1] ?? stored.status);
+              if (bound[2]) stored.summary = String(bound[2]);
+            }
+            return { success: true, meta: { changes: 1 } };
+          },
+        };
+        return statement;
+      },
+    } as unknown as Env["DB"];
+    const params = { CallSid: "CA123", From: "+447700900000", To: "+447700900123" };
+    const signed = "https://jarvis-backend.jarvis-hadi.workers.dev/calls/voice/call_abc";
+    const signature = await twilioSignature(signed, params, "twilio-auth-token-example");
+    const seen: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      seen.push(String(input));
+      const reply = JSON.stringify({ say: "Thank you. I'll tell Master Hadi the meeting is at four. Goodbye.", done: true, summary: "Ada confirmed the meeting is at four." });
+      return new Response(JSON.stringify({ choices: [{ message: { content: reply } }] }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const response = await route(
+        new Request("http://internal.local/calls/voice/call_abc", {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded", "X-Twilio-Signature": signature },
+          body: new URLSearchParams(params).toString(),
+        }),
+        env,
+        ctx(),
+      );
+      expect(response.status).toBe(200);
+      const xml = await response.text();
+      expect(xml).toContain('voice="Polly.Brian-Neural"');
+      expect(xml).toContain('language="en-GB"');
+      expect(xml).toContain("<Gather");
+      expect(xml).toContain('timeout="5"');
+      expect(xml).toContain("the meeting moved to four");
+      expect(xml).not.toContain("<Connect>");
+      expect(seen.some((url) => url.includes("register-call"))).toBe(false);
+      const action = /action="([^"]+)"/.exec(xml)?.[1] ?? "";
+      expect(action).toContain("/calls/gather/call_abc");
+      const speech = { SpeechResult: "Yes, four o'clock is fine.", CallSid: "CA123" };
+      const speechSignature = await twilioSignature(action, speech, "twilio-auth-token-example");
+      const next = await route(
+        new Request(action, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded", "X-Twilio-Signature": speechSignature },
+          body: new URLSearchParams(speech).toString(),
+        }),
+        env,
+        ctx(),
+      );
+      expect(next.status).toBe(200);
+      const reply = await next.text();
+      expect(reply).toContain("Polly.Brian-Neural");
+      expect(reply).toContain("Goodbye");
+      expect(reply).toContain("<Hangup");
+      expect(stored.summary).toBe("Ada confirmed the meeting is at four.");
+      expect(stored.status).toBe("completed");
+      expect(stored.transcript).toContain("four o'clock");
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 
   it("forces Polly only when the flag is on", () => {

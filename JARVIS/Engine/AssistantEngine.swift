@@ -74,8 +74,8 @@ final class AssistantEngine {
     private(set) var awayActive = false
     var interceptor: Bool { inboundCall != nil || awayActive }
     var ringLabel: String? {
-        if deskCalls.contains(where: { CallDeskStage.of($0) == .dialing }) { return "DIALING" }
-        if inboundCall != nil || deskCalls.contains(where: { CallDeskStage.of($0) == .live }) { return "ON THE CALL" }
+        if deskCalls.contains(where: { CallDeskStage.of($0) == .dialing }) { return "Dialling" }
+        if inboundCall != nil || deskCalls.contains(where: { CallDeskStage.of($0) == .live }) { return "On the call" }
         switch phase {
         case .listening: return "LISTENING"
         case .speaking: return "SPEAKING"

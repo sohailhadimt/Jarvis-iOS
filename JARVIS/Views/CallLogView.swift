@@ -130,6 +130,9 @@ struct CallBriefBar: View {
     var body: some View {
         if let brief = engine.pendingCallBrief {
             VStack(alignment: .leading, spacing: 8) {
+                Text("APPROVAL")
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(1.4)
                 Text("Call \(brief.contactName)?")
                     .font(.subheadline.weight(.semibold))
                 Text(brief.number)

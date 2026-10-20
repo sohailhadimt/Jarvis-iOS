@@ -805,7 +805,7 @@ struct CloudClient: Sendable {
     }
 
     func placeOutboundCall(to number: String, contactName: String, brief: String) async -> CallPlaceResult {
-        let body: [String: Any] = ["to": number, "contact_name": contactName, "brief": brief]
+        let body: [String: Any] = ["to": number, "purpose": brief, "contact_name": contactName]
         let data: Data
         do {
             data = try JSONSerialization.data(withJSONObject: body)
@@ -813,7 +813,7 @@ struct CloudClient: Sendable {
             return .failed("The call brief could not be sent.")
         }
         do {
-            let (payload, status) = try await raw(method: "POST", path: "/calls", authorize: true, body: data, query: [])
+            let (payload, status) = try await raw(method: "POST", path: "/calls/outbound", authorize: true, body: data, query: [])
             if status == 503 { return .notSetUp }
             guard (200..<300).contains(status) else {
                 return .failed(JarvisLines.explain(Self.failure(data: payload, status: status)))
