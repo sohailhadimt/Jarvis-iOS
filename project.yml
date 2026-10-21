@@ -95,6 +95,7 @@ targets:
       properties:
         com.apple.security.application-groups:
           - group.com.sohail.jarvis
+        aps-environment: production   # TestFlight. The App ID needs the Push Notifications capability.
     dependencies:
       - target: JARVISWidgets
         embed: true

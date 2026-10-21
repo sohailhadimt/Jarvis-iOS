@@ -942,6 +942,12 @@ struct CloudClient: Sendable {
         return envelope.messages
     }
 
+    func callMessage(id: String) async throws -> CallMessage {
+        struct Envelope: Decodable { var message: CallMessage }
+        let envelope: Envelope = try await sendNoBody(method: "GET", path: "/calls/messages/\(Self.path(id))")
+        return envelope.message
+    }
+
     func markCallMessageRead(id: String) async -> Bool {
         struct Ack: Decodable { var ok: Bool }
         do {
@@ -1165,7 +1171,7 @@ struct ScreeningFlags: Decodable, Sendable {
     }
 }
 
-struct PhoneCallLine: Decodable, Sendable {
+struct PhoneCallLine: Decodable, Equatable, Sendable {
     var role: String
     var text: String
 }
@@ -1254,12 +1260,27 @@ struct CallMessage: Decodable, Identifiable, Equatable, Sendable {
     var spoken: String
     var calledAt: String
     var read: Bool
+    var transcript: [PhoneCallLine]
+    var recording: Bool
 
     enum CodingKeys: String, CodingKey {
-        case id, summary, spoken, read
+        case id, summary, spoken, read, transcript, recording
         case callId = "call_id"
         case callerName = "caller_name"
         case calledAt = "called_at"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        callId = try container.decode(String.self, forKey: .callId)
+        callerName = try container.decodeIfPresent(String.self, forKey: .callerName) ?? ""
+        summary = try container.decodeIfPresent(String.self, forKey: .summary) ?? ""
+        spoken = try container.decodeIfPresent(String.self, forKey: .spoken) ?? ""
+        calledAt = try container.decodeIfPresent(String.self, forKey: .calledAt) ?? ""
+        read = try container.decodeIfPresent(Bool.self, forKey: .read) ?? false
+        transcript = try container.decodeIfPresent([PhoneCallLine].self, forKey: .transcript) ?? []
+        recording = try container.decodeIfPresent(Bool.self, forKey: .recording) ?? false
     }
 }
 

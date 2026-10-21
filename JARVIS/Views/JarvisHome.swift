@@ -149,6 +149,12 @@ struct JarvisShell: View {
                 self.drawer.setOpen(false)
             }
             log.absorb(engine.turns)
+            if engine.focusedCallMessageID != nil || CallMessageLink.pendingID != nil {
+                route = .calls
+            }
+        }
+        .onChange(of: engine.focusedCallMessageID) { _, id in
+            if id != nil { route = .calls }
         }
         .onChange(of: engine.turns.count) { _, _ in log.absorb(engine.turns) }
         .onChange(of: engine.phase) { _, phase in

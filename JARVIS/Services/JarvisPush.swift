@@ -21,7 +21,8 @@ final class JarvisPush: NSObject, UIApplicationDelegate, UNUserNotificationCente
             textInputPlaceholder: "What should I tell them?"
         )
         let question = UNNotificationCategory(identifier: "JARVIS_QUESTION", actions: [reply], intentIdentifiers: [], options: [])
-        center.setNotificationCategories([category, question])
+        let message = UNNotificationCategory(identifier: "JARVIS_MESSAGE", actions: [], intentIdentifiers: [], options: [])
+        center.setNotificationCategories([category, question, message])
         center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in
             DispatchQueue.main.async {
                 application.registerForRemoteNotifications()
@@ -44,8 +45,8 @@ final class JarvisPush: NSObject, UIApplicationDelegate, UNUserNotificationCente
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
         if notification.request.content.userInfo["kind"] as? String == "call_message" {
-            NotificationCenter.default.post(name: .jarvisCallMessage, object: nil)
-            return []
+            CallMessageLink.post(notification.request.content.userInfo)
+            return [.banner, .sound]
         }
         return [.banner, .sound]
     }
@@ -53,7 +54,7 @@ final class JarvisPush: NSObject, UIApplicationDelegate, UNUserNotificationCente
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let info = response.notification.request.content.userInfo
         if info["kind"] as? String == "call_message" {
-            NotificationCenter.default.post(name: .jarvisCallMessage, object: nil)
+            CallMessageLink.post(info)
             return
         }
         if info["kind"] as? String == "briefing" {
@@ -79,5 +80,19 @@ final class JarvisPush: NSObject, UIApplicationDelegate, UNUserNotificationCente
         }
         guard let id = info["call_id"] as? String else { return }
         _ = await client.screenCall(id: id, action: action)
+    }
+}
+
+/// Holds the message id from a notification tap until the home screen can open that card.
+enum CallMessageLink {
+    static var pendingID: String?
+
+    static func post(_ info: [AnyHashable: Any]) {
+        let raw = info["message_id"] as? String
+        let id = raw?.hasPrefix("cmsg_") == true ? raw : nil
+        pendingID = id
+        var userInfo: [String: String] = [:]
+        if let id { userInfo["message_id"] = id }
+        NotificationCenter.default.post(name: .jarvisCallMessage, object: nil, userInfo: userInfo)
     }
 }

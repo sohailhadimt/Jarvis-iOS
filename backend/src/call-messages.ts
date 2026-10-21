@@ -95,7 +95,6 @@ export async function rememberInboundMessage(env: Env, callId: string): Promise<
           existing.id,
         ]);
         await deliverOwnerText(env, callId);
-        await pushNotice(env, "JARVIS", nextSpoken, { kind: "call_message", message_id: existing.id }, "JARVIS_MESSAGE");
       } else if (detail && detail !== existing.summary) {
         const nextSpoken = spokenCallMessage(screen.caller_name, existing.called_at || call.created_at, detail);
         await dbRun(env, "UPDATE call_messages SET summary = ?, spoken = ? WHERE id = ?", [detail, nextSpoken, existing.id]);
@@ -111,7 +110,6 @@ export async function rememberInboundMessage(env: Env, callId: string): Promise<
       [id, callId, who, detail, spoken, call.created_at, now],
     );
     await deliverOwnerText(env, callId);
-    await pushNotice(env, "JARVIS", spoken, { kind: "call_message", message_id: id }, "JARVIS_MESSAGE");
     return true;
   } catch {
     return inbound;
@@ -131,15 +129,43 @@ export interface OwnerText {
 const SMS_OK = new Set(["queued", "accepted", "sending", "sent", "delivered", "received", "receiving"]);
 
 /**
- * Texts the stored spoken line once. A saved message is not treated as proof the text was sent.
- * Opt-out (21610) is not retried. The result has no phone numbers.
+ * Title and one-line body for the call-message push.
+ * The body is the short reason, not the full "Sir, … rang at …" line.
+ */
+export function callPushCopy(name: string, spoken: string, summary: string): { title: string; body: string } {
+  const who = callerLabel(name);
+  return {
+    title: `JARVIS – Call from ${who}`,
+    body: shortCallSummary(spoken, summary),
+  };
+}
+
+/** The one sentence that belongs in the notification, with no phone numbers and no ellipsis. */
+export function shortCallSummary(spoken: string, summary: string): string {
+  const fromSpoken = secondSentence(spoken);
+  if (fromSpoken) return clipNotice(fromSpoken);
+  const fromSummary = secondSentence(summary);
+  if (fromSummary) return clipNotice(fromSummary);
+  const tidy = summary.replace(/…/g, " ").replace(/\.{3,}/g, " ").replace(/\s+/g, " ").trim();
+  if (tidy && !/^sir,/i.test(tidy) && !isPlaceholderSummary(tidy)) {
+    const line = /[.!?]$/u.test(tidy) ? tidy : `${tidy}.`;
+    return clipNotice(line);
+  }
+  return clipNotice(spoken);
+}
+
+/**
+ * Tells the owner a saved call message is waiting.
+ * A registered device gets an Apple push. SMS is the fallback when no device token is registered,
+ * and also when a token is registered but Apple did not accept the push.
+ * A saved row is not treated as proof the text was sent. Opt-out (21610) is not retried.
  */
 export async function deliverOwnerText(env: Env, callId: string): Promise<OwnerText> {
   const empty: OwnerText = { call_id: callId, message_id: "", sid: "", status: "", error_code: "", error: "no_message", sent: false };
   if (!/^call_[A-Za-z0-9]+$/.test(callId)) return { ...empty, error: "bad_call" };
-  const message = await dbFirst<{ id: string; spoken: string }>(
+  const message = await dbFirst<{ id: string; call_id: string; caller_name: string; summary: string; spoken: string }>(
     env,
-    "SELECT id, spoken FROM call_messages WHERE call_id = ?",
+    "SELECT id, call_id, caller_name, summary, spoken FROM call_messages WHERE call_id = ?",
     [callId],
   ).catch(() => null);
   if (!message?.spoken) return empty;
@@ -152,6 +178,19 @@ export async function deliverOwnerText(env: Env, callId: string): Promise<OwnerT
       status: prior.status,
       error_code: prior.errorCode,
       error: prior.error,
+      sent: false,
+    };
+  }
+  const pushed = await pushCallMessage(env, message);
+  if (pushed) {
+    await writeReceipt(env, message.id, message.spoken, { ok: true, sid: "", status: "pushed", errorCode: "", error: "" });
+    return {
+      call_id: callId,
+      message_id: message.id,
+      sid: "",
+      status: "pushed",
+      error_code: "",
+      error: "",
       sent: false,
     };
   }
@@ -218,9 +257,25 @@ export async function listCallMessages(env: Env, url: URL): Promise<Response> {
   const unread = url.searchParams.get("unread") === "1";
   try {
     const rows = await dbAll<MessageRow>(env, unread ? UNREAD_SQL : RECENT_SQL);
-    return json({ messages: rows.map(present) });
+    const messages = await Promise.all(rows.map((row) => present(env, row)));
+    return json({ messages });
   } catch {
     return json({ messages: [] });
+  }
+}
+
+export async function getCallMessage(env: Env, id: string): Promise<Response> {
+  if (!/^cmsg_[A-Za-z0-9]+$/.test(id)) return apiError(400, "bad_request", "Unknown message id.");
+  try {
+    const row = await dbFirst<MessageRow>(
+      env,
+      "SELECT id, call_id, caller_name, summary, spoken, called_at, read_at, created_at FROM call_messages WHERE id = ?",
+      [id],
+    );
+    if (!row) return apiError(404, "not_found", "Message not found.");
+    return json({ message: await present(env, row) });
+  } catch {
+    return apiError(503, "call_log_unavailable", "The message could not be read.");
   }
 }
 
@@ -236,7 +291,28 @@ export async function markCallMessageRead(env: Env, id: string): Promise<Respons
   }
 }
 
-function present(row: MessageRow): {
+async function pushCallMessage(
+  env: Env,
+  message: { id: string; call_id: string; caller_name: string; summary: string; spoken: string },
+): Promise<boolean> {
+  let tokens: { token: string }[] = [];
+  try {
+    tokens = await dbAll<{ token: string }>(env, "SELECT token FROM call_devices ORDER BY updated_at DESC LIMIT 5");
+  } catch {
+    return false;
+  }
+  if (tokens.length === 0) return false;
+  const copy = callPushCopy(message.caller_name || "", message.spoken, message.summary || "");
+  return pushNotice(
+    env,
+    copy.title,
+    copy.body,
+    { kind: "call_message", message_id: message.id, call_id: message.call_id },
+    "JARVIS_MESSAGE",
+  );
+}
+
+async function present(env: Env, row: MessageRow): Promise<{
   id: string;
   call_id: string;
   caller_name: string;
@@ -245,7 +321,9 @@ function present(row: MessageRow): {
   called_at: string;
   created_at: string;
   read: boolean;
-} {
+  transcript: { role: string; text: string }[];
+  recording: boolean;
+}> {
   return {
     id: row.id,
     call_id: row.call_id,
@@ -255,7 +333,66 @@ function present(row: MessageRow): {
     called_at: row.called_at,
     created_at: row.created_at,
     read: Boolean(row.read_at),
+    transcript: await messageTranscript(env, row.call_id),
+    recording: await messageHasRecording(env, row.call_id),
   };
+}
+
+async function messageTranscript(env: Env, callId: string): Promise<{ role: string; text: string }[]> {
+  try {
+    const call = await dbFirst<{ transcript_json: string | null }>(
+      env,
+      "SELECT transcript_json FROM outbound_calls WHERE id = ?",
+      [callId],
+    );
+    return parseMessageTranscript(call?.transcript_json ?? "");
+  } catch {
+    return [];
+  }
+}
+
+async function messageHasRecording(env: Env, callId: string): Promise<boolean> {
+  try {
+    const row = await dbFirst<{ recording_sid: string }>(
+      env,
+      "SELECT recording_sid FROM call_recordings WHERE call_id = ?",
+      [callId],
+    );
+    return Boolean(row?.recording_sid && /^RE[0-9a-fA-F]{32}$/.test(row.recording_sid));
+  } catch {
+    return false;
+  }
+}
+
+function parseMessageTranscript(raw: string): { role: string; text: string }[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const lines: { role: string; text: string }[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== "object") continue;
+      const record = item as { role?: unknown; text?: unknown };
+      if (typeof record.text !== "string") continue;
+      const text = record.text.replace(/\+\d[\d\s()-]{5,}/g, " ").replace(/\s+/g, " ").trim().slice(0, 500);
+      if (!text) continue;
+      lines.push({ role: record.role === "them" || record.role === "user" ? "them" : "assistant", text });
+      if (lines.length >= 40) break;
+    }
+    return lines;
+  } catch {
+    return [];
+  }
+}
+
+function clipNotice(text: string): string {
+  const clean = text.replace(/…/g, "").replace(/\s+/g, " ").trim();
+  if (!clean) return "";
+  if (clean.length <= 180) return clean;
+  const cut = clean.slice(0, 180);
+  const space = cut.lastIndexOf(" ");
+  const base = (space > 40 ? cut.slice(0, space) : cut).replace(/[,:;]$/u, "").trim();
+  return /[.!?]$/u.test(base) ? base : `${base}.`;
 }
 
 function callerLabel(name: string): string {

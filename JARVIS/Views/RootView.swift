@@ -75,6 +75,7 @@ struct RootView: View {
                 Task { await engine.startSession(continuous: true) }
             }
             engine.startScreenWatch()
+            openPendingCallMessage()
             if settings.onboarded {
                 DeviceLocation.shared.prepare()
                 DevicePresence.shared.start()
@@ -124,13 +125,20 @@ struct RootView: View {
             }
         }
         .onChange(of: unlocked) { _, isUnlocked in
-            if isUnlocked { deliverCallMessagesIfReady() }
+            if isUnlocked {
+                openPendingCallMessage()
+                deliverCallMessagesIfReady()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .jarvisDeliverBriefing)) { _ in
             deliverBriefingIfDue(force: true)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .jarvisCallMessage)) { _ in
-            deliverCallMessagesIfReady()
+        .onReceive(NotificationCenter.default.publisher(for: .jarvisCallMessage)) { note in
+            if let id = note.userInfo?["message_id"] as? String, id.hasPrefix("cmsg_") {
+                openCallMessage(id)
+            } else {
+                deliverCallMessagesIfReady()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: JarvisStartListening.notification)) { _ in
             startListeningIfRequested()
@@ -196,6 +204,16 @@ struct RootView: View {
         guard settings.onboarded, unlocked || !settings.privacyLock else { return }
         guard scenePhase == .active else { return }
         engine.deliverCallMessages()
+    }
+
+    private func openPendingCallMessage() {
+        guard let id = CallMessageLink.pendingID else { return }
+        openCallMessage(id)
+    }
+
+    private func openCallMessage(_ id: String) {
+        guard settings.onboarded, unlocked || !settings.privacyLock else { return }
+        engine.openCallMessage(id)
     }
 }
 

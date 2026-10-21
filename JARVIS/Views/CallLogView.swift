@@ -11,8 +11,13 @@ struct CallLogView: View {
             if !engine.callMessages.isEmpty {
                 Section("Messages") {
                     ForEach(engine.callMessages) { message in
-                        CallMessageCard(message: message)
-                            .listRowBackground(Color.black)
+                        Button {
+                            engine.showCallMessage(message.id)
+                        } label: {
+                            CallMessageCard(message: message)
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(Color.black)
                     }
                 }
             }
@@ -47,6 +52,18 @@ struct CallLogView: View {
         }
         .onChange(of: engine.callLogTick) { _, _ in
             rows = CallLogStore.entries()
+        }
+        .sheet(isPresented: Binding(
+            get: { engine.focusedCallMessageID != nil },
+            set: { if !$0 { engine.dismissFocusedCallMessage() } }
+        )) {
+            if let message = engine.callMessages.first(where: { $0.id == engine.focusedCallMessageID }) {
+                CallMessageDetail(message: message)
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(hex: "#05080F").ignoresSafeArea())
+            }
         }
     }
 

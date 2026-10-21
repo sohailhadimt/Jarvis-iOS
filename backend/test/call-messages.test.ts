@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { rememberInboundMessage, spokenCallMessage } from "../src/call-messages";
+import { callPushCopy, rememberInboundMessage, spokenCallMessage } from "../src/call-messages";
 import { sendSmsResult } from "../src/sms-desk";
 import { route } from "../src/routes";
 import type { Env } from "../src/types";
@@ -16,6 +16,8 @@ interface CallRow {
   status: string;
   summary: string | null;
   created_at: string;
+  transcript_json?: string;
+  recording?: boolean;
 }
 
 interface MessageRow {
@@ -29,7 +31,7 @@ interface MessageRow {
   created_at: string;
 }
 
-function messageEnv(screens: ScreenRow[], calls: CallRow[], messages: MessageRow[]): Env {
+function messageEnv(screens: ScreenRow[], calls: CallRow[], messages: MessageRow[], devices: string[] = []): Env {
   const db = {
     prepare(sql: string) {
       const statement = {
@@ -69,7 +71,10 @@ function messageEnv(screens: ScreenRow[], calls: CallRow[], messages: MessageRow
           }
           return { success: true, meta: { changes: 1 } };
         },
-        select(): MessageRow[] {
+        select(): unknown[] {
+          if (sql.includes("FROM call_devices")) {
+            return devices.map((token) => ({ token }));
+          }
           if (sql.includes("WHERE read_at IS NULL")) {
             return messages.filter((row) => row.read_at == null).sort((a, b) => a.created_at.localeCompare(b.created_at));
           }
@@ -88,8 +93,15 @@ function messageEnv(screens: ScreenRow[], calls: CallRow[], messages: MessageRow
           if (sql.includes("FROM call_screen")) {
             return screens.find((row) => row.call_id === String(this.args[0])) ?? null;
           }
+          if (sql.includes("FROM call_recordings")) {
+            const call = calls.find((row) => row.id === String(this.args[0]));
+            return call?.recording ? { recording_sid: "REaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } : null;
+          }
           if (sql.includes("FROM outbound_calls")) {
-            return calls.find((row) => row.id === String(this.args[0])) ?? null;
+            const call = calls.find((row) => row.id === String(this.args[0]));
+            if (!call) return null;
+            if (sql.includes("transcript_json")) return { transcript_json: call.transcript_json ?? null };
+            return call;
           }
           return this.select()[0] ?? null;
         },
@@ -250,12 +262,125 @@ describe("call messages", () => {
     }
   });
 
+  it("uses the caller in the title and the short reason as the body", () => {
+    const copy = callPushCopy(
+      "Sohil",
+      "Sir, Sohil rang at 11:06. To check you're well and asked you to ring him back.",
+      "to check you're well and asked you to ring him back",
+    );
+    expect(copy.title).toBe("JARVIS – Call from Sohil");
+    expect(copy.body).toBe("To check you're well and asked you to ring him back.");
+    expect(copy.body).not.toContain("rang at");
+  });
+
+  it("pushes the short line and skips SMS when a device token is registered", async () => {
+    const screens: ScreenRow[] = [{ call_id: "call_push", direction: "inbound", caller_name: "Sohil", reason: "" }];
+    const calls: CallRow[] = [
+      {
+        id: "call_push",
+        status: "completed",
+        summary: "to check you're well and asked you to ring him back",
+        created_at: "2026-10-20T10:06:00.000Z",
+        transcript_json: JSON.stringify([
+          { role: "them", text: "Please ring me back." },
+          { role: "assistant", text: "I shall tell him." },
+        ]),
+        recording: true,
+      },
+    ];
+    const messages: MessageRow[] = [];
+    const env = messageEnv(screens, calls, messages, ["00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"]);
+    env.APNS_KEY_ID = "KEYID12345";
+    env.APNS_TEAM_ID = "TEAMID1234";
+    env.APNS_PRIVATE_KEY = await testApnsPem();
+    env.APNS_BUNDLE_ID = "com.sohail.jarvis";
+    const hits: { url: string; body: string; topic: string }[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      hits.push({ url: String(input), body: String(init?.body ?? ""), topic: headers.get("apns-topic") ?? "" });
+      return new Response("", { status: 200 });
+    }) as typeof fetch;
+    try {
+      expect(await rememberInboundMessage(env, "call_push")).toBe(true);
+      expect(hits.some((hit) => hit.url.includes("twilio.com"))).toBe(false);
+      const push = hits.find((hit) => hit.url.includes("api.push.apple.com"));
+      expect(push?.topic).toBe("com.sohail.jarvis");
+      const payload = JSON.parse(push?.body ?? "{}") as {
+        aps: { alert: { title: string; body: string }; category: string };
+        kind: string;
+        message_id: string;
+        call_id: string;
+      };
+      expect(payload.aps.alert.title).toBe("JARVIS – Call from Sohil");
+      expect(payload.aps.alert.body).toBe("To check you're well and asked you to ring him back.");
+      expect(payload.aps.category).toBe("JARVIS_MESSAGE");
+      expect(payload.kind).toBe("call_message");
+      expect(payload.call_id).toBe("call_push");
+      expect(payload.message_id).toMatch(/^cmsg_/);
+
+      const card = await route(
+        new Request(`https://jarvis.example/calls/messages/${payload.message_id}`, { headers: bearer }),
+        env,
+        ctx(),
+      );
+      expect(card.status).toBe(200);
+      const body = (await card.json()) as {
+        message: { caller_name: string; spoken: string; recording: boolean; transcript: Array<{ role: string; text: string }> };
+      };
+      expect(body.message.caller_name).toBe("Sohil");
+      expect(body.message.spoken).toContain("rang at 11:06");
+      expect(body.message.recording).toBe(true);
+      expect(body.message.transcript.map((line) => line.role)).toEqual(["them", "assistant"]);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("texts when a device is registered but Apple push is not configured", async () => {
+    const screens: ScreenRow[] = [{ call_id: "call_sms", direction: "inbound", caller_name: "Sohil", reason: "" }];
+    const calls: CallRow[] = [
+      {
+        id: "call_sms",
+        status: "completed",
+        summary: "The boiler is leaking.",
+        created_at: "2026-10-20T10:06:00.000Z",
+      },
+    ];
+    const env = messageEnv(screens, calls, [], ["abc123"]);
+    const bodies: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(String(init?.body ?? ""));
+      return new Response(JSON.stringify({ sid: "SMexample", status: "queued" }), { status: 201 });
+    }) as typeof fetch;
+    try {
+      expect(await rememberInboundMessage(env, "call_sms")).toBe(true);
+      expect(bodies).toHaveLength(1);
+      expect(new URLSearchParams(bodies[0] ?? "").get("Body")).toContain("The boiler is leaking.");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it("rejects a missing bearer token", async () => {
     const env = messageEnv([], [], []);
     const response = await route(new Request("https://jarvis.example/calls/messages?unread=1"), env, ctx());
     expect(response.status).toBe(401);
   });
 });
+
+async function testApnsPem(): Promise<string> {
+  const pair = (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign"])) as CryptoKeyPair;
+  const pkcs8 = await crypto.subtle.exportKey("pkcs8", pair.privateKey);
+  if (!(pkcs8 instanceof ArrayBuffer)) throw new Error("expected pkcs8");
+  const bytes = new Uint8Array(pkcs8);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  const body = btoa(binary);
+  const lines = body.match(/.{1,64}/g)?.join("\n") ?? body;
+  return `-----BEGIN PRIVATE KEY-----\n${lines}\n-----END PRIVATE KEY-----\n`;
+}
 
 function ctx(): ExecutionContext {
   return {

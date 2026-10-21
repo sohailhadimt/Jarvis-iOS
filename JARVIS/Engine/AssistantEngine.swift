@@ -64,7 +64,10 @@ final class AssistantEngine {
     private(set) var hunts: [CallHunt] = []
     /// Inbound call notes. Shown in Calls, then spoken once and marked read.
     private(set) var callMessages: [CallMessage] = []
+    /// The message card a notification tap opened.
+    private(set) var focusedCallMessageID: String?
     @ObservationIgnored private var deliveringCallMessages = false
+    @ObservationIgnored private var openingCallMessageID: String?
     @ObservationIgnored private var heardCallMessageIDs: Set<String> = []
     /// The 6-digit code for texting JARVIS. Hidden once that phone is linked.
     private(set) var pairCode = ""
@@ -1682,6 +1685,31 @@ final class AssistantEngine {
         }
     }
 
+    /// Opens one saved call and reads the butler line aloud. A notification tap uses this.
+    func openCallMessage(_ id: String) {
+        let clean = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard clean.hasPrefix("cmsg_") else { return }
+        focusedCallMessageID = clean
+        if CallMessageLink.pendingID == clean { CallMessageLink.pendingID = nil }
+        guard openingCallMessageID != clean else { return }
+        openingCallMessageID = clean
+        heardCallMessageIDs.insert(clean)
+        Task {
+            await self.presentFocusedCallMessage(clean)
+            if self.openingCallMessageID == clean { self.openingCallMessageID = nil }
+        }
+    }
+
+    /// Shows the full card without reading it again. The Calls list uses this.
+    func showCallMessage(_ id: String) {
+        guard id.hasPrefix("cmsg_") else { return }
+        focusedCallMessageID = id
+    }
+
+    func dismissFocusedCallMessage() {
+        focusedCallMessageID = nil
+    }
+
     /// Unread call notes. Speaks each one, shows the card, then marks it read.
     func deliverCallMessages() {
         guard appInForeground, !deliveringCallMessages else { return }
@@ -1888,6 +1916,7 @@ final class AssistantEngine {
                 callMessages.insert(message, at: 0)
             }
             for message in fresh {
+                guard !heardCallMessageIDs.contains(message.id) else { continue }
                 guard appInForeground, !Task.isCancelled else { return }
                 await waitToSpeak()
                 guard appInForeground, !Task.isCancelled else { return }
@@ -1902,6 +1931,40 @@ final class AssistantEngine {
             }
         }
         guard spoke, !Task.isCancelled else { return }
+        afterTurn()
+    }
+
+    private func presentFocusedCallMessage(_ id: String) async {
+        guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else {
+            heardCallMessageIDs.remove(id)
+            return
+        }
+        let loaded = (try? await client.callMessage(id: id))
+            ?? callMessages.first(where: { $0.id == id })
+            ?? (try? await client.recentCallMessages())?.first(where: { $0.id == id })
+        guard let message = loaded else {
+            heardCallMessageIDs.remove(id)
+            return
+        }
+        if let index = callMessages.firstIndex(where: { $0.id == message.id }) {
+            callMessages[index] = message
+        } else {
+            callMessages.insert(message, at: 0)
+        }
+        focusedCallMessageID = message.id
+        let deadline = Date().addingTimeInterval(8)
+        while !appInForeground, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+        guard appInForeground, !Task.isCancelled else { return }
+        await waitToSpeak()
+        guard !Task.isCancelled else { return }
+        let line = message.spoken.trimmingCharacters(in: .whitespacesAndNewlines)
+        await speakLine(line.isEmpty ? "Sir, you have a message." : line, userText: "")
+        errorMessage = nil
+        let saved = await client.markCallMessageRead(id: message.id)
+        if !saved { heardCallMessageIDs.remove(message.id) }
+        guard !Task.isCancelled else { return }
         afterTurn()
     }
 
