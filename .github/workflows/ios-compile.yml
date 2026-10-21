@@ -46,18 +46,21 @@ jobs:
       - name: Voice turn fixtures
         run: |
           set -euo pipefail
-          DEST_LINE=$(xcodebuild -project JARVIS.xcodeproj -scheme JARVIS -showdestinations 2>/dev/null \
-            | grep 'platform:iOS Simulator' \
-            | grep 'name:iPhone' \
-            | grep -v placeholder \
-            | head -1 || true)
-          echo "Destination: ${DEST_LINE}"
-          ID=$(printf '%s\n' "$DEST_LINE" | sed -n 's/.*id:\([^,]*\),.*/\1/p')
-          if [ -z "$ID" ]; then
-            echo "No iPhone simulator destination"
-            xcodebuild -project JARVIS.xcodeproj -scheme JARVIS -showdestinations || true
-            exit 1
-          fi
+          # xcodebuild -showdestinations prints the list on stderr, so read simctl instead.
+          ID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)
+          for runtime, devices in data.get("devices", {}).items():
+              if "iOS" not in runtime:
+                  continue
+              for device in devices:
+                  name = device.get("name", "")
+                  if device.get("isAvailable") and name.startswith("iPhone"):
+                      print(device["udid"])
+                      sys.exit(0)
+          sys.exit(1)
+          ')
+          echo "Testing on simulator ${ID}"
           xcodebuild \
             -project JARVIS.xcodeproj \
             -scheme JARVIS \
