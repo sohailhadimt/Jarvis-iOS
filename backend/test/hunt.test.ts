@@ -408,7 +408,7 @@ function mockFetch(calls: string[], texts: string[]): () => void {
     const method = init?.method ?? "GET";
     if (url.includes("api.twilio.com") && url.includes("/Calls.json") && method === "POST") {
       calls.push(String(init?.body ?? ""));
-      return new Response(JSON.stringify({ sid: "CA1234567890abcdef1234567890abcd" }), { status: 201 });
+      return new Response(JSON.stringify({ sid: "CA1234567890abcdef1234567890abcdef" }), { status: 201 });
     }
     if (url.includes("/Messages.json") && method === "POST") {
       texts.push(new URLSearchParams(String(init?.body ?? "")).get("Body") ?? "");

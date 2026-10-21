@@ -8,6 +8,7 @@ import {
   callChoice,
   callFollowUp,
   capabilityBubbles,
+  directOutbound,
   handleInboundSms,
   learnFacts,
   menuChoice,
@@ -159,7 +160,7 @@ describe("text desk", () => {
       const method = init?.method ?? "GET";
       if (url.includes("/Calls.json") && method === "POST") {
         calls.push(String(init?.body ?? ""));
-        return new Response(JSON.stringify({ sid: "CA1234567890abcdef1234567890abcd" }), { status: 201 });
+        return new Response(JSON.stringify({ sid: "CA1234567890abcdef1234567890abcdef" }), { status: 201 });
       }
       if (url.includes("/Messages.json") && method === "POST") {
         texts.push(new URLSearchParams(String(init?.body ?? "")).get("Body") ?? "");
@@ -270,7 +271,7 @@ describe("text desk", () => {
       if (url.includes("/Calls.json") && method === "POST") {
         calls.push(String(init?.body ?? ""));
         redirects.push(String(init?.redirect ?? ""));
-        return new Response(JSON.stringify({ sid: "CA1234567890abcdef1234567890abcd" }), { status: 201 });
+        return new Response(JSON.stringify({ sid: "CA1234567890abcdef1234567890abcdef" }), { status: 201 });
       }
       if (url.includes("/Messages.json") && method === "POST") {
         texts.push(new URLSearchParams(String(init?.body ?? "")).get("Body") ?? "");
@@ -383,9 +384,105 @@ describe("text desk", () => {
       globalThis.fetch = original;
     }
   });
+
+  it("dials a number-first tell, including the owner's own number, and only says calling now after a Call SID", async () => {
+    expect(directOutbound("07700 900123, and tell him I said wake up")).toEqual({
+      name: "",
+      phone: "+447700900123",
+      purpose: "wake up",
+      verb: "tell",
+    });
+    expect(directOutbound("Call 07700 900123 and tell him wake up")).toBeNull();
+    expect(outboundAsk("07700 900123, and tell him I said wake up")).toBeNull();
+
+    const inserts: unknown[][] = [];
+    const env = deskEnv(new Map(), inserts);
+    env.OWNER_PHONE = "+447700900123";
+    env.GEMINI_API_KEY = "gemini-test-key";
+    const calls: string[] = [];
+    const redirects: string[] = [];
+    const texts: string[] = [];
+    const models: string[] = [];
+    let mode: "sid" | "nosid" | "error" | "lie" = "sid";
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url.includes("generativelanguage") || url.includes("groq.com")) {
+        models.push(url);
+        return new Response(JSON.stringify({ choices: [{ message: { content: "Calling 07700 900123 now, Sir." } }] }), { status: 200 });
+      }
+      if (url.includes("/Calls.json") && method === "POST") {
+        calls.push(String(init?.body ?? ""));
+        redirects.push(String(init?.redirect ?? ""));
+        if (mode === "error") {
+          return new Response(JSON.stringify({ code: 21211, message: "The number is not valid.", status: 400 }), { status: 400 });
+        }
+        if (mode === "nosid") return new Response(JSON.stringify({ status: "queued" }), { status: 201 });
+        return new Response(JSON.stringify({ sid: "CA1234567890abcdef1234567890abcdef" }), { status: 201 });
+      }
+      if (url.includes("/Messages.json") && method === "POST") {
+        texts.push(new URLSearchParams(String(init?.body ?? "")).get("Body") ?? "");
+        return new Response(JSON.stringify({ sid: "SMnote", status: "queued" }), { status: 201 });
+      }
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+    const ask = "07700 900123, and tell him I said wake up";
+    try {
+      await handleInboundSms(env, "+447700900123", ask);
+      expect(models).toHaveLength(0);
+      expect(calls).toHaveLength(1);
+      expect(redirects).toEqual(["manual"]);
+      const form = new URLSearchParams(calls[0] ?? "");
+      expect(form.get("To")).toBe("+447700900123");
+      expect(form.get("To")).toBe(env.OWNER_PHONE);
+      expect(form.get("Url") ?? "").toContain("/calls/voice/");
+      expect(form.get("Url") ?? "").not.toContain("/calls/inbound");
+      expect(inserts).toHaveLength(1);
+      expect(inserts[0]?.[1]).toBe("them");
+      expect(inserts[0]?.[2]).toBe("+447700900123");
+      expect(inserts[0]?.[3]).toBe("Tell them wake up.");
+      const said = texts.join(" ");
+      expect(said).toContain("Calling 07700 900123 now");
+      expect(said.toLowerCase()).not.toContain("couldn't place");
+
+      calls.length = 0;
+      texts.length = 0;
+      inserts.length = 0;
+      mode = "nosid";
+      await handleInboundSms(env, "+447700900123", ask);
+      expect(calls).toHaveLength(1);
+      expect(models).toHaveLength(0);
+      const missing = texts.join(" ");
+      expect(missing).toContain("Twilio did not return a call SID.");
+      expect(missing.toLowerCase()).not.toMatch(/\bcalling\b/);
+
+      calls.length = 0;
+      texts.length = 0;
+      mode = "error";
+      await handleInboundSms(env, "+447700900123", ask);
+      expect(calls).toHaveLength(1);
+      const failed = texts.join(" ");
+      expect(failed).toContain("21211");
+      expect(failed).toContain("The number is not valid.");
+      expect(failed.toLowerCase()).not.toMatch(/\bcalling\b/);
+
+      calls.length = 0;
+      texts.length = 0;
+      mode = "lie";
+      await handleInboundSms(env, "+447700900123", "How are you today");
+      expect(calls).toHaveLength(0);
+      expect(models.length).toBeGreaterThan(0);
+      const honest = texts.join(" ");
+      expect(honest).toContain("Nothing was dialled");
+      expect(honest.toLowerCase()).not.toMatch(/\bcalling\b/);
+    } finally {
+      globalThis.fetch = original;
+    }
+  }, 20_000);
 });
 
-function deskEnv(kv: Map<string, string>): Env {
+function deskEnv(kv: Map<string, string>, inserts: unknown[][] = []): Env {
   const message = {
     call_id: "call_sohail",
     caller_name: "Sohail",
@@ -420,6 +517,7 @@ function deskEnv(kv: Map<string, string>): Env {
           return { results: [], success: true, meta: {} };
         },
         async run() {
+          if (sql.includes("INSERT INTO outbound_calls")) inserts.push([...bound]);
           if (sql.includes("INSERT INTO runtime_state")) {
             kv.set(String(bound[0]), String(bound[1]));
             return { success: true, meta: { changes: 1 } };

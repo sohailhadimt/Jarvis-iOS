@@ -1,4 +1,4 @@
-import { delegatedBrief, dialConfirm, isBlockedNumber, safeError, toE164 } from "./calls";
+import { delegatedBrief, isBlockedNumber, placeOutboundCall, safeError, toE164 } from "./calls";
 import { dbAll, dbFirst, dbRun, getState, setState } from "./db";
 import { isRecord, json, newId, nowIso, apiError, asString } from "./http";
 import { CHAT_FALLBACK, completeChat, type ChatMessage } from "./llm";
@@ -188,6 +188,26 @@ export function outboundAsk(text: string): { name: string; phone: string; purpos
   const rawName = named?.[1]?.trim() ?? "";
   const name = rawName && !/^(him|her|them|me|the)$/i.test(rawName) ? rawName : "";
   return { name, phone, purpose, verb };
+}
+
+/**
+ * A number first, then tell or ask, is a complete call.
+ * "07700 900123, and tell him I said wake up" used to miss the parser and the model
+ * replied "Calling now" without posting a call. This form dials immediately.
+ * "Call NUMBER and ask" still waits for YES.
+ */
+export function directOutbound(text: string): { name: string; phone: string; purpose: string; verb: "ask" | "tell" } | null {
+  const trimmed = text.replace(/\s+/g, " ").trim();
+  if (!trimmed || callChoice(trimmed)) return null;
+  if (/^(?:please\s+)?(?:call|ring|phone)\b/i.test(trimmed)) return null;
+  if (!/^(?:please\s+)?(?:\+|0)/.test(trimmed)) return null;
+  const phone = parsePhones(trimmed, 1)[0] ?? "";
+  if (!phone) return null;
+  const asked = /\b(?:and\s+|to\s+)?(ask|tell)\s+(?:him\s+|her\s+|them\s+)?(?:i said\s+)?(.+)$/i.exec(trimmed);
+  const purpose = (asked?.[2] ?? "").replace(/[.?!]+$/g, "").replace(/\s+/g, " ").trim();
+  if (!purpose) return null;
+  const verb = asked?.[1]?.toLowerCase() === "tell" ? "tell" : "ask";
+  return { name: "", phone, purpose: purpose.slice(0, 240), verb };
 }
 
 /**
@@ -566,6 +586,11 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
     await reply(env, phone, await offerOutbound(env, asked));
     return;
   }
+  const direct = directOutbound(text);
+  if (direct) {
+    await reply(env, phone, await placeDirectOutbound(env, phone, direct));
+    return;
+  }
   const revision = pendingRevision(text);
   if (revision) {
     await reply(env, phone, await revisePendingOutbound(env, revision));
@@ -744,6 +769,32 @@ async function revisePendingOutbound(env: Env, revision: { verb: "ask" | "tell";
   return confirmOutbound(next);
 }
 
+async function placeDirectOutbound(
+  env: Env,
+  owner: string,
+  asked: { name: string; phone: string; purpose: string; verb: "ask" | "tell" },
+): Promise<string> {
+  const phone = toE164(asked.phone);
+  if (!phone) return "That number is not one I can ring, Sir. Nothing was dialled.";
+  const name = asked.name.trim() || "them";
+  const brief = delegatedBrief(asked.verb, asked.purpose);
+  const placed = await placeOutboundCall(env, { contact: name, to: phone, brief });
+  if (!placed.ok) return dialFailure(placed.error);
+  await rememberSmsOutcome(env, placed.id, owner, name);
+  return callingNow(name === "them" ? displayNumber(phone) : name);
+}
+
+function callingNow(who: string): string {
+  return `Calling ${who} now, Sir. I'll text you what they say.`;
+}
+
+function dialFailure(error: string): string {
+  const detail = publicSmsError(error);
+  return detail
+    ? `I couldn't place that call, Sir. ${detail} Nothing was dialled.`
+    : "I couldn't place that call, Sir. Nothing was dialled.";
+}
+
 async function placeApprovedOutbound(env: Env, owner: string): Promise<string | null> {
   const raw = await getState(env, OUTBOUND_KEY).catch(() => null);
   if (!raw?.trim()) return null;
@@ -770,10 +821,10 @@ async function placeApprovedOutbound(env: Env, owner: string): Promise<string | 
   if (changes !== 1) return null;
   const name = typeof pending.name === "string" && pending.name.trim() ? pending.name.trim() : "them";
   const brief = delegatedBrief(verb, purpose);
-  const placed = await dialConfirm(env, name, phone, brief);
-  if (!placed) return "I couldn't place that call, Sir. Nothing was dialled.";
-  await rememberSmsOutcome(env, placed, owner, name);
-  return `I'm ringing ${name === "them" ? displayNumber(phone) : name} now, Sir. I'll text you what they say.`;
+  const placed = await placeOutboundCall(env, { contact: name, to: phone, brief });
+  if (!placed.ok) return dialFailure(placed.error);
+  await rememberSmsOutcome(env, placed.id, owner, name);
+  return callingNow(name === "them" ? displayNumber(phone) : name);
 }
 
 async function placeLatestCallback(env: Env, owner: string): Promise<string> {
@@ -784,9 +835,9 @@ async function placeLatestCallback(env: Env, owner: string): Promise<string> {
   if (!phone) return `I don't have a number for ${who}, Sir. Nothing has been dialled.`;
   const { substantiveSentences } = await import("./call-messages");
   const message = substantiveSentences(`${row.summary} ${callerLines(row.transcript_json ?? "")}`, 1)[0] ?? "the message they left";
-  const placed = await dialConfirm(env, who, phone, `I'm calling you back. ${message}`);
-  if (!placed) return "I couldn't place that call, Sir. Nothing was dialled.";
-  await rememberSmsOutcome(env, placed, owner, who);
+  const placed = await placeOutboundCall(env, { contact: who, to: phone, brief: `I'm calling you back. ${message}` });
+  if (!placed.ok) return dialFailure(placed.error);
+  await rememberSmsOutcome(env, placed.id, owner, who);
   return `I'm calling ${who} back now, Sir. I'll text you what they say.`;
 }
 
@@ -882,8 +933,8 @@ async function placeApprovedCallback(env: Env): Promise<string | null> {
   if (changes !== 1) return null;
   const name = typeof pending.name === "string" && pending.name.trim() ? pending.name.trim() : "them";
   const brief = typeof pending.brief === "string" && pending.brief.trim() ? pending.brief.trim() : "Calling you back.";
-  const placed = await dialConfirm(env, name, phone, brief);
-  if (!placed) return "I couldn't place that call, Sir. Nothing was dialled.";
+  const placed = await placeOutboundCall(env, { contact: name, to: phone, brief });
+  if (!placed.ok) return dialFailure(placed.error);
   return `I'm calling ${name} back now, Sir.`;
 }
 
@@ -892,9 +943,9 @@ function callbackPhone(env: Env, row: LatestCall): string | null {
   const stated = parsePhones(blob, 1)[0] ?? null;
   const screen = row.caller_phone ? toE164(row.caller_phone) : null;
   const ours = toE164(env.TWILIO_FROM_NUMBER ?? "");
-  const owner = toE164(env.OWNER_PHONE ?? "");
   const phone = stated || screen;
-  if (!phone || phone === ours || phone === owner) return null;
+  // The owner's own mobile is a valid test destination. Only this account's from-number is refused.
+  if (!phone || phone === ours) return null;
   return phone;
 }
 
@@ -1059,8 +1110,8 @@ async function chatReply(env: Env, phone: string): Promise<string> {
       content: [
         "You are JARVIS, Master Hadi's personal assistant, replying by SMS.",
         "British English. Call him Sir. Write two or three short sentences. Each sentence ends with a full stop and can stand alone as its own text.",
-        "You can place telephone calls. Never say you are unable to place a call, that you cannot call, or that you cannot use the phone.",
-        "A new number waits until he replies YES. Replying 1, you call, or call him back to a call message is already approved.",
+        "You cannot dial from this chat. Never say you are calling now, ringing now, or that a call has been placed. The server places calls.",
+        "A message that starts with call, ring, or phone waits until he replies YES. Replying 1, you call, or call him back to a call message is already approved.",
         "Do not include URLs. Do not invent phone numbers.",
         "Do not pay, buy, charge a card, or mint a card. Do not send email. A draft waits for his approval.",
         facts.length ? `Known facts:\n${facts.map((fact) => `- ${fact.detail}`).join("\n")}` : "No saved facts yet.",
@@ -1093,10 +1144,19 @@ async function chatReply(env: Env, phone: string): Promise<string> {
 }
 
 function guardCallDenial(text: string): string {
+  if (unplacedClaim(text)) return "I have not placed a call, Sir. Nothing was dialled.";
   if (/unable to place|can(?:not|'t) (?:place|make) (?:a )?(?:telephone |phone )?calls?|can(?:not|'t) (?:use the phone|call)\b/i.test(text)) {
-    return "I can ring them, Sir. Tell me the number and what to ask. I'll wait for YES before I dial.";
+    return "Tell me the number and what to say, Sir. Nothing has been dialled yet.";
   }
   return text;
+}
+
+function unplacedClaim(text: string): boolean {
+  const lower = text.toLowerCase();
+  if (/\b(?:calling|ringing)\b/.test(lower) && /\bnow\b/.test(lower)) return true;
+  if (/\bi(?:'m| am) (?:calling|ringing|dialling|dialing)\b/.test(lower)) return true;
+  if (/\bi(?:'ve| have) (?:just )?(?:called|rung|dialled|dialed)\b/.test(lower)) return true;
+  return false;
 }
 
 async function runSmsTool(env: Env, name: string, raw: string): Promise<unknown> {

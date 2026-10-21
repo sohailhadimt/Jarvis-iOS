@@ -492,22 +492,31 @@ async function createCall(request: Request, env: Env, approvedRoute = false): Pr
   if (isBlockedNumber(to)) return apiError(400, "bad_request", "That number cannot be called this way.");
   const from = toE164(env.TWILIO_FROM_NUMBER ?? "");
   if (!from) return notSetUp(setup.missing);
-  const sid = (env.TWILIO_ACCOUNT_SID ?? "").trim();
-  const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
+  const placed = await placeOutboundCall(env, {
+    contact,
+    to,
+    brief,
+    origin: new URL(request.url).origin,
+  });
+  if (!placed.ok && !placed.id) {
+    const unavailable = placed.error.includes("not ready");
+    return unavailable
+      ? apiError(503, "call_log_unavailable", "The outbound call table is not ready. Apply schema.sql on D1, then try again.")
+      : apiError(502, "call_failed", placed.error);
+  }
   const now = nowIso();
-  const id = newId("call");
   const record: StoredCall = {
-    id,
+    id: placed.id ?? newId("call"),
     contact_name: contact,
     to,
     brief,
-    status: "placing",
+    status: placed.ok ? "placing" : "failed",
     transcript: [],
     summary: null,
-    error: null,
+    error: placed.ok ? null : placed.error,
     created_at: now,
     updated_at: now,
-    twilio_sid: null,
+    twilio_sid: placed.ok ? placed.sid : null,
     conversation_id: null,
     direction: "outbound",
     caller_name: null,
@@ -521,69 +530,10 @@ async function createCall(request: Request, env: Env, approvedRoute = false): Pr
     recording: false,
     delegation: null,
   };
-  try {
-    await dbRun(
-      env,
-      `INSERT INTO outbound_calls
-        (id, contact_name, to_number, brief, status, twilio_sid, conversation_id, transcript_json, summary, error, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'placing', NULL, NULL, '[]', NULL, NULL, ?, ?)`,
-      [id, contact, to, brief, now, now],
-    );
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "insert failed";
-    console.error("outbound call insert failed", safeError(message));
-    return apiError(503, "call_log_unavailable", "The outbound call table is not ready. Apply schema.sql on D1, then try again.");
-  }
-  const origin = new URL(request.url).origin;
-  const voiceUrl = `${origin}/calls/voice/${id}`;
-  const statusUrl = `${origin}/calls/twilio-status/${id}`;
-  const form = new URLSearchParams();
-  form.set("To", to);
-  form.set("From", from);
-  form.set("Url", voiceUrl);
-  form.set("Method", "POST");
-  form.set("StatusCallback", statusUrl);
-  form.set("StatusCallbackMethod", "POST");
-  for (const event of ["initiated", "ringing", "answered", "completed"]) {
-    form.append("StatusCallbackEvent", event);
-  }
-  form.set("Record", "true");
-  if (needsDelegation(brief)) {
-    await openDelegation(env, { callId: id, contact, to, goal: brief }).catch(() => undefined);
-  }
-  let twilioSid = "";
-  try {
-    const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Calls.json`, {
-      method: "POST",
-      redirect: "manual",
-      signal: AbortSignal.timeout(20_000),
-      headers: {
-        authorization: `Basic ${btoa(`${sid}:${token}`)}`,
-        "content-type": "application/x-www-form-urlencoded",
-      },
-      body: form.toString(),
-    });
-    const text = await response.text();
-    if (!response.ok) {
-      const reason = twilioFailure(text);
-      record.status = "failed";
-      record.error = reason;
-      await updateCall(env, id, { status: "failed", error: reason });
-      reportCallFailure(env, { id, contact_name: contact }, reason);
-      return json({ configured: true, call: publicCall(record) }, 502);
-    }
-    const parsed = parseJson(text);
-    twilioSid = isRecord(parsed) && typeof parsed.sid === "string" ? parsed.sid : "";
-  } catch (err) {
-    const reason = safeError(err instanceof Error ? err.message : "Twilio could not be reached.");
-    record.status = "failed";
-    record.error = reason;
-    await updateCall(env, id, { status: "failed", error: reason });
-    reportCallFailure(env, { id, contact_name: contact }, reason);
+  if (!placed.ok) {
+    reportCallFailure(env, { id: record.id, contact_name: contact }, placed.error);
     return json({ configured: true, call: publicCall(record) }, 502);
   }
-  record.twilio_sid = twilioSid || null;
-  if (twilioSid) await updateCall(env, id, { twilio_sid: twilioSid });
   return json({ configured: true, call: publicCall(record) }, 201);
 }
 
@@ -1157,11 +1107,35 @@ async function decideRoute(request: Request, env: Env, id: string): Promise<Resp
   return json({ ok: true, confirming: Boolean(placed), call: row ? await presentCall(env, row) : null });
 }
 
-export async function dialConfirm(env: Env, contact: string, to: string, brief: string): Promise<string | null> {
+export interface OutboundOrder {
+  contact: string;
+  to: string;
+  brief: string;
+  /** HTTP origin when the route knows it. Otherwise the saved worker origin. */
+  origin?: string;
+}
+
+export type OutboundResult = { ok: true; id: string; sid: string } | { ok: false; id: string | null; error: string };
+
+/** Twilio Call SIDs are CA plus 32 hex characters. A 201 without one is not a placed call. */
+const CALL_SID = /^CA[0-9a-f]{32}$/i;
+
+/**
+ * The createCall path: insert the outbound row and POST Twilio Calls.json.
+ * The owner's own mobile is a valid destination. Emergency numbers are refused.
+ * ok is true only after Twilio returns a Call SID.
+ */
+export async function placeOutboundCall(env: Env, order: OutboundOrder): Promise<OutboundResult> {
+  const to = toE164(order.to);
   const from = toE164(env.TWILIO_FROM_NUMBER ?? "");
-  const sid = (env.TWILIO_ACCOUNT_SID ?? "").trim();
+  const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
   const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
-  if (!from || !sid || !token || !toE164(to)) return null;
+  const brief = order.brief.replace(/\s+/g, " ").trim();
+  const contact = order.contact.replace(/\s+/g, " ").trim() || "them";
+  if (!to) return { ok: false, id: null, error: "That number is not a valid phone number." };
+  if (isBlockedNumber(to)) return { ok: false, id: null, error: "That number cannot be called this way." };
+  if (!brief) return { ok: false, id: null, error: "A brief is required." };
+  if (!from || !account || !token) return { ok: false, id: null, error: "Calling is not set up." };
   const id = newId("call");
   const now = nowIso();
   try {
@@ -1172,44 +1146,72 @@ export async function dialConfirm(env: Env, contact: string, to: string, brief: 
        VALUES (?, ?, ?, ?, 'placing', NULL, NULL, '[]', NULL, NULL, ?, ?)`,
       [id, contact, to, brief, now, now],
     );
-  } catch {
-    return null;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "insert failed";
+    console.error("outbound call insert failed", safeError(message));
+    return { ok: false, id: null, error: "The outbound call table is not ready." };
   }
-  const origin = (await dbFirst<{ worker_origin: string }>(env, "SELECT worker_origin FROM call_settings WHERE id = 'default'"))?.worker_origin;
-  const base = origin && origin.startsWith("http") ? origin.replace(/\/$/, "") : `https://${PUBLIC_VOICE_HOST}`;
-  const form = new URLSearchParams({
-    To: to,
-    From: from,
-    Url: `${base}/calls/voice/${id}`,
-    Method: "POST",
-    StatusCallback: `${base}/calls/twilio-status/${id}`,
-    StatusCallbackMethod: "POST",
-    Record: "true",
-  });
+  if (needsDelegation(brief)) {
+    await openDelegation(env, { callId: id, contact, to, goal: brief }).catch(() => undefined);
+  }
+  const base = await outboundOrigin(env, order.origin);
+  const form = new URLSearchParams();
+  form.set("To", to);
+  form.set("From", from);
+  form.set("Url", `${base}/calls/voice/${id}`);
+  form.set("Method", "POST");
+  form.set("StatusCallback", `${base}/calls/twilio-status/${id}`);
+  form.set("StatusCallbackMethod", "POST");
+  for (const event of ["initiated", "ringing", "answered", "completed"]) form.append("StatusCallbackEvent", event);
+  form.set("Record", "true");
   try {
-    const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Calls.json`, {
+    const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls.json`, {
       method: "POST",
       redirect: "manual",
       signal: AbortSignal.timeout(20_000),
       headers: {
-        authorization: `Basic ${btoa(`${sid}:${token}`)}`,
+        authorization: `Basic ${btoa(`${account}:${token}`)}`,
         "content-type": "application/x-www-form-urlencoded",
       },
       body: form.toString(),
     });
+    const text = await response.text();
     if (!response.ok) {
-      await updateCall(env, id, { status: "failed", error: twilioFailure(await response.text()) });
-      return null;
+      const reason = twilioFailure(text);
+      await updateCall(env, id, { status: "failed", error: reason });
+      return { ok: false, id, error: reason };
     }
-    const parsed = parseJson(await response.text());
-    const twilioSid = isRecord(parsed) && typeof parsed.sid === "string" ? parsed.sid : "";
-    if (twilioSid) await updateCall(env, id, { twilio_sid: twilioSid });
-    return id;
+    const parsed = parseJson(text);
+    const twilioSid = isRecord(parsed) && typeof parsed.sid === "string" ? parsed.sid.trim() : "";
+    if (!CALL_SID.test(twilioSid)) {
+      const reason = "Twilio did not return a call SID.";
+      await updateCall(env, id, { status: "failed", error: reason });
+      return { ok: false, id, error: reason };
+    }
+    await updateCall(env, id, { twilio_sid: twilioSid });
+    return { ok: true, id, sid: twilioSid };
   } catch (err) {
-    const detail = safeError(err instanceof Error ? err.message : "The confirmation call could not be placed.");
-    await updateCall(env, id, { status: "failed", error: detail }).catch(() => undefined);
-    return null;
+    const reason = safeError(err instanceof Error ? err.message : "Twilio could not be reached.");
+    await updateCall(env, id, { status: "failed", error: reason }).catch(() => undefined);
+    return { ok: false, id, error: reason };
   }
+}
+
+async function outboundOrigin(env: Env, given?: string): Promise<string> {
+  if (given && given.startsWith("http")) return given.replace(/\/$/, "");
+  let saved = "";
+  try {
+    saved = (await dbFirst<{ worker_origin: string }>(env, "SELECT worker_origin FROM call_settings WHERE id = 'default'"))?.worker_origin ?? "";
+  } catch {
+    saved = "";
+  }
+  if (saved.startsWith("http")) return saved.replace(/\/$/, "");
+  return `https://${PUBLIC_VOICE_HOST}`;
+}
+
+export async function dialConfirm(env: Env, contact: string, to: string, brief: string): Promise<string | null> {
+  const placed = await placeOutboundCall(env, { contact, to, brief });
+  return placed.ok ? placed.id : null;
 }
 
 async function ensureRecording(env: Env, row: StoredCall): Promise<void> {

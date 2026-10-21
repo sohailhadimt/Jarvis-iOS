@@ -501,7 +501,7 @@ describe("Twilio webhooks", () => {
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       seen.push(String(input));
       bodies.push(String(init?.body ?? ""));
-      return new Response(JSON.stringify({ sid: "CA123" }), { status: 201 });
+      return new Response(JSON.stringify({ sid: "CA1234567890abcdef1234567890abcdef" }), { status: 201 });
     }) as typeof fetch;
     try {
       const refused = await route(
@@ -555,6 +555,20 @@ describe("Twilio webhooks", () => {
       expect(form.get("Url")).toContain("/calls/voice/");
       expect(form.get("Url")).not.toContain("/calls/inbound");
       expect(seen.some((url) => url.includes("Calls.json"))).toBe(true);
+      globalThis.fetch = (async () => new Response(JSON.stringify({ status: "queued" }), { status: 201 })) as typeof fetch;
+      const missingSid = await route(
+        request("/calls/outbound", {
+          method: "POST",
+          headers: bearer,
+          body: JSON.stringify({ to: "+447700900123", purpose: "the meeting moved to four", contact_name: "Ada" }),
+        }),
+        env,
+        ctx(),
+      );
+      expect(missingSid.status).toBe(502);
+      const missed = await missingSid.text();
+      expect(missed).toContain("call SID");
+      expect(missed).not.toContain("\"stage\":\"dialing\"");
     } finally {
       globalThis.fetch = original;
     }
