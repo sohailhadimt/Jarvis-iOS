@@ -186,6 +186,63 @@ console.log(JSON.stringify({
   bundles_code: bundleBody.code || null,
   bundles: (bundleBody.results || []).map((item) => ({ status: item.status, sid: item.sid })),
 }));
+const profileSid = (profileBody.results || []).find((item) => item.status === "draft")?.sid || "";
+if (profileSid) {
+  const detail = await fetch(`https://trusthub.twilio.com/v1/CustomerProfiles/${encodeURIComponent(profileSid)}`, { headers: { authorization: auth } });
+  const detailBody = await detail.json().catch(() => ({}));
+  const policy = typeof detailBody.policy_sid === "string" ? detailBody.policy_sid : "";
+  console.log(JSON.stringify({ profile_sid: profileSid, profile_status: detailBody.status || "", policy_sid: policy }));
+  if (policy) {
+    const evaluation = await fetch(`https://trusthub.twilio.com/v1/CustomerProfiles/${encodeURIComponent(profileSid)}/Evaluations`, {
+      method: "POST",
+      headers: { authorization: auth, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ PolicySid: policy }).toString(),
+    });
+    const evaluationBody = await evaluation.json().catch(() => ({}));
+    const fields = [];
+    for (const group of evaluationBody.results || []) {
+      for (const field of group.fields || []) {
+        if (field.passed === false) fields.push({ group: group.friendly_name || "", field: field.friendly_name || "", reason: redact(field.failure_reason || "") });
+      }
+    }
+    console.log(JSON.stringify({
+      evaluation_http: evaluation.status,
+      evaluation_status: evaluationBody.status || "",
+      evaluation_code: evaluationBody.code || null,
+      failed_fields: fields.slice(0, 20),
+    }));
+    if (evaluationBody.status === "compliant") {
+      const submitted = await fetch(`https://trusthub.twilio.com/v1/CustomerProfiles/${encodeURIComponent(profileSid)}`, {
+        method: "POST",
+        headers: { authorization: auth, "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ Status: "pending-review" }).toString(),
+      });
+      const submittedBody = await submitted.json().catch(() => ({}));
+      console.log(JSON.stringify({
+        submit_http: submitted.status,
+        submit_status: submittedBody.status || "",
+        submit_code: submittedBody.code || null,
+        submit_error: redact(submittedBody.message || ""),
+      }));
+    }
+  }
+}
+const from = normalise(process.env.TWILIO_FROM_NUMBER || "");
+const text = "Sir, Me rang at 00:59. Um, tell me a joke.";
+const form = new URLSearchParams({ From: from, To: owner, Body: text });
+const sent = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Messages.json`, {
+  method: "POST",
+  headers: { authorization: auth, "content-type": "application/x-www-form-urlencoded" },
+  body: form.toString(),
+});
+const sentBody = await sent.json().catch(() => ({}));
+console.log(JSON.stringify({
+  send_http: sent.status,
+  sid: sentBody.sid || "",
+  status: sentBody.status || "",
+  error_code: sentBody.code || null,
+  error: redact(sentBody.message || ""),
+}));
 const services = await fetch("https://messaging.twilio.com/v1/Services?PageSize=20", { headers: { authorization: auth } });
 const serviceBody = await services.json().catch(() => ({}));
 console.log(JSON.stringify({
