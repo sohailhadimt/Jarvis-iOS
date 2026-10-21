@@ -326,10 +326,9 @@ async function legacyToolPost(
         model,
         messages: messages.map(toWireMessage),
         temperature: 0.2,
-        max_tokens: 200,
-        max_completion_tokens: 200,
-        reasoning_effort: provider === "groq" ? "low" : undefined,
-        include_reasoning: provider === "groq" ? false : undefined,
+        ...(provider === "groq"
+          ? { max_completion_tokens: 200, reasoning_effort: "low", include_reasoning: false }
+          : { max_tokens: 200 }),
         tools,
       }),
       signal: AbortSignal.timeout(8_000),
