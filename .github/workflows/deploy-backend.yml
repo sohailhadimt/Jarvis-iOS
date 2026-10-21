@@ -472,3 +472,13 @@ jobs:
         env:
           JARVIS_APP_TOKEN: ${{ secrets.JARVIS_APP_TOKEN }}
         run: bash ../.github/scripts/live-check.sh
+
+      - name: Place one approved outbound call
+        timeout-minutes: 15
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM_NUMBER: ${{ secrets.TWILIO_FROM_NUMBER }}
+          OWNER_PHONE: ${{ secrets.OWNER_PHONE }}
+          JARVIS_APP_TOKEN: ${{ secrets.JARVIS_APP_TOKEN }}
+        run: node ../.github/scripts/live-outbound-once.mjs

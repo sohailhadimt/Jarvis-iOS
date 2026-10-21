@@ -19,7 +19,7 @@ Work is done one model step at a time. The Workers free plan allows about **10 m
 Models, in order:
 
 1. Gemini `gemini-3.8-flash` at `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`
-2. If Gemini returns HTTP 429, Groq `llama-3.3-70b-versatile`
+2. If Gemini returns HTTP 429, Groq `openai/gpt-oss-120b`
 
 `gemini-2.5-flash` is retired and is not used.
 

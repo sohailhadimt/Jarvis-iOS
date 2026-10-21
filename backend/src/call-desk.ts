@@ -1,5 +1,6 @@
 import { dbFirst, dbRun } from "./db";
 import { isRecord, newId, nowIso } from "./http";
+import { GROQ_MODEL } from "./types";
 import type { Env } from "./types";
 
 export type CallStage = "dialing" | "live" | "ended";
@@ -324,7 +325,7 @@ async function groqLine(key: string, prompt: string): Promise<string | null> {
     signal: AbortSignal.timeout(6_000),
     headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
     body: JSON.stringify({
-      model: "llama-3.3-70b-versatile",
+      model: GROQ_MODEL,
       messages: [{ role: "user", content: prompt }],
       max_tokens: 80,
     }),

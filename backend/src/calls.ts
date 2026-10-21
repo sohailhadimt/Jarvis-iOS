@@ -1158,15 +1158,16 @@ export async function dialConfirm(env: Env, contact: string, to: string, brief: 
       body: form.toString(),
     });
     if (!response.ok) {
-      await updateCall(env, id, { status: "failed", error: "The confirmation call could not be placed." });
+      await updateCall(env, id, { status: "failed", error: twilioFailure(await response.text()) });
       return null;
     }
     const parsed = parseJson(await response.text());
     const twilioSid = isRecord(parsed) && typeof parsed.sid === "string" ? parsed.sid : "";
     if (twilioSid) await updateCall(env, id, { twilio_sid: twilioSid });
     return id;
-  } catch {
-    await updateCall(env, id, { status: "failed", error: "The confirmation call could not be placed." }).catch(() => undefined);
+  } catch (err) {
+    const detail = safeError(err instanceof Error ? err.message : "The confirmation call could not be placed.");
+    await updateCall(env, id, { status: "failed", error: detail }).catch(() => undefined);
     return null;
   }
 }
@@ -1702,8 +1703,13 @@ function escapeXml(value: string): string {
 
 function twilioFailure(text: string): string {
   const parsed = parseJson(text);
-  if (isRecord(parsed) && typeof parsed.message === "string") return safeError(parsed.message);
-  return safeError(text || "Twilio refused the call.");
+  const code = isRecord(parsed) && parsed.code != null ? String(parsed.code) : "";
+  const message = isRecord(parsed) && typeof parsed.message === "string" ? parsed.message : text;
+  const clean = safeError(message)
+    .replace(/\+\d[\d\s().-]{6,}/g, "[number]")
+    .replace(/\b0\d{9,10}\b/g, "[number]");
+  const line = code ? `Twilio ${code}: ${clean}` : clean;
+  return line.slice(0, 300) || "The confirmation call could not be placed.";
 }
 
 function parseJson(text: string): unknown {

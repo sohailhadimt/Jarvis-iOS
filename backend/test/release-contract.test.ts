@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { route } from "../src/routes";
-import type { Env } from "../src/types";
+import { GROQ_MODEL, type Env } from "../src/types";
 
 function contractEnv(receipts: string[] = []): Env {
   const db = {
@@ -118,6 +118,11 @@ describe("release contract", () => {
       const open = await route(new Request(`https://jarvis.example${path}`, { method }), contractEnv(), ctx());
       expect(open.status, path).toBe(401);
     }
+  });
+
+  it("uses a Groq model that still exists", () => {
+    expect(GROQ_MODEL).toBe("openai/gpt-oss-120b");
+    expect(GROQ_MODEL).not.toContain("llama-3.3-70b");
   });
 
   it("refuses home chat when the Grok webhook is not set", async () => {
