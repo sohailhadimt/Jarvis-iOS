@@ -124,5 +124,45 @@ for (const row of calls) {
     direction: body.direction || "",
   }));
 }
+const numberSid = "PN66046ff3fcdfc8f9aa8ed11811dd9d5d";
+const number = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/IncomingPhoneNumbers/${numberSid}.json`, { headers: { authorization: auth } });
+const numberBody = await number.json();
+console.log(JSON.stringify({
+  number_http: number.status,
+  sms_capable: Boolean(numberBody.capabilities && numberBody.capabilities.sms),
+  mms_capable: Boolean(numberBody.capabilities && numberBody.capabilities.mms),
+  voice_capable: Boolean(numberBody.capabilities && numberBody.capabilities.voice),
+  number_error: numberBody.code || null,
+}));
+const latest = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Messages.json?PageSize=5`, { headers: { authorization: auth } });
+const latestBody = await latest.json();
+console.log(JSON.stringify({
+  latest_http: latest.status,
+  latest_count: Array.isArray(latestBody.messages) ? latestBody.messages.length : 0,
+  latest_code: latestBody.code || null,
+  latest_message: redact(latestBody.message || ""),
+}));
+for (const item of latestBody.messages || []) {
+  console.log(JSON.stringify({
+    sid: item.sid,
+    status: item.status,
+    error_code: item.error_code,
+    date_created: item.date_created,
+    from_is_expected_uk_mobile: normalise(item.from) === "+447454037416",
+    to_is_owner_secret: normalise(item.to) === owner,
+  }));
+}
+const geo = await fetch("https://messaging.twilio.com/v1/GeoPermissions/Sms/GB", { headers: { authorization: auth } });
+const geoBody = await geo.json().catch(() => ({}));
+console.log(JSON.stringify({
+  geo_http: geo.status,
+  geo_code: geoBody.code || null,
+  geo_message: redact(geoBody.message || ""),
+  geo_enabled: geoBody.enabled ?? geoBody.sms_enabled ?? null,
+  geo_keys: Object.keys(geoBody).slice(0, 12),
+}));
+function redact(text) {
+  return String(text).replace(/\+\d{6,}/g, "[number]").replace(/\b\d{8,}\b/g, "[digits]");
+}
 NODE
 rm -f /tmp/settings.json
