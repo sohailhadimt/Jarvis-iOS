@@ -143,17 +143,23 @@ describe("call messages", () => {
       "2026-10-20T10:06:00.000Z",
       "to check you're well and asked you to ring him back on +15550001111",
     );
-    expect(line).toBe("Sir, Sohil rang at 11:06. To check you're well and asked you to ring him back on +15550001111.");
+    expect(line).toBe(
+      "Sir, Sohil called to tell you to check you're well and asked you to ring him back on +15550001111. Would you like me to call them back, or would you rather call them yourself?",
+    );
     expect(line).toContain("+15550001111");
+    expect(spokenCallMessage("Sohil", "2026-10-20T10:06:00.000Z", "the boiler is leaking", "him")).toContain("call him back");
+    expect(spokenCallMessage("Sohil", "2026-10-20T10:06:00.000Z", "the boiler is leaking")).toContain("call them back");
   });
 
-  it("skips a greeting and keeps the message in three short sentences", () => {
+  it("skips a greeting and asks whether to call them back", () => {
     const line = spokenCallMessage(
       "Sohail",
       "2026-10-21T01:41:00.000Z",
       "Good evening. The boiler is leaking. Please call me back on +15550001111.",
     );
-    expect(line).toBe("Sir, Sohail rang at 02:41. The boiler is leaking. Please call me back on +15550001111.");
+    expect(line).toBe(
+      "Sir, Sohail called to tell you the boiler is leaking. Please call me back on +15550001111. Would you like me to call them back, or would you rather call them yourself?",
+    );
     expect(line).not.toContain("Good evening");
     expect(callTextIsThin("Sir, Sohail rang at 02:41. Good evening.")).toBe(true);
     expect(callTextIsThin(line)).toBe(false);
@@ -186,7 +192,9 @@ describe("call messages", () => {
       expect(await rememberInboundMessage(env, "call_abc")).toBe(true);
       expect(await rememberInboundMessage(env, "call_abc")).toBe(true);
       expect(messages).toHaveLength(1);
-      expect(messages[0]?.spoken).toBe("Sir, Sohil rang at 11:06. To check you're well and asked you to ring him back.");
+      expect(messages[0]?.spoken).toBe(
+        "Sir, Sohil called to tell you to check you're well and asked you to ring him back. Would you like me to call them back, or would you rather call them yourself?",
+      );
       expect(bodies).toHaveLength(1);
       const sent = new URLSearchParams(bodies[0]);
       expect(sent.get("To")).toBe("+15557654321");
@@ -197,7 +205,7 @@ describe("call messages", () => {
       const listed = (await unread.json()) as { messages: Array<{ id: string; read: boolean; spoken: string }> };
       expect(listed.messages).toHaveLength(1);
       expect(listed.messages[0]?.read).toBe(false);
-      expect(listed.messages[0]?.spoken).toContain("Sir, Sohil rang at 11:06.");
+      expect(listed.messages[0]?.spoken).toContain("Sir, Sohil called to tell you");
 
       const read = await route(
         new Request(`https://jarvis.example/calls/messages/${listed.messages[0]?.id}/read`, { method: "POST", headers: bearer }),
@@ -252,7 +260,9 @@ describe("call messages", () => {
       expect(await rememberInboundMessage(env, "call_vm")).toBe(true);
       expect(messages[0]?.summary).toBe("The boiler is leaking.");
       expect(messages[0]?.caller_name).toBe("Sam");
-      expect(messages[0]?.spoken).toBe("Sir, Sam rang at 11:06. The boiler is leaking.");
+      expect(messages[0]?.spoken).toBe(
+        "Sir, Sam called to tell you the boiler is leaking. Would you like me to call them back, or would you rather call them yourself?",
+      );
       expect(messages[0]?.spoken).not.toContain("…");
       expect(bodies).toHaveLength(1);
     } finally {
@@ -356,7 +366,7 @@ describe("call messages", () => {
         message: { caller_name: string; spoken: string; recording: boolean; transcript: Array<{ role: string; text: string }> };
       };
       expect(body.message.caller_name).toBe("Sohil");
-      expect(body.message.spoken).toContain("rang at 11:06");
+      expect(body.message.spoken).toContain("called to tell you");
       expect(body.message.recording).toBe(true);
       expect(body.message.transcript.map((line) => line.role)).toEqual(["them", "assistant"]);
     } finally {
@@ -384,7 +394,7 @@ describe("call messages", () => {
     try {
       expect(await rememberInboundMessage(env, "call_sms")).toBe(true);
       expect(bodies).toHaveLength(1);
-      expect(new URLSearchParams(bodies[0] ?? "").get("Body")).toContain("The boiler is leaking.");
+      expect(new URLSearchParams(bodies[0] ?? "").get("Body")?.toLowerCase()).toContain("the boiler is leaking");
     } finally {
       globalThis.fetch = original;
     }

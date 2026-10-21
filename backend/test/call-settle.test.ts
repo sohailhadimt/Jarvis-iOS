@@ -285,8 +285,8 @@ describe("post-call delivery", () => {
       expect(body.message_id).toBeTruthy();
       expect(calls[0]?.status).toBe("completed");
       expect(messages).toHaveLength(1);
-      expect(messages[0]?.spoken).toContain("Sir, Amira rang at");
-      expect(messages[0]?.spoken).toContain("The boiler is leaking.");
+      expect(messages[0]?.spoken).toContain("Sir, Amira called to tell you");
+      expect(messages[0]?.spoken).toContain("the boiler is leaking");
       expect(messages[0]?.spoken).not.toContain("…");
       expect(messages[0]?.spoken).not.toContain("They said");
       expect(sms).toHaveLength(1);
@@ -404,8 +404,8 @@ describe("post-call delivery", () => {
       expect(kv.get("elevenlabs_post_call_secret")).toBe("super-secret-value");
       const hit = body.settled.find((row) => row.call_id === "call_open");
       expect(hit?.message_id).toBeTruthy();
-      expect(hit?.spoken).toContain("Sir, Amira rang at");
-      expect(hit?.spoken).toContain("The boiler is leaking.");
+      expect(hit?.spoken).toContain("Sir, Amira called to tell you");
+      expect(hit?.spoken).toContain("the boiler is leaking");
       expect(hit?.spoken).not.toContain("…");
       expect(calls[0]?.conversation_id).toBe("conv_listed");
       expect(sms).toHaveLength(1);
@@ -471,7 +471,7 @@ describe("post-call delivery", () => {
       );
       expect(response.status).toBe(200);
       expect(messages[0]?.summary).toContain("boiler is leaking");
-      expect(messages[0]?.spoken).toContain("Sir, an unknown caller rang at");
+      expect(messages[0]?.spoken).toContain("Sir, an unknown caller called to tell you");
       expect(messages[0]?.spoken).toContain("boiler is leaking");
       expect(messages[0]?.spoken).not.toContain("…");
       expect(messages[0]?.spoken).not.toContain("A caller left a message");
@@ -536,8 +536,8 @@ describe("post-call delivery", () => {
       expect(saved.status).toBe(200);
       expect(calls[0]?.summary).toBe("The boiler is leaking.");
       expect(messages).toHaveLength(1);
-      expect(messages[0]?.spoken).toContain("rang at");
-      expect(messages[0]?.spoken).toContain("The boiler is leaking.");
+      expect(messages[0]?.spoken).toContain("called to tell you");
+      expect(messages[0]?.spoken).toContain("the boiler is leaking");
       expect(messages[0]?.spoken).not.toContain("…");
       expect(sms).toHaveLength(1);
     } finally {
@@ -612,7 +612,9 @@ describe("post-call delivery", () => {
       expect(response.status).toBe(200);
       const body = (await response.json()) as { settled: Array<{ call_id: string; spoken: string | null }> };
       const hit = body.settled.find((row) => row.call_id === "call_polish");
-      expect(hit?.spoken).toBe("Sir, Adz rang at 00:17. He'd like you to call him back about the boiler.");
+      expect(hit?.spoken).toBe(
+        "Sir, Adz called to tell you he'd like you to call him back about the boiler. Would you like me to call them back, or would you rather call them yourself?",
+      );
       expect(hit?.spoken).not.toContain("…");
       expect(messages[0]?.caller_name).toBe("Adz");
       expect(messages[0]?.spoken).toBe(hit?.spoken);
@@ -704,14 +706,16 @@ describe("post-call delivery", () => {
       expect(calls[0]?.status).toBe("completed");
       const polly = body.settled.find((row) => row.call_id === "call_f0ce67d2098c49208dacf2c63f719957");
       expect(polly?.message_id).toBeTruthy();
-      expect(polly?.spoken).toContain("rang at");
-      expect(polly?.spoken).toContain("Tell me a joke");
-      expect(body.sms.sent).toBe(true);
+      expect(polly?.spoken).toContain("called to tell you");
+      expect(polly?.spoken?.toLowerCase()).toContain("tell me a joke");
+      const meLine =
+        "Sir, Me called to tell you tell me a joke. Would you like me to call them back, or would you rather call them yourself?";
+      const saved = sms.map((item) => new URLSearchParams(item).get("Body"));
+      expect(saved.filter((item) => item === meLine)).toHaveLength(1);
+      expect(body.sms.sent).toBe(false);
       expect(body.sms.sid).toBe("SMexamplemessage0000000000000000");
       expect(body.sms.status).toBe("queued");
       expect(body.sms.error_code).toBe("");
-      const saved = sms.map((item) => new URLSearchParams(item).get("Body"));
-      expect(saved).toContain("Sir, Me rang at 00:59. Um, tell me a joke.");
       expect(sms.length).toBeGreaterThanOrEqual(2);
 
       const again = await route(

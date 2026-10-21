@@ -120,8 +120,9 @@ struct CallMessageDetail: View {
         let spoken = message.spoken.trimmingCharacters(in: .whitespacesAndNewlines)
         let summary = message.summary.trimmingCharacters(in: .whitespacesAndNewlines)
         if spoken.isEmpty { return summary }
+        if spoken.localizedCaseInsensitiveContains("Would you like me to call") { return spoken }
         if summary.isEmpty || summary == spoken { return spoken }
-        if spoken.contains(summary) { return spoken }
+        if spoken.localizedCaseInsensitiveContains(summary) { return spoken }
         return "\(spoken)\n\n\(summary)"
     }
 

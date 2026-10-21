@@ -670,6 +670,10 @@ async function twilioStatusWebhook(request: Request, env: Env, id: string): Prom
   if (params.CallSid) patch.twilio_sid = params.CallSid;
   if (params.RecordingSid) await rememberRecording(env, id, params.RecordingSid).catch(() => undefined);
   await updateCall(env, id, patch);
+  if (patch.status === "failed" || (patch.status === "completed" && row.summary)) {
+    const outcome = patch.status === "failed" ? "" : (row.summary ?? "");
+    void import("./sms-desk").then((mod) => mod.noteSmsOutcome(env, id, outcome, patch.status ?? "").catch(() => undefined));
+  }
   if (patch.status === "completed" || patch.status === "failed") {
     void import("./call-desk").then((mod) => mod.settleDelegation(env, id).catch(() => undefined));
     void import("./hunt").then((mod) => mod.noteQuote(env, id).catch(() => undefined));
@@ -702,6 +706,11 @@ async function elevenLabsWebhook(request: Request, env: Env): Promise<Response> 
     }
   }
   await updateCall(env, row.id, patch);
+  void import("./sms-desk").then((mod) =>
+    mod.noteSmsOutcome(env, row.id, typeof patch.summary === "string" ? patch.summary : (row.summary ?? ""), patch.status ?? row.status).catch(
+      () => undefined,
+    ),
+  );
   void noteAwayOnCall(env, row.id);
   void settleDelegation(env, row.id);
   void import("./hunt").then((mod) => mod.noteQuote(env, row.id).catch(() => undefined));
@@ -742,7 +751,11 @@ async function refreshFromElevenLabs(env: Env, row: StoredCall): Promise<StoredC
     else if (read.status === "in-progress" && row.status !== "completed") patch.status = "in_progress";
     if (Object.keys(patch).length === 0) return row;
     await updateCall(env, row.id, patch);
-    return { ...row, ...applyPatch(row, patch) };
+    const next = { ...row, ...applyPatch(row, patch) };
+    void import("./sms-desk").then((mod) =>
+      mod.noteSmsOutcome(env, row.id, next.summary ?? "", next.status).catch(() => undefined),
+    );
+    return next;
   } catch {
     return row;
   }

@@ -44,15 +44,17 @@ export function messageClock(iso: string): string {
   return londonClock(iso);
 }
 
+export type CallerPronoun = "him" | "her" | "them";
+
 /**
- * Spoken line for one finished inbound call. Up to three short sentences: who rang,
- * what they wanted, and the message. Greetings and filler are left out. A callback
- * number is kept when the caller gave one. The same text is what the app speaks and what the SMS sends.
+ * Spoken line for one finished inbound call. The same words are the SMS, the app card, and the readout.
+ * Gender is never inferred from a name. Pass him or her only when it is already known.
  */
-export function spokenCallMessage(name: string, calledAtIso: string, summary: string): string {
+export function spokenCallMessage(name: string, calledAtIso: string, summary: string, pronoun?: CallerPronoun): string {
+  void calledAtIso;
   const who = callerLabel(name);
-  const time = londonClock(calledAtIso);
-  return butlerLine(who, time, summary);
+  const person: CallerPronoun = pronoun === "him" || pronoun === "her" ? pronoun : "them";
+  return choiceLine(who, messageClause(summary), person);
 }
 
 /** A greeting or a filler noise, with no message behind it. */
@@ -66,11 +68,12 @@ export function isGreetingOrFiller(sentence: string): boolean {
   );
 }
 
-/** Sentences that carry the message. The "Sir, … rang at …" lead and greetings are dropped. */
+/** Sentences that carry the message. The butler lead, the choice question, and greetings are dropped. */
 export function substantiveSentences(text: string, limit = 2): string[] {
   const kept: string[] = [];
   for (const part of sentences(text)) {
-    if (/^sir,/i.test(part) && /\brang at\b/i.test(part)) continue;
+    if (/^sir,/i.test(part) && (/\brang at\b/i.test(part) || /\bcalled to tell you\b/i.test(part) || /\bcalled\.$/i.test(part))) continue;
+    if (/would you like me to call/i.test(part)) continue;
     if (isGreetingOrFiller(part)) continue;
     let body = part.replace(/[.!?]+$/gu, "").trim();
     body = body.replace(/^(?:um+|uh+|er+|ah+)[, ]+/i, "").trim();
@@ -82,11 +85,20 @@ export function substantiveSentences(text: string, limit = 2): string[] {
   return kept;
 }
 
-/** True when the spoken line is only the lead, or the lead plus a greeting. */
+/** True when the spoken line has no message, or only a greeting. */
 export function callTextIsThin(spoken: string): boolean {
+  if (/called to tell you/i.test(spoken)) {
+    const inside = spoken.replace(/^[\s\S]*?called to tell you\s+/i, "").replace(/\.\s+Would you like me to call[\s\S]*$/i, "");
+    return !inside.trim() || isGreetingOrFiller(inside);
+  }
   const rest = sentences(spoken).filter((part) => !(/^sir,/i.test(part) && /\brang at\b/i.test(part)));
   if (rest.length === 0) return true;
   return rest.every((part) => isGreetingOrFiller(part));
+}
+
+/** The callback question is present, with the same pronoun in both places. */
+export function hasChoiceQuestion(spoken: string): boolean {
+  return /Would you like me to call (him|her|them) back, or would you rather call \1 yourself\?/i.test(spoken);
 }
 
 /**
@@ -616,11 +628,29 @@ function tidyDetail(summary: string): string {
   return text;
 }
 
-function butlerLine(who: string, time: string, summary: string): string {
-  const lead = `Sir, ${who} rang at ${time}.`;
-  const extra = substantiveSentences(summary, 2);
-  const line = [lead, ...extra].join(" ");
-  return fitSentences(line, 320);
+function messageClause(summary: string): string {
+  const unwrapped = summary
+    .replace(/^Sir,\s+.+?\s+called to tell you\s+/i, "")
+    .replace(/\s+Would you like me to call[\s\S]*$/i, "")
+    .trim();
+  const parts = substantiveSentences(unwrapped, 2);
+  if (parts.length === 0) return "";
+  let text = parts.join(" ").replace(/[.!?]+$/u, "").trim();
+  if (/^[A-Z][a-z]/.test(text)) text = `${text.charAt(0).toLowerCase()}${text.slice(1)}`;
+  return text;
+}
+
+function choiceLine(who: string, message: string, person: CallerPronoun): string {
+  const ask = `Would you like me to call ${person} back, or would you rather call ${person} yourself?`;
+  let clause = message.replace(/\s+/g, " ").trim();
+  let lead = clause ? `Sir, ${who} called to tell you ${clause}.` : `Sir, ${who} called.`;
+  while (`${lead} ${ask}`.length > 320 && clause.length > 24) {
+    const cut = clause.slice(0, clause.length - 8);
+    const space = cut.lastIndexOf(" ");
+    clause = (space > 12 ? cut.slice(0, space) : cut).replace(/[,:;]$/u, "").trim();
+    lead = `Sir, ${who} called to tell you ${clause}.`;
+  }
+  return `${lead} ${ask}`;
 }
 
 function secondSentence(summary: string): string {
@@ -634,21 +664,6 @@ function secondSentence(summary: string): string {
 function sentences(text: string): string[] {
   const bits = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) ?? [];
   return bits.map((part) => part.replace(/\s+/g, " ").trim()).filter(Boolean);
-}
-
-function fitSentences(line: string, max: number): string {
-  const parts = sentences(line)
-    .slice(0, 3)
-    .map((part) => part.replace(/…/g, "").trim())
-    .filter(Boolean);
-  while (parts.length > 1 && parts.join(" ").length > max) parts.pop();
-  let text = parts.join(" ").replace(/\s+/g, " ").trim().replace(/…/g, "");
-  if (text && !/[.!?]$/u.test(text)) text += ".";
-  if (text.length <= max) return text;
-  const cut = text.slice(0, Math.max(0, max - 1));
-  const space = cut.lastIndexOf(" ");
-  const base = (space > 20 ? cut.slice(0, space) : cut).replace(/[,:;]$/u, "").trim();
-  return /[.!?]$/u.test(base) ? base : `${base}.`;
 }
 
 function londonClock(iso: string): string {

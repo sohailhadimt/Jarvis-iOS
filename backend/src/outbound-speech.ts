@@ -151,6 +151,9 @@ async function store(env: Env, id: string, lines: Turn[], status: string, summar
      WHERE id = ?`,
     [JSON.stringify(lines.slice(-80)), status, summary, summary, nowIso(), id],
   ).catch(() => undefined);
+  if (status === "completed" || status === "failed") {
+    void import("./sms-desk").then((mod) => mod.noteSmsOutcome(env, id, summary, status).catch(() => undefined));
+  }
 }
 
 function readTurns(raw: string | null): Turn[] {

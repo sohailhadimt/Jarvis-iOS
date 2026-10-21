@@ -3,15 +3,19 @@ import { bookingAllowed, extractQuote } from "../src/hunt";
 import {
   asksCapabilities,
   birthdayNudge,
+  callChoice,
   callFollowUp,
   capabilityBubbles,
   handleInboundSms,
   learnFacts,
   menuChoice,
+  noteSmsOutcome,
+  outboundAsk,
   pairingDigits,
   parsePhones,
   paymentAsk,
   proposeSlots,
+  rememberSmsOutcome,
   scheduleEmail,
   screenStranger,
   smsBubbles,
@@ -132,6 +136,13 @@ describe("text desk", () => {
     expect(callFollowUp("call him back")).toBe("callback");
     expect(callFollowUp("call back")).toBe("callback");
     expect(callFollowUp("yes")).toBeNull();
+    expect(callChoice("you call")).toBe("dial");
+    expect(callChoice("call him back")).toBe("dial");
+    expect(callChoice("1")).toBe("dial");
+    expect(callChoice("I'll call")).toBe("number");
+    expect(callChoice("2")).toBe("number");
+    expect(outboundAsk("Call 07700 900123 and ask him if he is free tomorrow")?.purpose).toBe("if he is free tomorrow");
+    expect(outboundAsk("call him back")).toBeNull();
 
     const kv = new Map<string, string>();
     const env = deskEnv(kv);
@@ -162,15 +173,35 @@ describe("text desk", () => {
 
       texts.length = 0;
       await handleInboundSms(env, "+15557654321", "call him back");
-      expect(texts.join(" ")).toContain("Reply yes");
-      expect(texts.join(" ").toLowerCase()).toContain("nothing is dialled");
-      expect(calls).toHaveLength(0);
-
-      texts.length = 0;
-      await handleInboundSms(env, "+15557654321", "yes");
       expect(calls).toHaveLength(1);
       expect(new URLSearchParams(calls[0]).get("To")).toBe("+15550001111");
       expect(texts.join(" ")).toContain("calling Sohail back");
+      expect(texts.join(" ").toLowerCase()).not.toContain("reply yes");
+
+      texts.length = 0;
+      const beforeNumber = calls.length;
+      await handleInboundSms(env, "+15557654321", "I'll call");
+      expect(calls).toHaveLength(beforeNumber);
+      expect(texts.join(" ")).toContain("+15550001111");
+
+      texts.length = 0;
+      await handleInboundSms(env, "+15557654321", "Call 07700 900123 and ask him if he is free tomorrow");
+      expect(texts.join(" ")).toContain("Shall I ring 07700 900123");
+      expect(texts.join(" ")).toContain("Reply YES");
+      expect(calls).toHaveLength(beforeNumber);
+      const pending = kv.get("sms_outbound_yes") ?? "";
+      const expired = JSON.parse(pending) as { expires_at: string };
+      expired.expires_at = new Date(Date.now() - 60_000).toISOString();
+      kv.set("sms_outbound_yes", JSON.stringify(expired));
+      texts.length = 0;
+      await handleInboundSms(env, "+15557654321", "yes");
+      expect(calls).toHaveLength(beforeNumber);
+      expect(texts.join(" ").toLowerCase()).toContain("expired");
+      await handleInboundSms(env, "+15557654321", "Call 07700 900123 and ask him if he is free tomorrow");
+      texts.length = 0;
+      await handleInboundSms(env, "+15557654321", "YES");
+      expect(calls).toHaveLength(beforeNumber + 1);
+      expect(new URLSearchParams(calls[beforeNumber] ?? "").get("To")).toBe("+447700900123");
 
       const alone = deskEnv(new Map());
       const stray: string[] = [];
@@ -184,6 +215,27 @@ describe("text desk", () => {
       }) as typeof fetch;
       await handleInboundSms(alone, "+15557654321", "yes");
       expect(stray).toHaveLength(0);
+    } finally {
+      globalThis.fetch = original;
+    }
+  }, 15_000);
+
+  it("texts the outcome of an approved call once", async () => {
+    const env = deskEnv(new Map());
+    const texts: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("/Messages.json") && (init?.method ?? "GET") === "POST") {
+        texts.push(new URLSearchParams(String(init?.body ?? "")).get("Body") ?? "");
+        return new Response(JSON.stringify({ sid: "SMout", status: "queued" }), { status: 201 });
+      }
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+    try {
+      await rememberSmsOutcome(env, "call_smsout", "+15557654321", "them");
+      await noteSmsOutcome(env, "call_smsout", "He is free tomorrow morning.", "completed");
+      await noteSmsOutcome(env, "call_smsout", "He is free tomorrow morning.", "completed");
+      expect(texts).toEqual(["Sir, He is free tomorrow morning."]);
     } finally {
       globalThis.fetch = original;
     }

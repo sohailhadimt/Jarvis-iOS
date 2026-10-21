@@ -1,6 +1,7 @@
 import {
   callTextIsThin,
   deliverOwnerText,
+  hasChoiceQuestion,
   isPlaceholderSummary,
   messageClock,
   rememberInboundMessage,
@@ -105,6 +106,22 @@ const TERMINAL_TWILIO = new Set(["completed", "busy", "failed", "no-answer", "ca
 /** App route. Registers the workspace webhook, then settles open inbound calls. */
 export async function settleOpenCalls(env: Env): Promise<Response> {
   const webhook = await ensurePostCallWebhook(env, 0);
+  const correction = await sendSohailCorrection(env).catch(() => ({
+    call_id: "",
+    sid: "",
+    status: "",
+    error_code: "",
+    error: "correction_failed",
+    sent: false,
+  }));
+  const choice = await sendChoiceWording(env).catch(() => ({
+    call_id: "",
+    sid: "",
+    status: "",
+    error_code: "",
+    error: "choice_failed",
+    sent: false,
+  }));
   let note = "";
   let settled: SettleHit[] = [];
   try {
@@ -122,24 +139,17 @@ export async function settleOpenCalls(env: Env): Promise<Response> {
     error: "sms_failed",
     sent: false,
   }));
-  const correction = await sendSohailCorrection(env).catch(() => ({
-    call_id: "",
-    sid: "",
-    status: "",
-    error_code: "",
-    error: "correction_failed",
-    sent: false,
-  }));
-  return json({ ok: true, webhook, settled, note, target, sms, correction });
+  return json({ ok: true, webhook, settled, note, target, sms, correction, choice });
 }
 
 /** Cron backup. Webhook registration is throttled; the conversation sweep runs every tick. */
 export async function sweepInboundCalls(env: Env): Promise<SettleHit[]> {
   await ensurePostCallWebhook(env, 6 * 60 * 60 * 1000);
   try {
+    await sendSohailCorrection(env).catch(() => undefined);
+    await sendChoiceWording(env).catch(() => undefined);
     const settled = await deliverInbound(env);
     await retryFailedTexts(env);
-    await sendSohailCorrection(env).catch(() => undefined);
     return settled;
   } catch (err) {
     console.error("inbound call sweep failed", safeError(err instanceof Error ? err.message : "sweep"));
@@ -231,8 +241,8 @@ async function sendSohailCorrection(env: Env): Promise<CorrectionText> {
     const lines = linesFromJson(row.transcript_json);
     const calledAt = row.called_at || row.created_at;
     const brief = await summariseCall(env, lines, row.call_summary, calledAt);
-    const name = brief.name || row.caller_name || "an unknown caller";
-    let spoken = brief.spoken;
+    const name = brief.name || realName(row.caller_name) || "an unknown caller";
+    let spoken = spokenForCaller(brief, name, calledAt, row.summary);
     if (callTextIsThin(spoken)) {
       const callerText = lines
         .filter((line) => line.role === "them")
@@ -274,7 +284,105 @@ async function sendSohailCorrection(env: Env): Promise<CorrectionText> {
   }
 }
 
-async function claimCorrection(env: Env): Promise<boolean> {
+const CHOICE_KEY = "sms_choice:sohail_0241";
+
+/** One text in the choice wording for the 02:41 call, after the earlier summary used a different shape. */
+async function sendChoiceWording(env: Env): Promise<CorrectionText> {
+  const none = (error: string, callId = ""): CorrectionText => ({
+    call_id: callId,
+    sid: "",
+    status: "",
+    error_code: "",
+    error,
+    sent: false,
+  });
+  const existing = await getState(env, CHOICE_KEY).catch(() => null);
+  if (existing === "sent" || existing === "sending") return none(existing);
+  const rows = await dbAll<{
+    id: string;
+    call_id: string;
+    caller_name: string;
+    summary: string;
+    spoken: string;
+    called_at: string;
+    transcript_json: string | null;
+    call_summary: string | null;
+    created_at: string;
+  }>(
+    env,
+    `SELECT m.id, m.call_id, m.caller_name, m.summary, m.spoken, m.called_at,
+            c.transcript_json, c.summary AS call_summary, c.created_at
+     FROM call_messages m
+     JOIN outbound_calls c ON c.id = m.call_id
+     WHERE m.spoken LIKE '%02:41%'
+       AND (
+         m.caller_name LIKE '%Sohail%' OR m.caller_name LIKE '%Sohil%'
+         OR m.spoken LIKE '%Sohail%' OR m.spoken LIKE '%Sohil%'
+         OR IFNULL(c.transcript_json, '') LIKE '%Sohail%' OR IFNULL(c.transcript_json, '') LIKE '%Sohil%'
+       )
+     ORDER BY m.called_at DESC
+     LIMIT 1`,
+  ).catch(() => []);
+  const row = rows[0];
+  if (!row?.call_id) return none("not_found");
+  if (hasChoiceQuestion(row.spoken) && /called to tell you/i.test(row.spoken) && !callTextIsThin(row.spoken)) {
+    await setState(env, CHOICE_KEY, "sent");
+    return none("already", row.call_id);
+  }
+  const claimed = await claimFlag(env, CHOICE_KEY);
+  if (!claimed) return none("busy", row.call_id);
+  try {
+    const lines = linesFromJson(row.transcript_json);
+    const calledAt = row.called_at || row.created_at;
+    const brief = await summariseCall(env, lines, row.call_summary || row.summary, calledAt);
+    const name = brief.name || realName(row.caller_name) || "an unknown caller";
+    let spoken = spokenForCaller(brief, name, calledAt, row.summary);
+    if (!hasChoiceQuestion(spoken) || callTextIsThin(spoken)) {
+      const callerText = lines
+        .filter((line) => line.role === "them")
+        .map((line) => line.text.trim())
+        .filter(Boolean)
+        .join(" ");
+      spoken = spokenCallMessage(name, calledAt, substantiveSentences(callerText, 2).join(" ") || row.summary || "");
+    }
+    if (callTextIsThin(spoken) || !hasChoiceQuestion(spoken)) {
+      await setState(env, CHOICE_KEY, "retry");
+      return none("thin", row.call_id);
+    }
+    if (spoken === row.spoken) {
+      await setState(env, CHOICE_KEY, "sent");
+      return none("already", row.call_id);
+    }
+    await dbRun(env, "UPDATE call_messages SET caller_name = ?, summary = ?, spoken = ? WHERE id = ?", [
+      name,
+      spoken,
+      spoken,
+      row.id,
+    ]);
+    await dbRun(env, "UPDATE outbound_calls SET summary = ?, updated_at = ? WHERE id = ?", [
+      spoken,
+      new Date().toISOString(),
+      row.call_id,
+    ]).catch(() => undefined);
+    const sms = await deliverOwnerText(env, row.call_id, { correction: true });
+    const accepted =
+      sms.sent || ["queued", "accepted", "sending", "sent", "delivered", "received", "receiving"].includes(sms.status);
+    await setState(env, CHOICE_KEY, accepted ? "sent" : "retry");
+    return {
+      call_id: row.call_id,
+      sid: sms.sid,
+      status: sms.status,
+      error_code: sms.error_code,
+      error: sms.error,
+      sent: sms.sent,
+    };
+  } catch {
+    await setState(env, CHOICE_KEY, "retry").catch(() => undefined);
+    return none("choice_failed", row.call_id);
+  }
+}
+
+async function claimFlag(env: Env, key: string): Promise<boolean> {
   const now = new Date().toISOString();
   const stale = new Date(Date.now() - 3 * 60 * 1000).toISOString();
   const changes = await dbRun(
@@ -283,9 +391,13 @@ async function claimCorrection(env: Env): Promise<boolean> {
      ON CONFLICT(key) DO UPDATE SET value = 'sending', updated_at = excluded.updated_at
      WHERE runtime_state.value NOT IN ('sending', 'sent')
         OR (runtime_state.value = 'sending' AND runtime_state.updated_at < ?)`,
-    [CORRECTION_KEY, now, stale],
+    [key, now, stale],
   ).catch(() => 0);
   return changes === 1;
+}
+
+async function claimCorrection(env: Env): Promise<boolean> {
+  return claimFlag(env, CORRECTION_KEY);
 }
 
 async function deliverInbound(env: Env): Promise<SettleHit[]> {
@@ -369,8 +481,8 @@ async function refreshUnread(env: Env): Promise<SettleHit[]> {
     const lines = linesFromJson(row.transcript_json);
     const calledAt = row.called_at || row.created_at;
     const brief = await summariseCall(env, lines, row.call_summary, calledAt);
-    const spoken = brief.spoken || spokenCallMessage(brief.name || row.screen_name || "", calledAt, row.summary);
-    const name = brief.name || "an unknown caller";
+    const name = brief.name || realName(row.caller_name) || realName(row.screen_name ?? "") || "an unknown caller";
+    const spoken = spokenForCaller(brief, name, calledAt, row.summary);
     if (spoken === row.spoken && name === row.caller_name) continue;
     await dbRun(env, "UPDATE call_messages SET caller_name = ?, summary = ?, spoken = ? WHERE id = ?", [
       name,
@@ -393,8 +505,9 @@ async function refreshUnread(env: Env): Promise<SettleHit[]> {
 function needsPolish(row: UnreadRow): boolean {
   const blob = `${row.spoken} ${row.summary} ${row.caller_name}`;
   if (/…|\.{3}|they said|you have a message|the user|identified as/i.test(blob)) return true;
-  if (!/^Sir, .+ rang at \d{2}:\d{2}\./.test(row.spoken)) return true;
   if (callTextIsThin(row.spoken)) return true;
+  if (hasChoiceQuestion(row.spoken) && /called to tell you|\bcalled\./i.test(row.spoken)) return false;
+  if (!hasChoiceQuestion(row.spoken)) return true;
   if ((row.spoken.match(/[.!?]/g) ?? []).length > 3) return true;
   if (/\btest call\b/i.test(row.caller_name) || /^(someone|caller|unknown|a test call)$/i.test(row.caller_name.trim())) return true;
   return false;
@@ -811,8 +924,8 @@ async function summariseCall(env: Env, lines: CallLine[], analysis: string | nul
           'Reply with JSON only, no markdown: {"name":"","spoken":""}',
           "name is the caller's name if they gave one, otherwise an empty string.",
           "Never use Master Hadi, a test label, or the word caller as the name.",
-          `spoken is what you will say aloud. At most three short sentences. The first sentence must be: Sir, {name or "an unknown caller"} rang at ${time}.`,
-          "Then say what they wanted and the actual message. Skip greetings and filler such as good evening, hello, and um.",
+          "spoken is only what the caller wanted you to pass on, in one or two short sentences.",
+          "Do not start with Sir. Do not mention the clock. Skip greetings and filler such as good evening, hello, and um.",
           "Include a callback number only if they gave one. Do not invent a name, a request, or a number.",
           "No ellipsis. Do not analyse the transcript. Do not say the user or identified as.",
         ].join(" "),
@@ -896,6 +1009,13 @@ function linesFromJson(raw: string | null): CallLine[] {
     lines.push({ role, text: trimmed.slice(0, 500) });
   }
   return lines;
+}
+
+/** Keeps a name we already stored when the summary model did not return one. */
+function spokenForCaller(brief: Brief, name: string, calledAt: string, fallback: string): string {
+  const body = brief.said || fallback;
+  if (brief.name) return brief.spoken || spokenCallMessage(name, calledAt, body);
+  return spokenCallMessage(name, calledAt, body);
 }
 
 function realName(name: string): string {
