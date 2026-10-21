@@ -5,6 +5,34 @@ import { pushNotice } from "./screening";
 import type { Env } from "./types";
 import { clampTimeout, readCallSettings } from "./owner-alert";
 
+/** Spoken on the later call. The owner already approved it by tapping Call back. */
+export function callbackBrief(question: string): string {
+  const asked = question
+    .replace(/\+\d{8,15}/g, "")
+    .replace(/…/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 180);
+  if (!asked) return "I'm calling you back, as promised.";
+  const sentence = /[.!?]$/.test(asked) ? asked : `${asked}.`;
+  return `I'm calling you back, as promised. You said: ${sentence}`;
+}
+
+/** A caller was told he would be rung back, and that call has not been replaced. */
+export async function openCallback(env: Env, callId: string): Promise<string | null> {
+  try {
+    const row = await dbFirst<{ question: string }>(
+      env,
+      "SELECT question FROM call_questions WHERE call_id = ? AND status = 'timed_out' ORDER BY resolved_at DESC LIMIT 1",
+      [callId],
+    );
+    const question = row?.question?.trim() ?? "";
+    return question || null;
+  } catch {
+    return null;
+  }
+}
+
 export function questionFromTranscript(lines: CallLine[]): string | null {
   const last = lines[lines.length - 1];
   if (!last || last.role !== "assistant") return null;

@@ -69,6 +69,18 @@ export function ownerSummaryLine(summary: string): string {
   return `Hello, this is JARVIS. ${summary} Say details to hear more, or tell me what you would like me to do.`;
 }
 
+/** A spoken line cut on a word. No ellipsis. */
+export function spokenClip(value: string, max: number): string {
+  const trimmed = value.replace(/…/g, " ").replace(/\s+/g, " ").trim();
+  if (trimmed.length <= max) return trimmed;
+  const cut = trimmed.slice(0, max);
+  const space = cut.lastIndexOf(" ");
+  let base = (space > 40 ? cut.slice(0, space) : cut).replace(/[,:;]+$/, "").trim();
+  if (!base) return "";
+  if (/[.!?]$/.test(base)) return base;
+  return `${base}.`;
+}
+
 export function mayCall(input: { quiet: boolean; countToday: number; max: number; urgentOnly: boolean; urgent: boolean }): "call" | "push" {
   if (input.quiet || input.max <= 0) return "push";
   if (input.urgentOnly && !input.urgent) return "push";
@@ -357,10 +369,10 @@ async function speakAlert(
   const presence = await readPresence(env);
   const driving = presence.activity === "automotive";
   const first = detailFirst
-    ? `Here is the detail. ${clip(alert.detail, 400)} Tell me what you would like me to do.`
+    ? `Here is the detail. ${spokenClip(alert.detail, 400)} Tell me what you would like me to do.`
     : driving
-      ? `Hello, this is JARVIS. Briefly: ${clip(alert.summary, 120)}`
-      : ownerSummaryLine(clip(alert.summary, 240));
+      ? `Hello, this is JARVIS. Briefly: ${spokenClip(alert.summary, 120)}`
+      : ownerSummaryLine(spokenClip(alert.summary, 240));
   const prompt = [
     "You are JARVIS calling Master Hadi on his own mobile.",
     driving ? "He is driving. One short sentence, then wait. Do not give a long detail unless he asks." : "Keep it brief.",

@@ -993,13 +993,17 @@ async function presentCall(env: Env, row: StoredCall): Promise<CallRecord> {
   const screen = await loadScreen(env, row.id);
   const delegation = await loadDelegation(env, row.id);
   const recorded = Boolean(await recordingSid(env, row.id));
+  const relay = await import("./relay");
+  const asked = await relay.openCallback(env, row.id);
   const base = publicCall(row, screen);
   const waiting = delegation?.status === "awaiting_decision";
+  const callback = asked ? relay.callbackBrief(asked) : "";
   return {
     ...base,
-    summary: waiting && delegation?.summary ? delegation.summary : base.summary,
+    brief: callback || base.brief,
+    summary: waiting && delegation?.summary ? delegation.summary : base.summary || (callback ? "Call back needed." : base.summary),
     stage: callStage(row.status),
-    callback_needed: waiting || row.status === "failed" || /\bcall back\b/i.test(base.summary ?? ""),
+    callback_needed: waiting || row.status === "failed" || /\bcall back\b/i.test(base.summary ?? "") || Boolean(asked),
     recording: recorded,
     delegation: delegation
       ? { id: delegation.id, status: delegation.status, summary: delegation.summary, decision: delegation.decision }

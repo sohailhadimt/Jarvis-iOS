@@ -32,6 +32,8 @@ export function callStage(status: string): CallStage {
 
 export function needsDelegation(brief: string): boolean {
   if (brief.startsWith("CONFIRM ")) return false;
+  // The owner already tapped Call back. This call delivers the message.
+  if (brief.startsWith("I'm calling you back")) return false;
   return /\b(book|reserve|reservation|table|appointment|enquiry|inquire|ask them|find out|check if)\b/i.test(brief);
 }
 

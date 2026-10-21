@@ -13,6 +13,7 @@ describe("call desk", () => {
   it("turns a booking into a decision and keeps a confirmation from looping", () => {
     expect(needsDelegation("Book a table for three tonight")).toBe(true);
     expect(needsDelegation("CONFIRM Take the eight")).toBe(false);
+    expect(needsDelegation("I'm calling you back, as promised. You said: Can you book a table for Friday.")).toBe(false);
     expect(needsDelegation("Say the meeting moved")).toBe(false);
   });
 
