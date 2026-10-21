@@ -1,5 +1,11 @@
 name: iOS compile
 
+# Keep a queued Mac compile if another commit lands. GitHub cancelled c50923f
+# before a hosted runner accepted it.
+concurrency:
+  group: ios-compile-${{ github.ref }}
+  cancel-in-progress: false
+
 on:
   push:
     branches:
