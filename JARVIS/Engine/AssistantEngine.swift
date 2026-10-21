@@ -1601,7 +1601,7 @@ final class AssistantEngine {
             return
         }
         pendingCallBrief = PendingCallBrief(contactName: name, number: number, brief: brief)
-        let spokenBrief = brief.count > 280 ? String(brief.prefix(280)) + "…" : brief
+        let spokenBrief = Self.spokenBrief(brief)
         let who = name == number ? number : name
         let line = "I'll call \(who) and tell them \(spokenBrief). I'll introduce myself as JARVIS, Master Hadi's assistant. Say yes, sir, or no to cancel."
         await speakLine(line, userText: userText)
@@ -1615,7 +1615,7 @@ final class AssistantEngine {
         heldBrief = ""
         _ = recordUser(userText)
         phase = .thinking
-        statusLine = "Placing the call…"
+        statusLine = "Placing the call, Sir."
         pushActivity()
         let outcome = await placeBrief(brief)
         statusLine = nil
@@ -1626,13 +1626,12 @@ final class AssistantEngine {
                 status: "not_set_up", detail: "Calling not set up.", spoken: true))
             callLogTick += 1
             await speakLine("Calling isn't set up yet, sir. The UK number and the worker secrets still need to be added.", userText: userText)
-        case .failed(let message):
-            let detail = message.count > 180 ? String(message.prefix(180)) : message
+        case .failed:
             CallLogStore.add(StoredCall.local(
                 name: brief.contactName, number: brief.number, brief: brief.brief,
-                status: "failed", detail: detail, spoken: true))
+                status: "failed", detail: "The call could not be placed.", spoken: true))
             callLogTick += 1
-            await speakLine("I couldn't place that call, sir. \(detail)", userText: userText)
+            await speakLine("I couldn't place that call, sir. I'll try again when you ask.", userText: userText)
         case .placed(let record):
             CallLogStore.update(StoredCall.fromServer(record, spoken: false))
             callLogTick += 1
@@ -1657,6 +1656,18 @@ final class AssistantEngine {
         callLogTick += 1
         await speakLine("Cancelled, sir. I won't call \(brief.contactName).", userText: userText)
         afterTurn()
+    }
+
+    /// The approval line stays one sentence. A long brief is cut on a word, never with an ellipsis.
+    private static func spokenBrief(_ brief: String) -> String {
+        let clean = brief.replacingOccurrences(of: "…", with: " ").replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean.count <= 280 { return clean }
+        let cut = String(clean.prefix(280))
+        guard let space = cut.lastIndex(of: " "), cut.distance(from: cut.startIndex, to: space) > 40 else { return cut }
+        var base = String(cut[..<space])
+        if let last = base.last, ",:;".contains(last) { base.removeLast() }
+        return base
     }
 
     private func placeBrief(_ brief: PendingCallBrief) async -> CallPlaceResult {
@@ -3167,7 +3178,7 @@ final class AssistantEngine {
         case "ringing": "Ringing"
         case "in_progress": "On the call"
         case "wrapping": "Finishing"
-        default: status
+        default: "On the call"
         }
     }
 

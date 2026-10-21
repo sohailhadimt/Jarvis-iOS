@@ -222,6 +222,34 @@ describe("agent chat", () => {
     }
   });
 
+  it("answers in character when the assistant webhook refuses the task", async () => {
+    const rows: AgentRow[] = [];
+    const env = agentEnv(rows);
+    const held: Promise<unknown>[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("no", { status: 500 })) as typeof fetch;
+    try {
+      const response = await route(
+        new Request("https://jarvis.test/agent/chat", {
+          method: "POST",
+          headers: bearer,
+          body: JSON.stringify({ message: "What is on this evening?", conversationId: "conv_home" }),
+        }),
+        env,
+        ctx(held),
+      );
+      expect(response.status).toBe(200);
+      await Promise.all(held);
+      const user = rows.find((row) => row.role === "user");
+      const assistant = rows.find((row) => row.role === "assistant");
+      expect(user?.status).toBe("done");
+      expect(assistant?.text).toBe("I'm still with you, sir. Ask me again in a moment.");
+      expect(assistant?.reply_to).toBe(user?.id);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it("refuses the chat when the webhook secret is missing and does not echo a key", async () => {
     const rows: AgentRow[] = [];
     const env = agentEnv(rows);

@@ -142,7 +142,7 @@ struct ScreeningCard: View {
         case "handling": "JARVIS is handling the call."
         case "message": "JARVIS is taking a message."
         case "connecting": "Connecting you."
-        default: call.status
+        default: "JARVIS is on the call."
         }
     }
 

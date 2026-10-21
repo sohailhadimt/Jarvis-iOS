@@ -380,8 +380,16 @@ enum CallReport {
     }
 
     private static func clip(_ text: String) -> String {
-        if text.count <= 420 { return text }
-        return String(text.prefix(420)) + "…"
+        let clean = text.replacingOccurrences(of: "…", with: " ").replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean.count <= 420 { return clean }
+        let cut = String(clean.prefix(420))
+        guard let space = cut.lastIndex(of: " "), cut.distance(from: cut.startIndex, to: space) > 40 else {
+            return cut
+        }
+        var base = String(cut[..<space])
+        if let last = base.last, ",:;".contains(last) { base.removeLast() }
+        if let last = base.last, ".!?".contains(last) { return base }
+        return base + "."
     }
 }
 

@@ -146,10 +146,47 @@ async function forwardAgentTask(
     await response.text().catch(() => "");
     if (response.status < 200 || response.status >= 300) {
       console.error("agent webhook failed", String(response.status));
+      await storeButlerFallback(env, input);
     }
   } catch (err) {
     console.error("agent webhook threw", err instanceof Error ? err.name : "Error");
+    await storeButlerFallback(env, input);
   }
+}
+
+/** The home chat still gets a spoken line when the assistant webhook does not answer. */
+async function storeButlerFallback(
+  env: Env,
+  input: { conversationId: string; replyTo: string },
+): Promise<void> {
+  const existing = await dbFirst<{ id: string }>(
+    env,
+    "SELECT id FROM agent_messages WHERE conversation_id = ? AND role = 'assistant' AND reply_to = ? LIMIT 1",
+    [input.conversationId, input.replyTo],
+  ).catch(() => null);
+  if (existing) {
+    await markDone(env, input.replyTo, input.conversationId);
+    return;
+  }
+  try {
+    await dbRun(
+      env,
+      `INSERT INTO agent_messages (id, conversation_id, role, text, status, reply_to, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        newId("msg"),
+        input.conversationId,
+        "assistant",
+        "I'm still with you, sir. Ask me again in a moment.",
+        "done",
+        input.replyTo,
+        nowIso(),
+      ],
+    );
+  } catch {
+    return;
+  }
+  await markDone(env, input.replyTo, input.conversationId);
 }
 
 async function markDone(env: Env, id: string, conversationId: string): Promise<void> {

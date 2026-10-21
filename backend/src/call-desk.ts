@@ -53,7 +53,7 @@ export function parseAway(text: string): { kind: "clear" } | { kind: "set"; inst
   const set = /(?:jarvis[, ]+)?(?:please )?answer my calls(?: and (?:say|tell them) )?(.+)?$/i.exec(cleaned);
   if (!set && !/\banswer my calls\b/i.test(cleaned)) return null;
   let instruction = (set?.[1] ?? "").replace(/[.?!]+$/g, "").trim();
-  if (!instruction || /^and (say|tell them)$/i.test(instruction)) instruction = "I'll call back later";
+  if (!instruction || /^and (say|tell them)$/i.test(instruction)) instruction = "He'll ring you back";
   instruction = instruction.replace(/^(say|tell them)\s+/i, "").replace(/\bfor (?:the next )?(?:\d+|one|two|three|four|five|six|seven|eight) hours?\b/i, "").trim();
   const named = /\bfor (?:the next )?(\d+|one|two|three|four|five|six|seven|eight) hours?\b/i.exec(cleaned);
   const words: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8 };

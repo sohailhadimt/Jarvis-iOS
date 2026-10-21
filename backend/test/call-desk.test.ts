@@ -26,6 +26,7 @@ describe("call desk", () => {
   it("reads an away order and a clear", () => {
     const set = parseAway("JARVIS, answer my calls and say I'll call back later for the next two hours.");
     expect(set).toEqual({ kind: "set", instruction: "I'll call back later", hours: 2 });
+    expect(parseAway("JARVIS, answer my calls")).toEqual({ kind: "set", instruction: "He'll ring you back", hours: 8 });
     expect(parseAway("stop answering my calls")).toEqual({ kind: "clear" });
     expect(parseAway("what's the weather")).toBeNull();
     expect(awayFirstMessage("I'll call back later")).toContain("may be handled by AI");

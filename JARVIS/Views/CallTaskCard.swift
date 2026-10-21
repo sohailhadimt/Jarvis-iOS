@@ -91,7 +91,7 @@ private struct CallTaskCard: View {
     private var line: String {
         switch stage {
         case .dialing:
-            "Ringing now, Sir..."
+            "Ringing now, Sir."
         case .live:
             "On the call now, I'll report back, Sir."
         case .ended:
