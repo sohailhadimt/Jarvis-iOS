@@ -402,12 +402,16 @@ async function configResponse(env: Env): Promise<Response> {
   const from = toE164(env.TWILIO_FROM_NUMBER ?? "");
   const { readOwnerMobile } = await import("./owner-alert");
   const mobile = await readOwnerMobile(env);
+  const desk = await import("./sms-desk");
+  const chat = await import("./agent-chat");
   return json({
     configured: setup.configured,
     message: setup.configured ? "Calling is ready." : "Calling not set up.",
     missing: setup.missing,
     from_number: from,
     forwarding: from ? forwardingCodes(from) : null,
+    assistant_webhook: chat.assistantWebhookReady(env),
+    texts: await desk.textDelivery(env),
     screening: {
       mobile_set: Boolean(mobile),
       push: Boolean(env.APNS_KEY_ID?.trim() && env.APNS_TEAM_ID?.trim() && env.APNS_PRIVATE_KEY?.trim()),

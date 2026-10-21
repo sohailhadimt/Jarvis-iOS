@@ -28,7 +28,7 @@ export async function agentChat(request: Request, env: Env, ctx: ExecutionContex
   if (!conversationId || !CONVERSATION.test(conversationId)) {
     return apiError(400, "bad_request", "conversationId is required.");
   }
-  if (!webhookReady(env)) {
+  if (!assistantWebhookReady(env)) {
     return apiError(503, "webhook_not_configured", "The assistant webhook is not set on the worker.");
   }
   const id = newId("msg");
@@ -112,7 +112,7 @@ export async function agentMessages(env: Env, url: URL): Promise<Response> {
   }
 }
 
-function webhookReady(env: Env): boolean {
+export function assistantWebhookReady(env: Env): boolean {
   const url = (env.JARVIS_WEBHOOK_URL ?? "").trim();
   const key = (env.JARVIS_WEBHOOK_KEY ?? "").trim();
   return url.startsWith("https://") && key.length > 0;

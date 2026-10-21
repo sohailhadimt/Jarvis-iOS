@@ -387,6 +387,29 @@ export async function sendSmsResult(env: Env, to: string, body: string): Promise
   }
 }
 
+/** Carrier delivery of owner texts. No phone numbers. "blocked" means Twilio refused the account. */
+export async function textDelivery(env: Env): Promise<"blocked" | "ready" | "unknown"> {
+  const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
+  const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
+  const from = toE164(env.TWILIO_FROM_NUMBER ?? "");
+  if (!account || !token || !from) return "unknown";
+  try {
+    const rows = await dbAll<{ value: string }>(
+      env,
+      "SELECT value FROM runtime_state WHERE key LIKE 'owner_sms:%' ORDER BY updated_at DESC LIMIT 5",
+    );
+    let sawRefusal = false;
+    for (const row of rows) {
+      const parsed = JSON.parse(row.value) as { ok?: boolean; errorCode?: string };
+      if (parsed.ok === true) return "ready";
+      if (parsed.errorCode === "20003") sawRefusal = true;
+    }
+    return sawRefusal ? "blocked" : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 export async function sendSms(env: Env, to: string, body: string): Promise<boolean> {
   const result = await sendSmsResult(env, to, body);
   return result.ok;

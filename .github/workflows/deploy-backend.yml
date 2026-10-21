@@ -424,3 +424,8 @@ jobs:
           const { appendFileSync } = await import("node:fs");
           appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
           NODE
+
+      - name: Live worker checks
+        env:
+          JARVIS_APP_TOKEN: ${{ secrets.JARVIS_APP_TOKEN }}
+        run: bash ../.github/scripts/live-check.sh

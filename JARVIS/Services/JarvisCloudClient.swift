@@ -1140,10 +1140,13 @@ struct CallingConfig: Decodable, Sendable {
     var fromNumber: String?
     var forwarding: CallingForwarding?
     var screening: ScreeningFlags?
+    var assistantWebhook: Bool?
+    var texts: String?
 
     enum CodingKeys: String, CodingKey {
-        case configured, message, missing, forwarding, screening
+        case configured, message, missing, forwarding, screening, texts
         case fromNumber = "from_number"
+        case assistantWebhook = "assistant_webhook"
     }
 }
 

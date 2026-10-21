@@ -10,6 +10,7 @@ struct CallingSettingsView: View {
     @State private var codes = CallingForwarding(unconditional: "", noAnswer: "", busy: "", unreachable: "", cancel: ForwardingGuide.cancel)
     @State private var mobileSet = false
     @State private var pushReady = false
+    @State private var texts = "unknown"
     @State private var busy = false
     @State private var rules: [CallPrivacyRule] = []
     @State private var draftName = ""
@@ -79,7 +80,7 @@ struct CallingSettingsView: View {
             } header: {
                 Text("Text JARVIS")
             } footer: {
-                Text("Text the code to the JARVIS number. He replies Connected, Sir, then a short welcome, one text at a time. Add the contact so the thread is named JARVIS, with the ring as the photo.")
+                Text(textFooter)
             }
 
             Section {
@@ -168,6 +169,13 @@ struct CallingSettingsView: View {
             return "Every call to your mobile is sent to JARVIS first."
         }
         return "JARVIS screens a call when you do not answer, you are busy, or your phone is off."
+    }
+
+    private var textFooter: String {
+        if texts == "blocked" {
+            return "Pairing is built. Texts are not leaving the carrier account yet, so nothing has been delivered."
+        }
+        return "Text the code to the JARVIS number. He replies Connected, Sir, then a short welcome, one text at a time. Add the contact so the thread is named JARVIS, with the ring as the photo."
     }
 
     private var screeningBlurb: String {
@@ -270,6 +278,8 @@ struct CallingSettingsView: View {
                 let config = try await JarvisCloudAPI.client().callingConfig()
                 mobileSet = config.screening?.mobileSet ?? false
                 pushReady = config.screening?.push ?? false
+                texts = config.texts ?? "unknown"
+                engine.noteGrok(config.assistantWebhook ?? false)
                 if let saved = try? await JarvisCloudAPI.client().ownerCallSettings() {
                     quietStart = saved.quietStart
                     quietEnd = saved.quietEnd

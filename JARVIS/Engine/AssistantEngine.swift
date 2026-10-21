@@ -66,6 +66,8 @@ final class AssistantEngine {
     private(set) var callMessages: [CallMessage] = []
     /// The message card a notification tap opened.
     private(set) var focusedCallMessageID: String?
+    /// False when the Grok assistant webhook is not on the worker. Home chat then answers from here.
+    private(set) var grokConnected: Bool?
     @ObservationIgnored private var deliveringCallMessages = false
     @ObservationIgnored private var openingCallMessageID: String?
     @ObservationIgnored private var heardCallMessageIDs: Set<String> = []
@@ -1127,6 +1129,7 @@ final class AssistantEngine {
         }
         do {
             let pending = try await client.postAgentChat(message: userText, conversationId: agentConversationID)
+            grokConnected = true
             let deadline = Date().addingTimeInterval(90)
             while Date() < deadline {
                 try Task.checkCancellation()
@@ -1145,9 +1148,22 @@ final class AssistantEngine {
             }
         } catch {
             if Task.isCancelled { return }
+            if Self.webhookMissing(error) {
+                grokConnected = false
+                statusLine = "The Grok assistant isn't connected. I'll answer from here, Sir."
+                let facts = JarvisStore.allFacts()
+                let system = AppSettings.shared.voicePrompt(facts: facts, question: userText)
+                await deliverCloudOrFallback(userText: userText, system: system, history: conversation, user: userText)
+                return
+            }
         }
         guard !Task.isCancelled else { return }
         await finishAgentLine(fallback, userText: userText)
+    }
+
+    private static func webhookMissing(_ error: Error) -> Bool {
+        let text = error.localizedDescription.lowercased()
+        return text.contains("webhook")
     }
 
     private func finishAgentLine(_ line: String, userText: String) async {
@@ -1696,6 +1712,10 @@ final class AssistantEngine {
         }
     }
 
+    func noteGrok(_ connected: Bool) {
+        grokConnected = connected
+    }
+
     /// Opens one saved call and reads the butler line aloud. A notification tap uses this.
     func openCallMessage(_ id: String) {
         let clean = id.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2007,6 +2027,9 @@ final class AssistantEngine {
             hunts = rows
         }
         await loadPairing(refresh: false)
+        if let config = try? await client.callingConfig() {
+            grokConnected = config.assistantWebhook ?? false
+        }
         if let away = try? await client.awayStatus() {
             awayActive = away.active
             VoiceMeter.shared.interceptor = interceptor

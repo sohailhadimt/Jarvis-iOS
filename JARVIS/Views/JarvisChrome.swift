@@ -247,6 +247,14 @@ private struct SessionExtras: View {
                 .padding(.horizontal, 20)
                 .padding(.bottom, 8)
         }
+        if engine.grokConnected == false {
+            Text("The Grok assistant isn't connected. I'll answer from here.")
+                .font(.system(size: 13))
+                .foregroundStyle(Color(hex: "#C9C6D4"))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 8)
+        }
         if !engine.pairLinked, !engine.pairCode.isEmpty {
             PairingCard()
                 .padding(.horizontal, 20)
