@@ -21,9 +21,8 @@ targets:
     type: application
     platform: iOS
     scheme:               # shared scheme so CI (Codemagic) can build it
-      test:
-        targets:
-          - JARVISVoiceTests
+      testTargets:
+        - JARVISVoiceTests
     sources:
       - path: JARVIS
         includes:
@@ -42,6 +41,9 @@ targets:
         SWIFT_VERSION: "5.0"
         SWIFT_STRICT_CONCURRENCY: minimal
         TARGETED_DEVICE_FAMILY: "1"
+      configs:
+        Debug:
+          ENABLE_TESTABILITY: YES
     info:
       path: JARVIS/Info.plist
       properties:
