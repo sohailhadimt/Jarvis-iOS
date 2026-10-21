@@ -38,6 +38,14 @@ workflows:
           # CODEMAGIC_ASC_KEY supplies APP_STORE_CONNECT_ISSUER_ID,
           # APP_STORE_CONNECT_KEY_IDENTIFIER, and APP_STORE_CONNECT_PRIVATE_KEY.
           # CERTIFICATE_PRIVATE_KEY is the PEM RSA key in the "signing" variable group.
+          #
+          # Push Notifications on com.sohail.jarvis invalidated App Store profile
+          # "JARVIS ios_app_store 1792031906" (it has no aps-environment). The CLI
+          # only reuses ACTIVE profiles. --create makes a new one when that profile
+          # is INVALID, and Apple includes the current capabilities, including push.
+          # --strict-match-identifier stops com.sohail.jarvis from also matching
+          # com.sohail.jarvis.widgets. That widget profile is still active and is
+          # fetched on its own line. The widget entitlement is the App Group only.
           if [ -z "${CERTIFICATE_PRIVATE_KEY:-}" ]; then
             echo "CERTIFICATE_PRIVATE_KEY is not set. Add the PEM RSA private key to the Codemagic variable group 'signing'."
             exit 1
@@ -45,10 +53,12 @@ workflows:
           app-store-connect fetch-signing-files "com.sohail.jarvis" \
             --type IOS_APP_STORE \
             --create \
+            --strict-match-identifier \
             --certificate-key=@env:CERTIFICATE_PRIVATE_KEY
           app-store-connect fetch-signing-files "com.sohail.jarvis.widgets" \
             --type IOS_APP_STORE \
             --create \
+            --strict-match-identifier \
             --certificate-key=@env:CERTIFICATE_PRIVATE_KEY
       - name: Set up signing certificate
         script: keychain add-certificates
