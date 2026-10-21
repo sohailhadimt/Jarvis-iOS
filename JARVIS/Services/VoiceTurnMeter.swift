@@ -48,6 +48,8 @@ final class VoiceTurnMeter: @unchecked Sendable {
     private var speechMs = 0
     private var silenceMs = 0
     private var bargeRunMs = 0
+    /// One interrupt per stretch of user speech. Continued talking must not fire again 150 ms later.
+    private var bargeLatched = false
     private var triggered = false
     private var calibrated = false
     private var forwarding = false
@@ -82,8 +84,12 @@ final class VoiceTurnMeter: @unchecked Sendable {
 
     func setAssistantSpeaking(_ speaking: Bool) {
         lock.lock()
+        let changed = assistantSpeaking != speaking
         assistantSpeaking = speaking
-        if !speaking { bargeRunMs = 0 }
+        if changed || !speaking {
+            bargeRunMs = 0
+            bargeLatched = false
+        }
         lock.unlock()
     }
 
@@ -110,6 +116,7 @@ final class VoiceTurnMeter: @unchecked Sendable {
         speechMs = 0
         silenceMs = 0
         bargeRunMs = 0
+        bargeLatched = false
         triggered = false
         calibrated = false
         forwarding = false
@@ -185,9 +192,11 @@ final class VoiceTurnMeter: @unchecked Sendable {
             let instant = Self.instant(snr: snr, speechBand: speechBand, flatness: flatness, level: level)
             let interrupt = instant >= open && speechBand >= Self.minimumBand && snr >= Self.bargeSNR && speakerOK
             if interrupt {
+                if bargeLatched { return nil }
                 bargeRunMs += step
                 if bargeRunMs >= Self.bargeMs {
                     bargeRunMs = 0
+                    bargeLatched = true
                     speechMs = 0
                     silenceMs = 0
                     triggered = false
@@ -196,6 +205,7 @@ final class VoiceTurnMeter: @unchecked Sendable {
                 }
             } else {
                 bargeRunMs = 0
+                bargeLatched = false
             }
             return nil
         }
@@ -318,7 +328,9 @@ enum VoiceTurnFixtures {
             let decision = blip.push(rms: 0.08, speechBand: 0.64, flatness: 0.24, level: 0.42, frameMs: 20, speakerOK: true)
             if let event = decision.event { blipEvents.append(event) }
         }
-        _ = blip.push(rms: 0.01, speechBand: 0.22, flatness: 0.72, level: 0.08, frameMs: 20, speakerOK: true)
+        // The burst is only known to be short once the next frame is not speech.
+        let tail = blip.push(rms: 0.01, speechBand: 0.22, flatness: 0.72, level: 0.08, frameMs: 20, speakerOK: true)
+        if let event = tail.event { blipEvents.append(event) }
         check("short voice", blipEvents == [.ignoredBurst], "events \(blipEvents)")
 
         let talk = VoiceTurnMeter()
@@ -403,11 +415,15 @@ enum VoiceTurnFixtures {
             _ = barge.push(rms: 0.01, speechBand: 0.22, flatness: 0.72, level: 0.08, frameMs: 20, speakerOK: true)
         }
         var bargeAt: Int?
+        var bargeCount = 0
         for index in 0..<20 {
             let decision = barge.push(rms: 0.09, speechBand: 0.66, flatness: 0.22, level: 0.5, frameMs: 20, speakerOK: true)
-            if decision.event == .barge { bargeAt = (index + 1) * 20 }
+            if decision.event == .barge {
+                bargeCount += 1
+                if bargeAt == nil { bargeAt = (index + 1) * 20 }
+            }
         }
-        check("barge-in", bargeAt == 160 || bargeAt == 140 || bargeAt == 180, "at \(bargeAt ?? -1)ms")
+        check("barge-in", bargeCount == 1 && (bargeAt == 160 || bargeAt == 140 || bargeAt == 180), "at \(bargeAt ?? -1)ms")
 
         let echo = VoiceTurnMeter()
         echo.setAssistantSpeaking(true)
