@@ -362,6 +362,8 @@ jobs:
           const pollyId = "call_f0ce67d2098c49208dacf2c63f719957";
           const polly = settled.find((row) => row && row.call_id === pollyId);
           console.log(`sms sid=${sms.sid || ""} status=${sms.status || ""} error_code=${sms.error_code || ""} error=${sms.error || ""} sent=${Boolean(sms.sent)}`);
+          const correction = body.correction || {};
+          console.log(`correction sid=${correction.sid || ""} status=${correction.status || ""} error_code=${correction.error_code || ""} error=${correction.error || ""} sent=${Boolean(correction.sent)}`);
           console.log(`polly ${polly ? `${polly.status} message=${polly.message_id || "none"}` : "missing"}`);
           if (polly && polly.spoken) console.log(polly.spoken);
           if (hit && hit.message_id && webhook.attached && polly && (polly.message_id || polly.status === "completed")) {
@@ -405,6 +407,8 @@ jobs:
           const sms = body.sms || {};
           const polly = settled.find((row) => row && row.call_id === "call_f0ce67d2098c49208dacf2c63f719957");
           console.log(`sms sid=${sms.sid || ""} status=${sms.status || ""} error_code=${sms.error_code || ""} error=${sms.error || ""} sent=${Boolean(sms.sent)}`);
+          const correction = body.correction || {};
+          console.log(`correction sid=${correction.sid || ""} status=${correction.status || ""} error_code=${correction.error_code || ""} error=${correction.error || ""} sent=${Boolean(correction.sent)}`);
           console.log(`polly ${polly ? `${polly.call_id} ${polly.message_id || "none"} ${polly.status}` : "missing"}`);
           if (polly && polly.spoken) console.log(polly.spoken);
           if (/…|They said|The user|you have a message/i.test(hit.spoken || "")) {

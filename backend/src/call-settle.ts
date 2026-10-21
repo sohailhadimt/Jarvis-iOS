@@ -1,4 +1,12 @@
-import { deliverOwnerText, isPlaceholderSummary, messageClock, rememberInboundMessage, spokenCallMessage } from "./call-messages";
+import {
+  callTextIsThin,
+  deliverOwnerText,
+  isPlaceholderSummary,
+  messageClock,
+  rememberInboundMessage,
+  spokenCallMessage,
+  substantiveSentences,
+} from "./call-messages";
 import { elevenLabsSignatureValid, guessCaller, readConversation, safeError, type CallLine } from "./calls";
 import { dbAll, dbFirst, dbRun, getState, setState } from "./db";
 import { clip, isRecord, json, parseJsonValue } from "./http";
@@ -114,7 +122,15 @@ export async function settleOpenCalls(env: Env): Promise<Response> {
     error: "sms_failed",
     sent: false,
   }));
-  return json({ ok: true, webhook, settled, note, target, sms });
+  const correction = await sendSohailCorrection(env).catch(() => ({
+    call_id: "",
+    sid: "",
+    status: "",
+    error_code: "",
+    error: "correction_failed",
+    sent: false,
+  }));
+  return json({ ok: true, webhook, settled, note, target, sms, correction });
 }
 
 /** Cron backup. Webhook registration is throttled; the conversation sweep runs every tick. */
@@ -123,6 +139,7 @@ export async function sweepInboundCalls(env: Env): Promise<SettleHit[]> {
   try {
     const settled = await deliverInbound(env);
     await retryFailedTexts(env);
+    await sendSohailCorrection(env).catch(() => undefined);
     return settled;
   } catch (err) {
     console.error("inbound call sweep failed", safeError(err instanceof Error ? err.message : "sweep"));
@@ -151,6 +168,124 @@ async function retryFailedTexts(env: Env): Promise<void> {
     );
     if (message?.call_id) await deliverOwnerText(env, message.call_id);
   }
+}
+
+const CORRECTION_KEY = "sms_correction:sohail_0241";
+
+interface CorrectionText {
+  call_id: string;
+  sid: string;
+  status: string;
+  error_code: string;
+  error: string;
+  sent: boolean;
+}
+
+/**
+ * One replacement text for the 02:41 Sohail call, built from the transcript and the summary.
+ * The flag blocks every later attempt, including a second cron tick.
+ */
+async function sendSohailCorrection(env: Env): Promise<CorrectionText> {
+  const none = (error: string, callId = ""): CorrectionText => ({
+    call_id: callId,
+    sid: "",
+    status: "",
+    error_code: "",
+    error,
+    sent: false,
+  });
+  const existing = await getState(env, CORRECTION_KEY).catch(() => null);
+  if (existing === "sent") return none("sent");
+  const rows = await dbAll<{
+    id: string;
+    call_id: string;
+    caller_name: string;
+    summary: string;
+    spoken: string;
+    called_at: string;
+    transcript_json: string | null;
+    call_summary: string | null;
+    created_at: string;
+  }>(
+    env,
+    `SELECT m.id, m.call_id, m.caller_name, m.summary, m.spoken, m.called_at,
+            c.transcript_json, c.summary AS call_summary, c.created_at
+     FROM call_messages m
+     JOIN outbound_calls c ON c.id = m.call_id
+     WHERE m.spoken LIKE '%02:41%'
+       AND (
+         m.caller_name LIKE '%Sohail%' OR m.caller_name LIKE '%Sohil%'
+         OR m.spoken LIKE '%Sohail%' OR m.spoken LIKE '%Sohil%'
+         OR IFNULL(c.transcript_json, '') LIKE '%Sohail%' OR IFNULL(c.transcript_json, '') LIKE '%Sohil%'
+         OR IFNULL(c.summary, '') LIKE '%Sohail%' OR IFNULL(c.summary, '') LIKE '%Sohil%'
+       )
+     ORDER BY m.called_at DESC
+     LIMIT 1`,
+  ).catch(() => []);
+  const row = rows[0];
+  if (!row?.call_id) return none("not_found");
+  const attempt = existing?.startsWith("retry:") ? Number(existing.slice("retry:".length)) || 0 : 0;
+  const claimed = await claimCorrection(env);
+  if (!claimed) return none("busy", row.call_id);
+  try {
+    const lines = linesFromJson(row.transcript_json);
+    const calledAt = row.called_at || row.created_at;
+    const brief = await summariseCall(env, lines, row.call_summary, calledAt);
+    const name = brief.name || row.caller_name || "an unknown caller";
+    let spoken = brief.spoken;
+    if (callTextIsThin(spoken)) {
+      const callerText = lines
+        .filter((line) => line.role === "them")
+        .map((line) => line.text.trim())
+        .filter(Boolean)
+        .join(" ");
+      spoken = spokenCallMessage(name, calledAt, substantiveSentences(callerText, 2).join(" ") || row.summary || "");
+    }
+    if (callTextIsThin(spoken)) {
+      await setState(env, CORRECTION_KEY, attempt >= 4 ? "sent" : `retry:${attempt + 1}`);
+      return none("thin", row.call_id);
+    }
+    await dbRun(env, "UPDATE call_messages SET caller_name = ?, summary = ?, spoken = ? WHERE id = ?", [
+      name,
+      spoken,
+      spoken,
+      row.id,
+    ]);
+    await dbRun(env, "UPDATE outbound_calls SET summary = ?, updated_at = ? WHERE id = ?", [
+      spoken,
+      new Date().toISOString(),
+      row.call_id,
+    ]).catch(() => undefined);
+    const sms = await deliverOwnerText(env, row.call_id, { correction: true });
+    const accepted =
+      sms.sent || ["queued", "accepted", "sending", "sent", "delivered", "received", "receiving"].includes(sms.status);
+    await setState(env, CORRECTION_KEY, accepted || attempt >= 4 ? "sent" : `retry:${attempt + 1}`);
+    return {
+      call_id: row.call_id,
+      sid: sms.sid,
+      status: sms.status,
+      error_code: sms.error_code,
+      error: sms.error,
+      sent: sms.sent,
+    };
+  } catch {
+    await setState(env, CORRECTION_KEY, attempt >= 4 ? "sent" : `retry:${attempt + 1}`).catch(() => undefined);
+    return none("correction_failed", row.call_id);
+  }
+}
+
+async function claimCorrection(env: Env): Promise<boolean> {
+  const now = new Date().toISOString();
+  const stale = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+  const changes = await dbRun(
+    env,
+    `INSERT INTO runtime_state (key, value, updated_at) VALUES (?, 'sending', ?)
+     ON CONFLICT(key) DO UPDATE SET value = 'sending', updated_at = excluded.updated_at
+     WHERE runtime_state.value NOT IN ('sending', 'sent')
+        OR (runtime_state.value = 'sending' AND runtime_state.updated_at < ?)`,
+    [CORRECTION_KEY, now, stale],
+  ).catch(() => 0);
+  return changes === 1;
 }
 
 async function deliverInbound(env: Env): Promise<SettleHit[]> {
@@ -259,7 +394,8 @@ function needsPolish(row: UnreadRow): boolean {
   const blob = `${row.spoken} ${row.summary} ${row.caller_name}`;
   if (/…|\.{3}|they said|you have a message|the user|identified as/i.test(blob)) return true;
   if (!/^Sir, .+ rang at \d{2}:\d{2}\./.test(row.spoken)) return true;
-  if ((row.spoken.match(/[.!?]/g) ?? []).length > 2) return true;
+  if (callTextIsThin(row.spoken)) return true;
+  if ((row.spoken.match(/[.!?]/g) ?? []).length > 3) return true;
   if (/\btest call\b/i.test(row.caller_name) || /^(someone|caller|unknown|a test call)$/i.test(row.caller_name.trim())) return true;
   return false;
 }
@@ -343,7 +479,7 @@ function storedSaid(row: OpenCall): string {
     .map((line) => line.text.trim())
     .filter(Boolean)
     .join(" ");
-  return clip(stripPhones(them), 500);
+  return clip(them, 500);
 }
 
 async function settleFromElevenLabs(env: Env, rows: OpenCall[]): Promise<SettleHit[]> {
@@ -675,10 +811,10 @@ async function summariseCall(env: Env, lines: CallLine[], analysis: string | nul
           'Reply with JSON only, no markdown: {"name":"","spoken":""}',
           "name is the caller's name if they gave one, otherwise an empty string.",
           "Never use Master Hadi, a test label, or the word caller as the name.",
-          `spoken is what you will say aloud. At most two sentences. The first sentence must be: Sir, {name or "an unknown caller"} rang at ${time}.`,
-          "The second sentence is the message in your own voice, for example: He'd like you to call him back about the boiler.",
-          "No phone numbers. No ellipsis. Do not analyse the transcript. Do not say the user or identified as.",
-          "Do not invent a name or a request.",
+          `spoken is what you will say aloud. At most three short sentences. The first sentence must be: Sir, {name or "an unknown caller"} rang at ${time}.`,
+          "Then say what they wanted and the actual message. Skip greetings and filler such as good evening, hello, and um.",
+          "Include a callback number only if they gave one. Do not invent a name, a request, or a number.",
+          "No ellipsis. Do not analyse the transcript. Do not say the user or identified as.",
         ].join(" "),
       },
       {
@@ -687,7 +823,7 @@ async function summariseCall(env: Env, lines: CallLine[], analysis: string | nul
       },
     ],
     null,
-    { timeoutMs: 12_000, maxTokens: 220 },
+    { timeoutMs: 12_000, maxTokens: 280 },
   );
   if (!result.ok) return fallback;
   const parsed = readBrief(result.message.content ?? "");
@@ -714,8 +850,7 @@ function callerSentence(lines: CallLine[]): string {
     .map((line) => line.text.trim())
     .filter(Boolean)
     .join(" ");
-  const first = text.split(/(?<=[.!?])\s+/)[0] ?? "";
-  return stripPhones(first).replace(/…/g, "").trim();
+  return substantiveSentences(text, 2).join(" ");
 }
 
 function usableMessage(text: string): boolean {

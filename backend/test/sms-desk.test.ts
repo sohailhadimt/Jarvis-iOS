@@ -3,7 +3,9 @@ import { bookingAllowed, extractQuote } from "../src/hunt";
 import {
   asksCapabilities,
   birthdayNudge,
+  callFollowUp,
   capabilityBubbles,
+  handleInboundSms,
   learnFacts,
   menuChoice,
   pairingDigits,
@@ -17,6 +19,8 @@ import {
   wantsSchedule,
   welcomeBubbles,
 } from "../src/sms-desk";
+import { CHAT_FALLBACK } from "../src/llm";
+import type { Env } from "../src/types";
 
 describe("text desk", () => {
   it("learns a birthday, a like, and a way of doing things", () => {
@@ -120,4 +124,131 @@ describe("text desk", () => {
     expect(bookingAllowed("Payment was asked for Acme. Nothing will be paid or booked.")).toBe(false);
     expect(bookingAllowed(extractQuote("Please pay by card now, the price is £50.").summary)).toBe(false);
   });
+
+  it("reads a call from the notes and offers a callback only after yes", async () => {
+    expect(callFollowUp("What did he say")).toBe("detail");
+    expect(callFollowUp("more")).toBe("detail");
+    expect(callFollowUp("details")).toBe("detail");
+    expect(callFollowUp("call him back")).toBe("callback");
+    expect(callFollowUp("call back")).toBe("callback");
+    expect(callFollowUp("yes")).toBeNull();
+
+    const kv = new Map<string, string>();
+    const env = deskEnv(kv);
+    const calls: string[] = [];
+    const texts: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url.includes("/Calls.json") && method === "POST") {
+        calls.push(String(init?.body ?? ""));
+        return new Response(JSON.stringify({ sid: "CA1234567890abcdef1234567890abcd" }), { status: 201 });
+      }
+      if (url.includes("/Messages.json") && method === "POST") {
+        texts.push(new URLSearchParams(String(init?.body ?? "")).get("Body") ?? "");
+        return new Response(JSON.stringify({ sid: "SMnote", status: "queued" }), { status: 201 });
+      }
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+    try {
+      await handleInboundSms(env, "+15557654321", "What did he say");
+      const note = texts.join(" ");
+      expect(note).not.toContain(CHAT_FALLBACK);
+      expect(note).toContain("boiler");
+      expect(note).toContain("+15550001111");
+      expect(note).not.toContain("Good evening");
+      expect(calls).toHaveLength(0);
+
+      texts.length = 0;
+      await handleInboundSms(env, "+15557654321", "call him back");
+      expect(texts.join(" ")).toContain("Reply yes");
+      expect(texts.join(" ").toLowerCase()).toContain("nothing is dialled");
+      expect(calls).toHaveLength(0);
+
+      texts.length = 0;
+      await handleInboundSms(env, "+15557654321", "yes");
+      expect(calls).toHaveLength(1);
+      expect(new URLSearchParams(calls[0]).get("To")).toBe("+15550001111");
+      expect(texts.join(" ")).toContain("calling Sohail back");
+
+      const alone = deskEnv(new Map());
+      const stray: string[] = [];
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/Calls.json")) stray.push(url);
+        if (url.includes("/Messages.json") && (init?.method ?? "GET") === "POST") {
+          return new Response(JSON.stringify({ sid: "SMnote", status: "queued" }), { status: 201 });
+        }
+        return new Response("{}", { status: 404 });
+      }) as typeof fetch;
+      await handleInboundSms(alone, "+15557654321", "yes");
+      expect(stray).toHaveLength(0);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
 });
+
+function deskEnv(kv: Map<string, string>): Env {
+  const message = {
+    call_id: "call_sohail",
+    caller_name: "Sohail",
+    summary: "Good evening.",
+    spoken: "Sir, Sohail rang at 02:41. Good evening.",
+    called_at: "2026-10-21T01:41:00.000Z",
+    transcript_json: JSON.stringify([
+      { role: "them", text: "Good evening." },
+      { role: "them", text: "The boiler is leaking. Please call me back on +15550001111." },
+    ]),
+    caller_phone: "+15550001111",
+  };
+  const db = {
+    prepare(sql: string) {
+      let bound: unknown[] = [];
+      const statement = {
+        bind(...args: unknown[]) {
+          bound = args;
+          return statement;
+        },
+        async first() {
+          if (sql.includes("runtime_state")) {
+            const value = kv.get(String(bound[0]));
+            return value == null ? null : { value };
+          }
+          if (sql.includes("call_messages")) return message;
+          if (sql.includes("call_settings")) return null;
+          if (sql.includes("outbound_calls")) return { transcript_json: message.transcript_json, worker_origin: "" };
+          return null;
+        },
+        async all() {
+          return { results: [], success: true, meta: {} };
+        },
+        async run() {
+          if (sql.includes("INSERT INTO runtime_state")) {
+            kv.set(String(bound[0]), String(bound[1]));
+            return { success: true, meta: { changes: 1 } };
+          }
+          if (sql.includes("UPDATE runtime_state") && sql.includes("sms_callback")) {
+            const current = kv.get("sms_callback") ?? "";
+            if (current && current === String(bound[2])) {
+              kv.set("sms_callback", "");
+              return { success: true, meta: { changes: 1 } };
+            }
+            return { success: true, meta: { changes: 0 } };
+          }
+          return { success: true, meta: { changes: 1 } };
+        },
+      };
+      return statement;
+    },
+  };
+  return {
+    JARVIS_APP_TOKEN: "secret-token",
+    OWNER_PHONE: "+15557654321",
+    TWILIO_ACCOUNT_SID: "AC123",
+    TWILIO_AUTH_TOKEN: "twilio-token",
+    TWILIO_FROM_NUMBER: "+15551230001",
+    DB: db as unknown as D1Database,
+  };
+}

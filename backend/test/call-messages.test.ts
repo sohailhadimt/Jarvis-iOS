@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { callPushCopy, rememberInboundMessage, spokenCallMessage } from "../src/call-messages";
+import { callPushCopy, callTextIsThin, deliverOwnerText, rememberInboundMessage, spokenCallMessage } from "../src/call-messages";
 import { sendSmsResult } from "../src/sms-desk";
 import { route } from "../src/routes";
 import type { Env } from "../src/types";
@@ -31,7 +31,13 @@ interface MessageRow {
   created_at: string;
 }
 
-function messageEnv(screens: ScreenRow[], calls: CallRow[], messages: MessageRow[], devices: string[] = []): Env {
+function messageEnv(
+  screens: ScreenRow[],
+  calls: CallRow[],
+  messages: MessageRow[],
+  devices: string[] = [],
+  kv: Map<string, string> = new Map(),
+): Env {
   const db = {
     prepare(sql: string) {
       const statement = {
@@ -41,7 +47,9 @@ function messageEnv(screens: ScreenRow[], calls: CallRow[], messages: MessageRow
           return this;
         },
         async run() {
-          if (sql.includes("INSERT INTO call_messages")) {
+          if (sql.includes("INSERT INTO runtime_state")) {
+            kv.set(String(this.args[0]), String(this.args[1]));
+          } else if (sql.includes("INSERT INTO call_messages")) {
             messages.push({
               id: String(this.args[0]),
               call_id: String(this.args[1]),
@@ -90,6 +98,10 @@ function messageEnv(screens: ScreenRow[], calls: CallRow[], messages: MessageRow
           return [];
         },
         async first() {
+          if (sql.includes("runtime_state")) {
+            const value = kv.get(String(this.args[0]));
+            return value == null ? null : { value };
+          }
           if (sql.includes("FROM call_screen")) {
             return screens.find((row) => row.call_id === String(this.args[0])) ?? null;
           }
@@ -125,14 +137,29 @@ function messageEnv(screens: ScreenRow[], calls: CallRow[], messages: MessageRow
 const bearer = { authorization: "Bearer secret-token" };
 
 describe("call messages", () => {
-  it("speaks the caller, the London time, and the reason without a phone number", () => {
+  it("speaks the caller, the London time, and a callback number", () => {
     const line = spokenCallMessage(
       "Sohil",
       "2026-10-20T10:06:00.000Z",
       "to check you're well and asked you to ring him back on +15550001111",
     );
-    expect(line).toBe("Sir, Sohil rang at 11:06. To check you're well and asked you to ring him back.");
-    expect(line).not.toContain("+1555");
+    expect(line).toBe("Sir, Sohil rang at 11:06. To check you're well and asked you to ring him back on +15550001111.");
+    expect(line).toContain("+15550001111");
+  });
+
+  it("skips a greeting and keeps the message in three short sentences", () => {
+    const line = spokenCallMessage(
+      "Sohail",
+      "2026-10-21T01:41:00.000Z",
+      "Good evening. The boiler is leaking. Please call me back on +15550001111.",
+    );
+    expect(line).toBe("Sir, Sohail rang at 02:41. The boiler is leaking. Please call me back on +15550001111.");
+    expect(line).not.toContain("Good evening");
+    expect(callTextIsThin("Sir, Sohail rang at 02:41. Good evening.")).toBe(true);
+    expect(callTextIsThin(line)).toBe(false);
+    const copy = callPushCopy("Sohail", "Sir, Sohail rang at 02:41. Good evening. The boiler is leaking.", line);
+    expect(copy.body).toBe("The boiler is leaking.");
+    expect(copy.body).not.toContain("Good evening");
   });
 
   it("stores an unread inbound message, texts it once, and marks it read", async () => {
@@ -358,6 +385,110 @@ describe("call messages", () => {
       expect(await rememberInboundMessage(env, "call_sms")).toBe(true);
       expect(bodies).toHaveLength(1);
       expect(new URLSearchParams(bodies[0] ?? "").get("Body")).toContain("The boiler is leaking.");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("does not text a call again when that body already went out", async () => {
+    const spoken = "Sir, Sohail rang at 02:41. Good evening.";
+    const kv = new Map<string, string>([
+      [
+        "owner_sms:cmsg_once",
+        JSON.stringify({
+          ok: false,
+          sid: "",
+          status: "401",
+          errorCode: "20003",
+          error: "refused",
+          spoken,
+        }),
+      ],
+    ]);
+    const messages: MessageRow[] = [
+      {
+        id: "cmsg_once",
+        call_id: "call_once",
+        caller_name: "Sohail",
+        summary: spoken,
+        spoken,
+        called_at: "2026-10-21T01:41:00.000Z",
+        read_at: null,
+        created_at: "2026-10-21T01:42:00.000Z",
+      },
+    ];
+    const env = messageEnv([], [], messages, [], kv);
+    let posts = 0;
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (String(input).includes("Messages.json") && method === "GET") {
+        return new Response(JSON.stringify({ messages: [{ body: spoken, direction: "outbound-api", status: "delivered", sid: "SMold" }] }), {
+          status: 200,
+        });
+      }
+      if (method === "POST") posts += 1;
+      return new Response("{}", { status: 201 });
+    }) as typeof fetch;
+    try {
+      const first = await deliverOwnerText(env, "call_once");
+      const second = await deliverOwnerText(env, "call_once");
+      expect(first.sent).toBe(false);
+      expect(second.sent).toBe(false);
+      expect(posts).toBe(0);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("sends one corrected body and then stops", async () => {
+    const previous = "Sir, Sohail rang at 02:41. Good evening.";
+    const spoken = "Sir, Sohail rang at 02:41. The boiler is leaking. Please call me back on +15550001111.";
+    const kv = new Map<string, string>([
+      [
+        "owner_sms:cmsg_fix",
+        JSON.stringify({ ok: false, sid: "", status: "401", errorCode: "20003", error: "refused", spoken: previous }),
+      ],
+    ]);
+    const messages: MessageRow[] = [
+      {
+        id: "cmsg_fix",
+        call_id: "call_fix",
+        caller_name: "Sohail",
+        summary: spoken,
+        spoken,
+        called_at: "2026-10-21T01:41:00.000Z",
+        read_at: null,
+        created_at: "2026-10-21T01:42:00.000Z",
+      },
+    ];
+    const env = messageEnv([], [], messages, [], kv);
+    const bodies: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (String(input).includes("Messages.json") && method === "GET") {
+        return new Response(
+          JSON.stringify({ messages: [{ body: previous, direction: "outbound-api", status: "delivered", sid: "SMold" }] }),
+          { status: 200 },
+        );
+      }
+      if (method === "POST") {
+        bodies.push(String(init?.body ?? ""));
+        return new Response(JSON.stringify({ sid: "SMcorrected", status: "queued" }), { status: 201 });
+      }
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+    try {
+      const blocked = await deliverOwnerText(env, "call_fix");
+      const sent = await deliverOwnerText(env, "call_fix", { correction: true });
+      const again = await deliverOwnerText(env, "call_fix", { correction: true });
+      expect(blocked.sent).toBe(false);
+      expect(sent.sent).toBe(true);
+      expect(sent.sid).toBe("SMcorrected");
+      expect(again.sent).toBe(false);
+      expect(bodies).toHaveLength(1);
+      expect(new URLSearchParams(bodies[0]).get("Body")).toBe(spoken);
     } finally {
       globalThis.fetch = original;
     }

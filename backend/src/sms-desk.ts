@@ -1,5 +1,5 @@
-import { isBlockedNumber, safeError, toE164 } from "./calls";
-import { dbAll, dbFirst, dbRun } from "./db";
+import { dialConfirm, isBlockedNumber, safeError, toE164 } from "./calls";
+import { dbAll, dbFirst, dbRun, getState, setState } from "./db";
 import { isRecord, json, newId, nowIso, apiError, asString } from "./http";
 import { CHAT_FALLBACK, completeChat, type ChatMessage } from "./llm";
 import { spokenAnswer } from "./live-answer";
@@ -128,6 +128,40 @@ export function smsBubbles(text: string): string[] {
     if (bubbles.length >= 3) break;
   }
   return bubbles.slice(0, 3);
+}
+
+const CALLBACK_KEY = "sms_callback";
+
+/** A reply about the latest call. "callback" offers a call and does not dial. */
+export function callFollowUp(text: string): "detail" | "callback" | null {
+  const clean = text
+    .toLowerCase()
+    .replace(/[?!.,'"’]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!clean) return null;
+  if (/\b(?:call|ring)\s+(?:him|her|them)\s+back\b/.test(clean) || /^(?:please\s+)?(?:call|ring)\s+back$/.test(clean)) {
+    return "callback";
+  }
+  if (
+    /^(?:more|details|more details|tell me more|what did (?:he|she|they) say|what was the message|what was that|what'?s the message)$/.test(
+      clean,
+    ) ||
+    /\bwhat did (?:he|she|they) say\b/.test(clean) ||
+    /\bwhat was the message\b/.test(clean)
+  ) {
+    return "detail";
+  }
+  return null;
+}
+
+function approvesPending(text: string): boolean {
+  const clean = text
+    .toLowerCase()
+    .replace(/[?!.,]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return /^(?:yes|yeah|yep|yup|approve|approved|go ahead|ok|okay|please do|do it)$/.test(clean);
 }
 
 export function wantsHunt(text: string): boolean {
@@ -469,7 +503,138 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
     await reply(env, phone, await draftSchedule(env, text));
     return;
   }
+  if (approvesPending(text)) {
+    const placed = await placeApprovedCallback(env);
+    if (placed) {
+      await reply(env, phone, placed);
+      return;
+    }
+  }
+  const follow = callFollowUp(text);
+  if (follow === "callback") {
+    await reply(env, phone, await offerCallback(env));
+    return;
+  }
+  if (follow === "detail") {
+    await reply(env, phone, await describeLatestCall(env));
+    return;
+  }
   await reply(env, phone, await chatReply(env, phone));
+}
+
+interface LatestCall {
+  call_id: string;
+  caller_name: string;
+  summary: string;
+  spoken: string;
+  called_at: string;
+  transcript_json: string | null;
+  caller_phone: string | null;
+}
+
+async function loadLatestCall(env: Env): Promise<LatestCall | null> {
+  return dbFirst<LatestCall>(
+    env,
+    `SELECT m.call_id, m.caller_name, m.summary, m.spoken, m.called_at,
+            c.transcript_json, s.caller_phone
+     FROM call_messages m
+     LEFT JOIN outbound_calls c ON c.id = m.call_id
+     LEFT JOIN call_screen s ON s.call_id = m.call_id
+     ORDER BY m.created_at DESC
+     LIMIT 1`,
+  ).catch(() => null);
+}
+
+async function describeLatestCall(env: Env): Promise<string> {
+  const row = await loadLatestCall(env);
+  if (!row) return "I don't have a recent call to read, Sir.";
+  const { callTextIsThin, spokenCallMessage, substantiveSentences } = await import("./call-messages");
+  const transcript = callerLines(row.transcript_json ?? "");
+  const excerpt = substantiveSentences(transcript, 2).join(" ");
+  let line = (row.spoken || "").trim();
+  if (!line || callTextIsThin(line)) {
+    line = spokenCallMessage(row.caller_name || "", row.called_at || "", excerpt || row.summary || "");
+  }
+  const snippet = excerpt.replace(/[.!?]+$/u, "").trim();
+  if (snippet && !line.toLowerCase().includes(snippet.slice(0, 24).toLowerCase())) {
+    line = `${line} He said: ${snippet}.`;
+  }
+  return line;
+}
+
+async function offerCallback(env: Env): Promise<string> {
+  const row = await loadLatestCall(env);
+  if (!row) return "I don't have a recent call to ring back, Sir. Nothing has been dialled.";
+  const { substantiveSentences } = await import("./call-messages");
+  const phone = callbackPhone(env, row);
+  const who = row.caller_name && row.caller_name !== "an unknown caller" ? row.caller_name : "them";
+  if (!phone) return `I don't have a number for ${who}, Sir. Nothing has been dialled.`;
+  const reason = substantiveSentences(`${row.summary} ${callerLines(row.transcript_json ?? "")}`, 1)[0] ?? "Calling you back.";
+  await setState(
+    env,
+    CALLBACK_KEY,
+    JSON.stringify({ call_id: row.call_id, name: who, phone, brief: reason }),
+  ).catch(() => undefined);
+  await queueApproval(env, "call_back", `Call ${who} back. Nothing is dialled until he says yes.`, "approval_required", {
+    call_id: row.call_id,
+  }).catch(() => undefined);
+  return `I can call ${who} back, Sir. Reply yes to approve it. Nothing is dialled yet.`;
+}
+
+async function placeApprovedCallback(env: Env): Promise<string | null> {
+  const raw = await getState(env, CALLBACK_KEY).catch(() => null);
+  if (!raw?.trim()) return null;
+  let pending: { name?: unknown; phone?: unknown; brief?: unknown };
+  try {
+    pending = JSON.parse(raw) as { name?: unknown; phone?: unknown; brief?: unknown };
+  } catch {
+    return null;
+  }
+  const phone = typeof pending.phone === "string" ? pending.phone : "";
+  if (!toE164(phone)) return null;
+  const changes = await dbRun(env, "UPDATE runtime_state SET value = '', updated_at = ? WHERE key = ? AND value = ?", [
+    nowIso(),
+    CALLBACK_KEY,
+    raw,
+  ]);
+  if (changes !== 1) return null;
+  const name = typeof pending.name === "string" && pending.name.trim() ? pending.name.trim() : "them";
+  const brief = typeof pending.brief === "string" && pending.brief.trim() ? pending.brief.trim() : "Calling you back.";
+  const placed = await dialConfirm(env, name, phone, brief);
+  if (!placed) return "I couldn't place that call, Sir. Nothing was dialled.";
+  return `I'm calling ${name} back now, Sir.`;
+}
+
+function callbackPhone(env: Env, row: LatestCall): string | null {
+  const blob = `${row.summary} ${row.spoken} ${callerLines(row.transcript_json ?? "")}`;
+  const stated = parsePhones(blob, 1)[0] ?? null;
+  const screen = row.caller_phone ? toE164(row.caller_phone) : null;
+  const ours = toE164(env.TWILIO_FROM_NUMBER ?? "");
+  const owner = toE164(env.OWNER_PHONE ?? "");
+  const phone = stated || screen;
+  if (!phone || phone === ours || phone === owner) return null;
+  return phone;
+}
+
+function callerLines(raw: string): string {
+  if (!raw) return "";
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return "";
+    const lines: string[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== "object") continue;
+      const record = item as { role?: unknown; text?: unknown; message?: unknown };
+      const role = record.role === "them" || record.role === "user" ? "them" : "assistant";
+      if (role !== "them") continue;
+      const text = typeof record.text === "string" ? record.text : typeof record.message === "string" ? record.message : "";
+      const clean = text.replace(/\s+/g, " ").trim();
+      if (clean) lines.push(clean);
+    }
+    return lines.join(" ");
+  } catch {
+    return "";
+  }
 }
 
 async function reply(env: Env, phone: string, text: string): Promise<void> {

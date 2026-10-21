@@ -45,13 +45,48 @@ export function messageClock(iso: string): string {
 }
 
 /**
- * Spoken line for one finished inbound call. Two sentences at most, no phone numbers,
- * and no ellipsis. The same text is what the app speaks and what the SMS sends.
+ * Spoken line for one finished inbound call. Up to three short sentences: who rang,
+ * what they wanted, and the message. Greetings and filler are left out. A callback
+ * number is kept when the caller gave one. The same text is what the app speaks and what the SMS sends.
  */
 export function spokenCallMessage(name: string, calledAtIso: string, summary: string): string {
   const who = callerLabel(name);
   const time = londonClock(calledAtIso);
   return butlerLine(who, time, summary);
+}
+
+/** A greeting or a filler noise, with no message behind it. */
+export function isGreetingOrFiller(sentence: string): boolean {
+  let text = sentence.replace(/[.!?]+$/gu, "").replace(/\s+/g, " ").trim();
+  text = text.replace(/^(?:um+|uh+|er+|ah+)[, ]+/i, "").trim();
+  if (!text) return true;
+  if (/^(?:um+|uh+|er+|ah+)$/i.test(text)) return true;
+  return /^(?:good\s+(?:morning|afternoon|evening|night|day)|hello|hi|hey|hiya|how are you|how're you|how is it going|how's it going)(?:[, ]+(?:sir|there))*$/i.test(
+    text,
+  );
+}
+
+/** Sentences that carry the message. The "Sir, … rang at …" lead and greetings are dropped. */
+export function substantiveSentences(text: string, limit = 2): string[] {
+  const kept: string[] = [];
+  for (const part of sentences(text)) {
+    if (/^sir,/i.test(part) && /\brang at\b/i.test(part)) continue;
+    if (isGreetingOrFiller(part)) continue;
+    let body = part.replace(/[.!?]+$/gu, "").trim();
+    body = body.replace(/^(?:um+|uh+|er+|ah+)[, ]+/i, "").trim();
+    if (!body || isGreetingOrFiller(body)) continue;
+    const sentence = `${body.charAt(0).toUpperCase()}${body.slice(1)}`;
+    kept.push(/[.!?]$/u.test(sentence) ? sentence : `${sentence}.`);
+    if (kept.length >= limit) break;
+  }
+  return kept;
+}
+
+/** True when the spoken line is only the lead, or the lead plus a greeting. */
+export function callTextIsThin(spoken: string): boolean {
+  const rest = sentences(spoken).filter((part) => !(/^sir,/i.test(part) && /\brang at\b/i.test(part)));
+  if (rest.length === 0) return true;
+  return rest.every((part) => isGreetingOrFiller(part));
 }
 
 /**
@@ -140,7 +175,7 @@ export function callPushCopy(name: string, spoken: string, summary: string): { t
   };
 }
 
-/** The one sentence that belongs in the notification, with no phone numbers and no ellipsis. */
+/** The one sentence that belongs in the notification. Greetings are skipped. */
 export function shortCallSummary(spoken: string, summary: string): string {
   const fromSpoken = secondSentence(spoken);
   if (fromSpoken) return clipNotice(fromSpoken);
@@ -160,7 +195,12 @@ export function shortCallSummary(spoken: string, summary: string): string {
  * and also when a token is registered but Apple did not accept the push.
  * A saved row is not treated as proof the text was sent. Opt-out (21610) is not retried.
  */
-export async function deliverOwnerText(env: Env, callId: string): Promise<OwnerText> {
+/**
+ * Texts the saved message once per call.
+ * A later rewrite of the wording does not send a second text.
+ * correction sends one replacement body for a call that was already texted, then stops.
+ */
+export async function deliverOwnerText(env: Env, callId: string, opts?: { correction?: boolean }): Promise<OwnerText> {
   const empty: OwnerText = { call_id: callId, message_id: "", sid: "", status: "", error_code: "", error: "no_message", sent: false };
   if (!/^call_[A-Za-z0-9]+$/.test(callId)) return { ...empty, error: "bad_call" };
   const message = await dbFirst<{ id: string; call_id: string; caller_name: string; summary: string; spoken: string }>(
@@ -170,7 +210,20 @@ export async function deliverOwnerText(env: Env, callId: string): Promise<OwnerT
   ).catch(() => null);
   if (!message?.spoken) return empty;
   const prior = await readReceipt(env, message.id);
-  if (prior && (prior.ok || prior.errorCode === "21610") && prior.spoken === message.spoken) {
+  const callMark = await readCallMark(env, callId);
+  const correction = opts?.correction === true;
+  if (!correction && (callMark?.ok || (prior && (prior.ok || prior.errorCode === "21610")))) {
+    return {
+      call_id: callId,
+      message_id: message.id,
+      sid: prior?.sid || callMark?.sid || "",
+      status: prior?.status || callMark?.status || "",
+      error_code: prior?.errorCode || "",
+      error: prior?.error || "",
+      sent: false,
+    };
+  }
+  if (correction && prior?.ok && prior.spoken === message.spoken) {
     return {
       call_id: callId,
       message_id: message.id,
@@ -181,36 +234,77 @@ export async function deliverOwnerText(env: Env, callId: string): Promise<OwnerT
       sent: false,
     };
   }
-  const pushed = await pushCallMessage(env, message);
-  if (pushed) {
-    await writeReceipt(env, message.id, message.spoken, { ok: true, sid: "", status: "pushed", errorCode: "", error: "" });
+  if (prior || correction) {
+    const listed = await listOutboundTexts(env);
+    if (!correction && prior && listed == null) {
+      return {
+        call_id: callId,
+        message_id: message.id,
+        sid: prior.sid,
+        status: prior.status,
+        error_code: prior.errorCode,
+        error: prior.error || "already_attempted",
+        sent: false,
+      };
+    }
+    const hit = listed ? textAlreadySent(listed, message.spoken, correction ? "" : (prior?.spoken ?? ""), correction) : null;
+    if (hit) {
+      const spoken = hit.body === message.spoken.trim() ? message.spoken : hit.body;
+      await writeReceipt(env, message.id, spoken, { ok: true, sid: hit.sid, status: hit.status || "delivered", errorCode: "", error: "" });
+      await writeCallMark(env, callId, spoken, hit.sid, hit.status || "delivered");
+      return {
+        call_id: callId,
+        message_id: message.id,
+        sid: hit.sid,
+        status: hit.status || "delivered",
+        error_code: "",
+        error: "",
+        sent: false,
+      };
+    }
+  }
+  if (!correction) {
+    const pushed = await pushCallMessage(env, message);
+    if (pushed) {
+      await writeReceipt(env, message.id, message.spoken, { ok: true, sid: "", status: "pushed", errorCode: "", error: "" });
+      await writeCallMark(env, callId, message.spoken, "", "pushed");
+      return {
+        call_id: callId,
+        message_id: message.id,
+        sid: "",
+        status: "pushed",
+        error_code: "",
+        error: "",
+        sent: false,
+      };
+    }
+  }
+  const claimed = await claimSendLock(env, callId);
+  if (!claimed) {
+    return { ...empty, message_id: message.id, error: "sending", sent: false };
+  }
+  try {
+    const owner = await readOwnerMobile(env);
+    if (!owner) {
+      const missed: OwnerText = { ...empty, message_id: message.id, error: "owner_number" };
+      await writeReceipt(env, message.id, message.spoken, { ok: false, sid: "", status: "", errorCode: "", error: "owner_number" });
+      return missed;
+    }
+    const result = await sendSmsResult(env, owner, message.spoken);
+    await writeReceipt(env, message.id, message.spoken, result);
+    if (result.ok) await writeCallMark(env, callId, message.spoken, result.sid, result.status);
     return {
       call_id: callId,
       message_id: message.id,
-      sid: "",
-      status: "pushed",
-      error_code: "",
-      error: "",
-      sent: false,
+      sid: result.sid,
+      status: result.status,
+      error_code: result.errorCode,
+      error: result.error,
+      sent: result.ok,
     };
+  } finally {
+    await releaseSendLock(env, callId);
   }
-  const owner = await readOwnerMobile(env);
-  if (!owner) {
-    const missed: OwnerText = { ...empty, message_id: message.id, error: "owner_number" };
-    await writeReceipt(env, message.id, message.spoken, { ok: false, sid: "", status: "", errorCode: "", error: "owner_number" });
-    return missed;
-  }
-  const result = await sendSmsResult(env, owner, message.spoken);
-  await writeReceipt(env, message.id, message.spoken, result);
-  return {
-    call_id: callId,
-    message_id: message.id,
-    sid: result.sid,
-    status: result.status,
-    error_code: result.errorCode,
-    error: result.error,
-    sent: result.ok,
-  };
 }
 
 interface SmsReceipt {
@@ -251,6 +345,105 @@ async function writeReceipt(env: Env, messageId: string, spoken: string, result:
     spoken,
   };
   await setState(env, `owner_sms:${messageId}`, JSON.stringify(receipt)).catch(() => undefined);
+}
+
+interface CallMark {
+  ok: boolean;
+  sid: string;
+  status: string;
+  spoken: string;
+}
+
+async function readCallMark(env: Env, callId: string): Promise<CallMark | null> {
+  const raw = await getState(env, `owner_sms_call:${callId}`).catch(() => null);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<CallMark>;
+    return {
+      ok: parsed.ok === true,
+      sid: typeof parsed.sid === "string" ? parsed.sid : "",
+      status: typeof parsed.status === "string" ? parsed.status : "",
+      spoken: typeof parsed.spoken === "string" ? parsed.spoken : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function writeCallMark(env: Env, callId: string, spoken: string, sid: string, status: string): Promise<void> {
+  const mark: CallMark = { ok: true, sid, status, spoken };
+  await setState(env, `owner_sms_call:${callId}`, JSON.stringify(mark)).catch(() => undefined);
+}
+
+interface ListedText {
+  body: string;
+  sid: string;
+  status: string;
+}
+
+/** Recent outbound texts. Null means the list could not be read, which is not the same as an empty list. */
+async function listOutboundTexts(env: Env): Promise<ListedText[] | null> {
+  const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
+  const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
+  if (!account || !token) return null;
+  try {
+    const response = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Messages.json?PageSize=100`,
+      {
+        method: "GET",
+        redirect: "follow",
+        signal: AbortSignal.timeout(10_000),
+        headers: { authorization: `Basic ${btoa(`${account}:${token}`)}` },
+      },
+    );
+    if (!response.ok) return null;
+    const parsed = JSON.parse(await response.text()) as { messages?: unknown };
+    if (!Array.isArray(parsed.messages)) return null;
+    const listed: ListedText[] = [];
+    for (const item of parsed.messages) {
+      if (!item || typeof item !== "object") continue;
+      const record = item as { body?: unknown; sid?: unknown; status?: unknown; direction?: unknown };
+      const direction = typeof record.direction === "string" ? record.direction : "";
+      if (direction && !direction.startsWith("outbound")) continue;
+      const status = typeof record.status === "string" ? record.status : "";
+      if (status === "failed" || status === "undelivered") continue;
+      const body = typeof record.body === "string" ? record.body.trim() : "";
+      if (!body) continue;
+      listed.push({ body, sid: typeof record.sid === "string" ? record.sid : "", status });
+    }
+    return listed;
+  } catch {
+    return null;
+  }
+}
+
+function textAlreadySent(listed: ListedText[], spoken: string, priorSpoken: string, correction: boolean): ListedText | null {
+  const current = spoken.trim();
+  const previous = priorSpoken.trim();
+  const lead = sentences(current)[0]?.trim() ?? "";
+  for (const item of listed) {
+    if (item.body === current || (previous && item.body === previous)) return item;
+    if (correction) continue;
+    if (lead.length > 12 && item.body.includes(lead)) return item;
+  }
+  return null;
+}
+
+async function claimSendLock(env: Env, callId: string): Promise<boolean> {
+  const now = nowIso();
+  const stale = new Date(Date.now() - 120_000).toISOString();
+  const changes = await dbRun(
+    env,
+    `INSERT INTO runtime_state (key, value, updated_at) VALUES (?, 'sending', ?)
+     ON CONFLICT(key) DO UPDATE SET value = 'sending', updated_at = excluded.updated_at
+     WHERE runtime_state.value != 'sending' OR runtime_state.updated_at < ?`,
+    [`owner_sms_lock:${callId}`, now, stale],
+  ).catch(() => 0);
+  return changes === 1;
+}
+
+async function releaseSendLock(env: Env, callId: string): Promise<void> {
+  await setState(env, `owner_sms_lock:${callId}`, "idle").catch(() => undefined);
 }
 
 export async function listCallMessages(env: Env, url: URL): Promise<Response> {
@@ -412,7 +605,6 @@ function junkCaller(name: string): boolean {
 function tidyDetail(summary: string): string {
   let text = summary.replace(/^call summary:\s*/i, "").replace(/^they left a message:\s*/i, "");
   text = text.replace(/…+/g, " ").replace(/\.{3,}/g, " ");
-  text = text.replace(/\+\d{6,}/g, " ");
   text = text.replace(/\s+/g, " ").trim();
   if (!text) return "";
   if (/\b(typeerror|syntaxerror|referenceerror|network connection|status code)\b/i.test(text)) return "";
@@ -426,23 +618,17 @@ function tidyDetail(summary: string): string {
 
 function butlerLine(who: string, time: string, summary: string): string {
   const lead = `Sir, ${who} rang at ${time}.`;
-  const second = secondSentence(summary);
-  const line = second ? `${lead} ${second}` : lead;
+  const extra = substantiveSentences(summary, 2);
+  const line = [lead, ...extra].join(" ");
   return fitSentences(line, 320);
 }
 
 function secondSentence(summary: string): string {
-  let text = summary.replace(/…+/g, " ").replace(/\.{3,}/g, " ");
-  text = text.replace(/\+\d[\d\s()-]{5,}/g, " ").replace(/\s+/g, " ").trim();
-  text = text.replace(/\s+on$/i, "").trim();
+  let text = summary.replace(/…+/g, " ").replace(/\.{3,}/g, " ").replace(/\s+/g, " ").trim();
   if (!text || /^a caller left a message\.?$/i.test(text)) return "";
   if (/\b(typeerror|syntaxerror|referenceerror|network connection|status code)\b/i.test(text)) return "";
   if (/^(the user|the caller|analysis)\b/i.test(text) || /\bidentified as\b/i.test(text)) return "";
-  const parts = sentences(text);
-  const body = parts.length >= 2 && /^sir,/i.test(parts[0]) ? parts[1] : /^sir,/i.test(parts[0] ?? "") ? "" : (parts[0] ?? "");
-  const clean = body.replace(/[.!?]+$/u, "").trim();
-  if (!clean) return "";
-  return `${clean.charAt(0).toUpperCase()}${clean.slice(1)}.`;
+  return substantiveSentences(text, 1)[0] ?? "";
 }
 
 function sentences(text: string): string[] {
@@ -452,15 +638,14 @@ function sentences(text: string): string[] {
 
 function fitSentences(line: string, max: number): string {
   const parts = sentences(line)
-    .slice(0, 2)
+    .slice(0, 3)
     .map((part) => part.replace(/…/g, "").trim())
     .filter(Boolean);
+  while (parts.length > 1 && parts.join(" ").length > max) parts.pop();
   let text = parts.join(" ").replace(/\s+/g, " ").trim().replace(/…/g, "");
   if (text && !/[.!?]$/u.test(text)) text += ".";
   if (text.length <= max) return text;
-  const first = parts[0] ?? "";
-  if (first && first.length <= max) return /[.!?]$/u.test(first) ? first : `${first}.`;
-  const cut = first.slice(0, Math.max(0, max - 1));
+  const cut = text.slice(0, Math.max(0, max - 1));
   const space = cut.lastIndexOf(" ");
   const base = (space > 20 ? cut.slice(0, space) : cut).replace(/[,:;]$/u, "").trim();
   return /[.!?]$/u.test(base) ? base : `${base}.`;
