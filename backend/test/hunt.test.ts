@@ -33,11 +33,12 @@ describe("shop around", () => {
     resetHuntClock();
   });
 
-  it("speaks as J.A.R.V.I.S. for Sohail and only cites a real offer", () => {
+  it("speaks as J.A.R.V.I.S. for Master Hadi and only cites a real offer", () => {
     const first = outboundOpening(quoteBrief("a boiler service", null));
-    expect(first).toContain("Hello, this is J.A.R.V.I.S., calling on behalf of Sohail.");
+    expect(first).toContain("Hello, this is J.A.R.V.I.S., calling on behalf of Master Hadi.");
     expect(first).toContain("I'm calling to ask:");
-    expect(first.toLowerCase()).toContain("sohail will confirm");
+    expect(first.toLowerCase()).toContain("master hadi will confirm");
+    expect(first).not.toMatch(/\bSohail\b/);
     expect(first.toLowerCase()).toContain("do not invent");
     expect(first).not.toContain("£");
     expect(first.toLowerCase()).not.toContain("who's calling");
@@ -59,9 +60,9 @@ describe("shop around", () => {
 
     const booking = outboundOpening(bookBrief("Acme", "Tuesday at 2pm"));
     expect(booking).toContain("J.A.R.V.I.S.");
-    expect(booking).toContain("Sohail");
+    expect(booking).toContain("Master Hadi");
     expect(booking.toLowerCase()).toContain("make a booking");
-    expect(booking.toLowerCase()).not.toContain("master hadi");
+    expect(booking).not.toMatch(/\bSohail\b/);
     expect(booking.toLowerCase()).toContain("do not take a card");
   });
 
@@ -184,11 +185,11 @@ describe("shop around", () => {
       expect(hunt?.status).toBe("booking");
       const bookingBrief = (await column(env, "outbound_calls", "brief")).at(-1) ?? "";
       expect(bookingBrief.toLowerCase()).toContain("make a booking");
-      expect(bookingBrief).toContain("Sohail");
-      expect(bookingBrief.toLowerCase()).not.toContain("master hadi");
+      expect(bookingBrief).toContain("Master Hadi");
+      expect(bookingBrief).not.toMatch(/\bSohail\b/);
 
       const booked = (await quotes(env)).find((quote) => quote.business === "Acme");
-      await finishCall(env, booked?.book_call_id ?? "", "Tuesday at 9 is held for Sohail.");
+      await finishCall(env, booked?.book_call_id ?? "", "Tuesday at 9 is held for Master Hadi.");
       await noteQuote(env, booked?.book_call_id ?? "");
       const done = await one(env, "SELECT status FROM call_hunts WHERE id = ?", created.id);
       expect(done?.status).toBe("booked");

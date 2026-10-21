@@ -21,7 +21,8 @@ describe("live question relay", () => {
 
   it("states the outbound reason and keeps a separate owner-call line", () => {
     expect(outboundOpening("I'm busy")).toContain("The reason for this call is: I'm busy.");
-    expect(outboundOpening("I'm busy")).toContain("calling on behalf of Sohail");
+    expect(outboundOpening("I'm busy")).toContain("calling on behalf of Master Hadi");
+    expect(outboundOpening("I'm busy")).not.toMatch(/\bSohail\b/);
     const line = ownerSummaryLine("A task failed and needs you.");
     expect(line.startsWith("Hello, this is JARVIS.")).toBe(true);
     expect(line).not.toContain("has asked me to tell you");

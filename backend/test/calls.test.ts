@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { outboundPollySystem } from "../src/outbound-speech";
 import { route } from "../src/routes";
 import {
   FALLBACK_SAY_VOICE,
   INBOUND_GREETING,
   JARVIS_VOICE_ID,
   OUTBOUND_INTRO,
+  OUTBOUND_PERSONA,
   agentScript,
   approvedScreening,
   delegatedBrief,
@@ -278,12 +280,20 @@ describe("phone numbers and the call script", () => {
     const script = agentScript("Ada", brief);
     const opening = outboundOpening("the meeting moved to four");
     expect(opening).toBe(`${OUTBOUND_INTRO} The reason for this call is: the meeting moved to four.`);
-    expect(opening).toContain("calling on behalf of Sohail");
+    expect(opening).toContain("calling on behalf of Master Hadi");
+    expect(opening).not.toMatch(/\bSohail\b/);
     expect(opening).not.toMatch(/who'?s calling/i);
+    expect(script).toContain(OUTBOUND_PERSONA);
     expect(script).toContain(outboundOpening(brief));
-    expect(script).toContain("Never claim to be Sohail or Master Hadi");
+    expect(script).toContain("Never claim to be Master Hadi");
+    expect(script).toContain("Never call him Sohail");
+    expect(script).not.toContain("on behalf of Sohail");
     expect(script).toContain("Do not ask who is calling");
     expect(script).toContain("Then stop and listen.");
+    const polly = outboundPollySystem("Ada", brief);
+    expect(polly).toContain(OUTBOUND_PERSONA);
+    expect(polly).toContain("Never call him Sohail");
+    expect(polly).not.toContain("on behalf of Sohail");
   });
 
   it("speaks an SMS ask as a question and a tell as a message", () => {
@@ -295,7 +305,9 @@ describe("phone numbers and the call script", () => {
     );
     expect(opening).not.toMatch(/who'?s calling/i);
     const told = outboundOpening(delegatedBrief("tell", "the gate is open"));
-    expect(told).toContain("I'm calling to pass on a message: the gate is open.");
+    expect(told).toContain("calling on behalf of Master Hadi");
+    expect(told).toContain("He asked me to pass on a message: the gate is open.");
+    expect(told).not.toMatch(/\bSohail\b/);
     const booked = outboundOpening("Book a table for two at eight");
     expect(booked).toContain("I'm calling to make a booking: a table for two at eight.");
   });
@@ -645,7 +657,8 @@ describe("Twilio webhooks", () => {
       expect(xml).toContain('language="en-GB"');
       expect(xml).toContain("<Gather");
       expect(xml).toContain('timeout="5"');
-      expect(xml).toContain("calling on behalf of Sohail");
+      expect(xml).toContain("calling on behalf of Master Hadi");
+      expect(xml).not.toMatch(/\bSohail\b/);
       expect(xml).toContain("The reason for this call is: the meeting moved to four.");
       expect(xml).not.toMatch(/who'?s calling/i);
       expect(xml).not.toContain("<Connect>");
@@ -1139,7 +1152,11 @@ describe("Twilio webhooks", () => {
       expect(initiation.dynamic_variables?.brief).toBe(brief);
       expect(initiation.dynamic_variables?.opening_line).toBe(opening);
       expect(initiation.conversation_config_override?.agent?.first_message).toBe(opening);
+      expect(initiation.conversation_config_override?.agent?.first_message).toContain("Master Hadi");
+      expect(initiation.conversation_config_override?.agent?.first_message).not.toMatch(/\bSohail\b/);
       expect(initiation.conversation_config_override?.agent?.first_message).not.toMatch(/who'?s calling/i);
+      expect(initiation.conversation_config_override?.agent?.prompt?.prompt).toContain(OUTBOUND_PERSONA);
+      expect(initiation.conversation_config_override?.agent?.prompt?.prompt).not.toContain("on behalf of Sohail");
       expect(initiation.conversation_config_override?.agent?.prompt?.prompt).toContain(brief);
       expect(initiation.conversation_config_override?.agent?.prompt?.prompt).toContain("Do not ask who is calling");
       expect(initiation.conversation_config_override?.tts?.voice_id).toBe(JARVIS_VOICE_ID);

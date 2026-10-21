@@ -13,7 +13,7 @@ const OPEN_MINUTE = 8 * 60;
 const CLOSE_MINUTE = 21 * 60;
 
 const QUOTE_ASK =
-  "Your price, when you are next free, and your terms. Sohail will confirm later. Do not take a booking and do not take a card or a payment.";
+  "Your price, when you are next free, and your terms. Master Hadi will confirm later. Do not take a booking and do not take a card or a payment.";
 
 export interface QuoteRead {
   price: string;
@@ -125,7 +125,7 @@ export function extractQuote(text: string): QuoteRead {
     .replace(/do not take a card[^.?!]*/gi, " ")
     .replace(/do not take a payment[^.?!]*/gi, " ")
     .replace(/he will pay you directly[^.?!]*/gi, " ")
-    .replace(/s?he will confirm later[^.?!]*/gi, " ")
+    .replace(/(?:master hadi|s?he) will confirm later[^.?!]*/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
   const feeMatch = /(?:call[- ]?out|callout|fee|fees)\s*(?:is|of|:)?\s*(£\s?\d+(?:\.\d{2})?|\d+(?:\.\d{2})?\s*(?:pounds|gbp))/i.exec(cleaned);
@@ -164,7 +164,7 @@ export function quoteBrief(goal: string, offer: CompetingOffer | null): string {
 export function bookBrief(business: string, when: string): string {
   const slot = when.trim() ? ` for ${clip(when, 60)}` : "";
   const name = clip(business, 60) || "the business";
-  return `I'm calling to make a booking${slot} with ${name} for Sohail. Please hold that slot. He will confirm and he will pay you directly. Do not take a card or a payment on this call.`;
+  return `I'm calling to make a booking${slot} with ${name} for Master Hadi. Please hold that slot. He will confirm and he will pay you directly. Do not take a card or a payment on this call.`;
 }
 
 export function comparisonMessage(
