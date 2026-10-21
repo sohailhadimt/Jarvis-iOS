@@ -1,0 +1,176 @@
+name: One approved voice test call
+
+# Manual only. Places a single outbound call, then polls it. Never runs on push.
+on:
+  workflow_dispatch:
+    inputs:
+      approved_to:
+        description: E.164 destination already approved for this one call
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  call:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+      TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+      TWILIO_FROM_NUMBER: ${{ secrets.TWILIO_FROM_NUMBER }}
+      OWNER_PHONE: ${{ secrets.OWNER_PHONE }}
+      JARVIS_APP_TOKEN: ${{ secrets.JARVIS_APP_TOKEN }}
+      APPROVED_TO: ${{ inputs.approved_to }}
+      EXPECTED_FROM: "+447454037416"
+    steps:
+      - name: Place one call and report its SID
+        run: |
+          set -euo pipefail
+          if [ -n "${APPROVED_TO}" ]; then
+            echo "::add-mask::${APPROVED_TO}"
+          fi
+          if [ -n "${OWNER_PHONE}" ]; then
+            echo "::add-mask::${OWNER_PHONE}"
+          fi
+          node --input-type=module <<'NODE'
+          const expectedFrom = process.env.EXPECTED_FROM;
+          const worker = "https://jarvis-backend.jarvis-hadi.workers.dev";
+
+          function e164(input) {
+            const raw = String(input || "").trim();
+            if (!raw) return "";
+            let digits = raw.replace(/[^\d+]/g, "");
+            if (digits.startsWith("00")) digits = digits.slice(2);
+            if (digits.startsWith("+")) digits = digits.slice(1);
+            if (digits.startsWith("0") && digits.length >= 10 && digits.length <= 11) digits = `44${digits.slice(1)}`;
+            if (!/^\d{10,15}$/.test(digits)) return "";
+            return `+${digits}`;
+          }
+
+          function redact(value) {
+            return String(value || "")
+              .replace(/\+\d[\d\s().-]{6,}/g, "[number]")
+              .replace(/\b0\d{9,10}\b/g, "[number]");
+          }
+
+          function say(payload) {
+            console.log(JSON.stringify(payload));
+          }
+
+          const account = (process.env.TWILIO_ACCOUNT_SID || "").trim();
+          const token = (process.env.TWILIO_AUTH_TOKEN || "").trim();
+          const appToken = (process.env.JARVIS_APP_TOKEN || "").trim();
+          const from = e164(process.env.TWILIO_FROM_NUMBER);
+          const owner = e164(process.env.OWNER_PHONE);
+          const approved = e164(process.env.APPROVED_TO);
+
+          if (!account || !token || !appToken) {
+            say({ result: "not_placed", reason: "missing_secret" });
+            process.exit(1);
+          }
+          if (!/^AC[0-9a-f]{32}$/i.test(account) || from !== expectedFrom || !approved || owner !== approved) {
+            say({
+              result: "not_placed",
+              reason: "number_check_failed",
+              account_ok: /^AC[0-9a-f]{32}$/i.test(account),
+              from_ok: from === expectedFrom,
+              owner_matches_approved: Boolean(approved) && owner === approved,
+            });
+            process.exit(1);
+          }
+
+          const auth = "Basic " + Buffer.from(`${account}:${token}`).toString("base64");
+
+          async function twilioCalls() {
+            const url = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls.json?PageSize=20`;
+            const response = await fetch(url, { headers: { authorization: auth } });
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok) {
+              return { ok: false, status: response.status, code: body.code ?? null, message: redact(body.message || "") };
+            }
+            const calls = Array.isArray(body.calls) ? body.calls : [];
+            return {
+              ok: true,
+              calls: calls.filter((item) => e164(item.from) === from && e164(item.to) === approved),
+            };
+          }
+
+          const before = await twilioCalls();
+          if (!before.ok) {
+            say({ result: "not_placed", reason: "twilio_list_failed", http: before.status, code: before.code, message: before.message });
+            process.exit(1);
+          }
+          const beforeIds = new Set(before.calls.map((item) => item.sid));
+
+          const response = await fetch(`${worker}/calls/outbound`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${appToken}`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              to: approved,
+              contact_name: "Sohail",
+              purpose: "Good morning, Sir. Voice is back online and JARVIS can call out.",
+              approved: true,
+            }),
+          });
+          const placed = await response.json().catch(() => ({}));
+          const call = placed.call || {};
+          if (!response.ok && response.status !== 201) {
+            const after = await twilioCalls();
+            const created = after.ok ? after.calls.filter((item) => !beforeIds.has(item.sid)) : [];
+            if (!created.length) {
+              say({
+                result: "not_placed",
+                worker_http: response.status,
+                worker_code: placed.error && placed.error.code ? placed.error.code : "",
+                worker_error: redact(call.error || (placed.error && placed.error.message) || ""),
+              });
+              process.exit(1);
+            }
+          }
+
+          let sid = "";
+          let status = call.status || "";
+          let errorCode = null;
+          let errorMessage = redact(call.error || "");
+          for (let attempt = 0; attempt < 8 && !sid; attempt++) {
+            const listed = await twilioCalls();
+            if (!listed.ok) break;
+            const created = listed.calls.filter((item) => !beforeIds.has(item.sid));
+            created.sort((a, b) => Date.parse(b.date_created || 0) - Date.parse(a.date_created || 0));
+            if (created[0]) {
+              sid = created[0].sid;
+              status = created[0].status;
+              errorCode = created[0].error_code;
+              errorMessage = redact(created[0].error_message || errorMessage);
+              break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+          }
+          if (!sid) {
+            say({ result: "worker_accepted_sid_missing", worker_http: response.status, app_status: status, error: errorMessage });
+            process.exit(1);
+          }
+
+          const terminal = new Set(["completed", "failed", "busy", "no-answer", "canceled"]);
+          const deadline = Date.now() + 150_000;
+          while (!terminal.has(status) && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 5000));
+            const got = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls/${encodeURIComponent(sid)}.json`, {
+              headers: { authorization: auth },
+            });
+            const row = await got.json().catch(() => ({}));
+            if (!got.ok) {
+              say({ result: "placed", sid, status, error_code: errorCode, poll_http: got.status, poll_code: row.code ?? null, poll_message: redact(row.message || "") });
+              process.exit(0);
+            }
+            status = row.status || status;
+            errorCode = row.error_code;
+            errorMessage = redact(row.error_message || "");
+          }
+          say({ result: "placed", sid, status, error_code: errorCode, error_message: errorMessage, final: terminal.has(status) });
+          NODE
