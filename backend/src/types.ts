@@ -68,7 +68,7 @@ export interface Env {
   ELEVENLABS_API_KEY?: string;
   ELEVENLABS_AGENT_ID?: string;
   ELEVENLABS_WEBHOOK_SECRET?: string;
-  /** Set to "true" to send conversation_config_override on register-call. Off by default. */
+  /** Set to "true" to send conversation_config_override on inbound register-call. Outbound always sends it. */
   ELEVENLABS_CALL_OVERRIDES?: string;
   /**
    * When "true", "1", "yes", or "on", inbound calls skip ElevenLabs and use

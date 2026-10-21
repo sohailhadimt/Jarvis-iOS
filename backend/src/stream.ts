@@ -386,6 +386,10 @@ async function bridgeCall(twilio: WebSocket, env: Env, callId: string): Promise<
     if (next.kind === "error") {
       if (overrides && !retried && /override/i.test(next.reason)) {
         retried = true;
+        if (first !== FALLBACK_GREETING) {
+          void failOpen("override_not_allowed", next.reason);
+          return;
+        }
         overrides = false;
         agent.send(initiationMessage({ callId, first, prompt, overrides: false }));
         return;

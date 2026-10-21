@@ -1,4 +1,4 @@
-import { dialConfirm, isBlockedNumber, safeError, toE164 } from "./calls";
+import { delegatedBrief, dialConfirm, isBlockedNumber, safeError, toE164 } from "./calls";
 import { dbAll, dbFirst, dbRun, getState, setState } from "./db";
 import { isRecord, json, newId, nowIso, apiError, asString } from "./http";
 import { CHAT_FALLBACK, completeChat, type ChatMessage } from "./llm";
@@ -745,7 +745,7 @@ async function placeApprovedOutbound(env: Env, owner: string): Promise<string | 
   ]);
   if (changes !== 1) return null;
   const name = typeof pending.name === "string" && pending.name.trim() ? pending.name.trim() : "them";
-  const brief = verb === "tell" ? `Tell them ${purpose}.` : purpose;
+  const brief = delegatedBrief(verb, purpose);
   const placed = await dialConfirm(env, name, phone, brief);
   if (!placed) return "I couldn't place that call, Sir. Nothing was dialled.";
   await rememberSmsOutcome(env, placed, owner, name);

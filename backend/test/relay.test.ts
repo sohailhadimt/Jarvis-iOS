@@ -19,8 +19,9 @@ describe("live question relay", () => {
     expect(approvedScreening("He is free after four.")).toContain('say exactly: "One moment please."');
   });
 
-  it("keeps the asked-me opening and a separate owner-call line", () => {
-    expect(outboundOpening("I'm busy")).toContain("Master Hadi has asked me to tell you I'm busy.");
+  it("states the outbound reason and keeps a separate owner-call line", () => {
+    expect(outboundOpening("I'm busy")).toContain("The reason for this call is: I'm busy.");
+    expect(outboundOpening("I'm busy")).toContain("calling on behalf of Sohail");
     const line = ownerSummaryLine("A task failed and needs you.");
     expect(line.startsWith("Hello, this is JARVIS.")).toBe(true);
     expect(line).not.toContain("has asked me to tell you");
