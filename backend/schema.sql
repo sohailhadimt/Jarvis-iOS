@@ -440,8 +440,10 @@ CREATE TABLE IF NOT EXISTS call_quotes (
   price TEXT,
   availability TEXT,
   fees TEXT,
+  terms TEXT,
   summary TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL,
+  book_call_id TEXT,
   created_at TEXT NOT NULL
 );
 

@@ -1640,6 +1640,7 @@ final class AssistantEngine {
             return
         }
 
+        if await handleShopAround(text) { return }
         if await resolveCallChoice(text) { return }
         if await handleLocalCall(text) { return }
         callChoices = []
@@ -2090,6 +2091,14 @@ final class AssistantEngine {
         Task { await self.sendHuntChoice(huntID, quoteID) }
     }
 
+    func startShop(_ huntID: String) {
+        Task { await self.sendShopStart(huntID) }
+    }
+
+    func removeShopQuote(_ huntID: String, quoteID: String) {
+        Task { await self.sendShopRemoval(huntID, quoteID) }
+    }
+
     func refreshPairing() {
         Task { await self.loadPairing(refresh: true) }
     }
@@ -2141,13 +2150,81 @@ final class AssistantEngine {
 
     private func sendHuntChoice(_ huntID: String, _ quoteID: String) async {
         guard let client = try? JarvisCloudAPI.client() else { return }
-        let accepted = await client.chooseHunt(huntID: huntID, quoteID: quoteID)
-        statusLine = accepted
-            ? "That's waiting for your approval, Sir. Nothing has been paid."
-            : "I couldn't hold that one, Sir."
+        statusLine = await client.chooseHunt(huntID: huntID, quoteID: quoteID) ?? "I couldn't hold that one, Sir."
         if let rows = try? await client.callHunts() {
             hunts = rows
         }
+    }
+
+    private func sendShopStart(_ huntID: String) async {
+        guard let client = try? JarvisCloudAPI.client() else { return }
+        statusLine = (try? await client.startShop(huntID: huntID)) ?? "I couldn't start those calls, Sir."
+        if let rows = try? await client.callHunts() {
+            hunts = rows
+        }
+    }
+
+    private func sendShopRemoval(_ huntID: String, _ quoteID: String) async {
+        guard let client = try? JarvisCloudAPI.client() else { return }
+        guard let hunt = hunts.first(where: { $0.id == huntID }) else { return }
+        let providers = hunt.quotes.filter { $0.id != quoteID }.map { ["business": $0.business, "phone": $0.phone] }
+        statusLine = (try? await client.replaceShop(huntID: huntID, providers: providers)) ?? "I couldn't change that list, Sir."
+        if let rows = try? await client.callHunts() {
+            hunts = rows
+        }
+    }
+
+    /// Quotes from chat use the same worker list as a text. Nothing is rung until the list is started.
+    private func handleShopAround(_ text: String) async -> Bool {
+        if ShopAround.approves(text), let hunt = hunts.first(where: { $0.status == "comparing" }) {
+            let quote = hunt.quotes.first { $0.id == hunt.recommendedId && $0.status == "quoted" }
+                ?? hunt.quotes.first { $0.status == "quoted" }
+            guard let quote else { return false }
+            guard let client = try? JarvisCloudAPI.client() else {
+                await sayShop("The JARVIS cloud isn't configured. Add the backend URL and app token in Settings, JARVIS Cloud.", userText: text)
+                return true
+            }
+            let message = await client.chooseHunt(huntID: hunt.id, quoteID: quote.id) ?? "I couldn't hold that one, Sir."
+            if let rows = try? await client.callHunts() { hunts = rows }
+            await sayShop(message, userText: text)
+            return true
+        }
+        let draft = hunts.first { $0.status == "draft" }
+        let editing = draft != nil && (ShopAround.confirms(text) || (!ShopAround.phones(in: text).isEmpty && !ShopAround.matches(text)))
+        guard ShopAround.matches(text) || editing else { return false }
+        guard let client = try? JarvisCloudAPI.client() else {
+            await sayShop("The JARVIS cloud isn't configured. Add the backend URL and app token in Settings, JARVIS Cloud.", userText: text)
+            return true
+        }
+        let message: String
+        if let draft, ShopAround.confirms(text) {
+            message = (try? await client.startShop(huntID: draft.id)) ?? "I couldn't start those calls, Sir."
+        } else if let draft, !ShopAround.phones(in: text).isEmpty, !ShopAround.matches(text) {
+            message = (try? await client.replaceShop(huntID: draft.id, providers: ShopAround.providers(in: text))) ?? "I couldn't change that list, Sir."
+        } else {
+            let providers = shopContacts(text) + ShopAround.providers(in: text)
+            message = (try? await client.createShop(goal: text, providers: providers)) ?? "I couldn't start that comparison, Sir."
+        }
+        if let rows = try? await client.callHunts() { hunts = rows }
+        await sayShop(message, userText: text)
+        return true
+    }
+
+    private func shopContacts(_ goal: String) -> [[String: String]] {
+        var rows: [[String: String]] = []
+        for hit in ContactDirectory.shared.hits(matching: goal).prefix(5) {
+            guard let phone = hit.bestPhone, !phone.isEmpty, !LocalCall.isEmergency(phone) else { continue }
+            rows.append(["business": hit.name, "phone": phone])
+            if rows.count >= 5 { break }
+        }
+        return rows
+    }
+
+    private func sayShop(_ line: String, userText: String) async {
+        recordAssistant(line)
+        await speakLine(line, userText: userText)
+        guard !Task.isCancelled else { return }
+        afterTurn()
     }
 
     private func sendDecision(_ id: String, choice: String) async {

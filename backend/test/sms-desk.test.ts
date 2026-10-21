@@ -98,6 +98,8 @@ describe("text desk", () => {
 
   it("treats a plumber search as a hunt and a meeting as a draft", () => {
     expect(wantsHunt("find me a plumber")).toBe(true);
+    expect(wantsHunt("get me quotes for a boiler")).toBe(true);
+    expect(wantsHunt("shop around for insurance")).toBe(true);
     expect(wantsHunt("hello there")).toBe(false);
     expect(wantsSchedule("draft an email and propose times")).toBe(true);
     expect(paymentAsk("find me a plumber")).toBe(false);

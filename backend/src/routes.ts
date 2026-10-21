@@ -2,7 +2,7 @@ import { agentChat, agentMessages, agentReply } from "./agent-chat";
 import { getCallMessage, listCallMessages, markCallMessageRead } from "./call-messages";
 import { authorize } from "./auth";
 import { handleCallApi, handleCallWebhook, isCallWebhook } from "./calls";
-import { bookApproved, chooseQuoteRoute, listHunts } from "./hunt";
+import { bookApproved, chooseQuoteRoute, createHuntRoute, listHunts, replaceHuntRoute, startHuntRoute } from "./hunt";
 import { handleOwnerWebhook, isOwnerWebhook, rememberOrigin, routeOwnerApi } from "./owner-alert";
 import { routeRelay } from "./relay";
 import { handleScreenWebhook, inboundFallbackResponse, isScreenWebhook, routeScreeningApi } from "./screening";
@@ -120,6 +120,7 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "GET" && path === "/calls/pair") return pairResponse(env, false);
     if (request.method === "POST" && path === "/calls/pair") return pairResponse(env, true);
     if (request.method === "GET" && path === "/calls/hunts") return listHunts(env);
+    if (request.method === "POST" && path === "/calls/hunts") return createHuntRoute(request, env);
     if (request.method === "GET" && path === "/calls/messages") return listCallMessages(env, url);
     if (request.method === "POST" && path === "/calls/settle") {
       const { settleOpenCalls } = await import("./call-settle");
@@ -131,6 +132,10 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "GET" && oneMessage) return getCallMessage(env, oneMessage[1]);
     const huntChoice = /^\/calls\/hunts\/(hunt_[A-Za-z0-9]+)\/choose$/.exec(path);
     if (request.method === "POST" && huntChoice) return chooseQuoteRoute(request, env, huntChoice[1]);
+    const huntProviders = /^\/calls\/hunts\/(hunt_[A-Za-z0-9]+)\/providers$/.exec(path);
+    if (request.method === "POST" && huntProviders) return replaceHuntRoute(request, env, huntProviders[1]);
+    const huntStart = /^\/calls\/hunts\/(hunt_[A-Za-z0-9]+)\/start$/.exec(path);
+    if (request.method === "POST" && huntStart) return startHuntRoute(env, huntStart[1]);
     if (request.method === "POST" && path === "/calendar/busy") return saveBusy(request, env);
     const owned = await routeOwnerApi(request, env, path);
     if (owned) return owned;
@@ -358,16 +363,20 @@ async function decideApproval(
   }
   let confirmation = false;
   let paymentRefused = false;
+  let bookingHeld = false;
   if (status === "approved" && row.action === "book_quote") {
     const booked = await bookApproved(env, row);
     confirmation = booked.dialed;
     paymentRefused = booked.refused;
+    bookingHeld = booked.held;
   }
   const approvedLine = confirmation
     ? `Approval ${id} approved. A confirmation call was placed. Nothing was paid.`
-    : paymentRefused
-      ? `Approval ${id} approved. Payment was requested, so nothing was called or paid.`
-      : `Approval ${id} approved. Nothing was sent, published, or paid.`;
+    : bookingHeld
+      ? `Approval ${id} approved. The booking call waits until businesses can be rung. Nothing was paid.`
+      : paymentRefused
+        ? `Approval ${id} approved. Payment was requested, so nothing was called or paid.`
+        : `Approval ${id} approved. Nothing was sent, published, or paid.`;
   if (row.task_id) {
     await logProgress(
       env,

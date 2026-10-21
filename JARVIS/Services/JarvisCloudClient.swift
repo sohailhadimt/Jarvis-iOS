@@ -1030,16 +1030,44 @@ struct CloudClient: Sendable {
         return envelope.hunts
     }
 
-    func chooseHunt(huntID: String, quoteID: String) async -> Bool {
-        guard let body = try? JSONSerialization.data(withJSONObject: ["quote_id": quoteID]) else { return false }
-        guard let (_, status) = try? await raw(
+    func chooseHunt(huntID: String, quoteID: String) async -> String? {
+        await shopMessage(method: "POST", path: "/calls/hunts/\(Self.path(huntID))/choose", body: ["quote_id": quoteID])
+    }
+
+    func createShop(goal: String, providers: [[String: String]]) async throws -> String {
+        let ack: ShopAck = try await sendJSON(
             method: "POST",
-            path: "/calls/hunts/\(Self.path(huntID))/choose",
-            authorize: true,
-            body: body,
-            query: []
-        ) else { return false }
-        return (200..<300).contains(status)
+            path: "/calls/hunts",
+            body: ["goal": goal, "providers": providers]
+        )
+        return ack.message ?? "The list is on your phone, Sir."
+    }
+
+    func replaceShop(huntID: String, providers: [[String: String]]) async throws -> String {
+        let ack: ShopAck = try await sendJSON(
+            method: "POST",
+            path: "/calls/hunts/\(Self.path(huntID))/providers",
+            body: ["providers": providers]
+        )
+        return ack.message ?? "The list is updated, Sir."
+    }
+
+    func startShop(huntID: String) async throws -> String {
+        let ack: ShopAck = try await sendJSON(
+            method: "POST",
+            path: "/calls/hunts/\(Self.path(huntID))/start",
+            body: [String: Any]()
+        )
+        return ack.message ?? "Calling the first one now, Sir."
+    }
+
+    private func shopMessage(method: String, path: String, body: [String: Any]) async -> String? {
+        do {
+            let ack: ShopAck = try await sendJSON(method: method, path: path, body: body)
+            return ack.message
+        } catch {
+            return nil
+        }
     }
 
     func postBusy(_ blocks: [[String: Any]]) async {
@@ -1371,15 +1399,56 @@ struct CallQuote: Decodable, Identifiable, Equatable, Sendable {
     var price: String
     var availability: String
     var fees: String
+    var terms: String
     var summary: String
     var status: String
+    var recommended: Bool
+    var transcript: [PhoneCallLine]
+
+    enum CodingKeys: String, CodingKey {
+        case id, business, phone, price, availability, fees, terms, summary, status, recommended, transcript
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        business = try container.decodeIfPresent(String.self, forKey: .business) ?? ""
+        phone = try container.decodeIfPresent(String.self, forKey: .phone) ?? ""
+        price = try container.decodeIfPresent(String.self, forKey: .price) ?? ""
+        availability = try container.decodeIfPresent(String.self, forKey: .availability) ?? ""
+        fees = try container.decodeIfPresent(String.self, forKey: .fees) ?? ""
+        terms = try container.decodeIfPresent(String.self, forKey: .terms) ?? ""
+        summary = try container.decodeIfPresent(String.self, forKey: .summary) ?? ""
+        status = try container.decodeIfPresent(String.self, forKey: .status) ?? ""
+        recommended = try container.decodeIfPresent(Bool.self, forKey: .recommended) ?? false
+        transcript = try container.decodeIfPresent([PhoneCallLine].self, forKey: .transcript) ?? []
+    }
 }
 
 struct CallHunt: Decodable, Identifiable, Equatable, Sendable {
     var id: String
     var goal: String
     var status: String
+    var recommendedId: String
     var quotes: [CallQuote]
+
+    enum CodingKeys: String, CodingKey {
+        case id, goal, status, quotes
+        case recommendedId = "recommended_id"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        goal = try container.decodeIfPresent(String.self, forKey: .goal) ?? ""
+        status = try container.decodeIfPresent(String.self, forKey: .status) ?? ""
+        recommendedId = try container.decodeIfPresent(String.self, forKey: .recommendedId) ?? ""
+        quotes = try container.decodeIfPresent([CallQuote].self, forKey: .quotes) ?? []
+    }
+}
+
+private struct ShopAck: Decodable {
+    var message: String?
 }
 
 private struct HuntListEnvelope: Decodable {

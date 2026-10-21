@@ -228,7 +228,8 @@ function approvesPending(text: string): boolean {
 
 export function wantsHunt(text: string): boolean {
   const folded = text.toLowerCase();
-  if (/\b(call around|ring around|get quotes|compare quotes|find me a)\b/.test(folded)) return true;
+  if (/\b(call around|ring around|shop around|compare quotes|find me a)\b/.test(folded)) return true;
+  if (/\b(?:get|find|compare)\s+(?:me\s+)?quotes?\b/.test(folded)) return true;
   return /\b(find|call|ring|get)\b.{0,48}\b(plumber|electrician|dentist|restaurant|garage|locksmith|cleaner|builder|doctor|hotel|taxi|quote|quotes)\b/.test(
     folded,
   );
@@ -547,6 +548,12 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
       await reply(env, phone, placed);
       return;
     }
+    const { confirmDraftHunt } = await import("./hunt");
+    const started = await confirmDraftHunt(env);
+    if (started) {
+      await reply(env, phone, started.message);
+      return;
+    }
   }
   const choiceReply = callChoice(text);
   const numbered = text.trim() === "1" || text.trim() === "2";
@@ -580,10 +587,27 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
     return;
   }
   if (wantsHunt(text)) {
-    const { startHunt } = await import("./hunt");
+    const { deliverHuntText, startHunt } = await import("./hunt");
     const line = await startHunt(env, text);
-    await reply(env, phone, line);
+    await deliverHuntText(env, phone, line);
     return;
+  }
+  if (text.trim().toLowerCase().replace(/[.!]+$/g, "") === "approve") {
+    const { approveRecommended } = await import("./hunt");
+    const booked = await approveRecommended(env);
+    if (booked) {
+      await reply(env, phone, booked);
+      return;
+    }
+  }
+  {
+    const { editDraftHunt } = await import("./hunt");
+    const edited = await editDraftHunt(env, text);
+    if (edited) {
+      const { deliverHuntText } = await import("./hunt");
+      await deliverHuntText(env, phone, edited);
+      return;
+    }
   }
   if (wantsSchedule(text)) {
     await reply(env, phone, await draftSchedule(env, text));
