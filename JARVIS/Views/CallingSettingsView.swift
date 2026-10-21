@@ -39,6 +39,16 @@ struct CallingSettingsView: View {
             }
 
             Section {
+                NavigationLink {
+                    InterceptorView()
+                } label: {
+                    Label("Interceptor", systemImage: "phone.arrow.down.left")
+                }
+            } footer: {
+                Text("Answer calls forwarded from your mobile. The screen has the on/off switch, Busy mode, and the carrier codes.")
+            }
+
+            Section {
                 Picker("Forwarding", selection: $forwardingMode) {
                     Text("All calls").tag("all")
                     Text("When I don't answer").tag("missed")

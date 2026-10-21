@@ -1,4 +1,13 @@
 import { awayFirstMessage, awayPrompt, readActiveAway, rememberRecording } from "./call-desk";
+import {
+  INTERCEPTOR_DECLINE,
+  INTERCEPTOR_GREETING,
+  forwardedCall,
+  interceptorAnswers,
+  interceptorPrompt,
+  missedCallerLine,
+  readInterceptor,
+} from "./interceptor";
 import { recordHandoff } from "./stream";
 import { dbAll, dbFirst, dbRun } from "./db";
 import {
@@ -110,22 +119,45 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
   } catch (err) {
     console.error("inbound call was not stored", safeError(err instanceof Error ? err.message : "insert failed"));
   }
+  const forward = forwardedCall(params, ours);
+  const gate = forward.forwarded ? await readInterceptor(env) : null;
+  const answering = gate ? interceptorAnswers(gate) : false;
+  if (forward.forwarded && !answering) {
+    await dbRun(env, "UPDATE outbound_calls SET status = 'declined', summary = ?, updated_at = ? WHERE id = ?", [
+      "Asked the caller to try again later.",
+      nowIso(),
+      id,
+    ]).catch(() => undefined);
+    ctx.waitUntil(noteMissedCaller(env, caller));
+    return xml(say(INTERCEPTOR_DECLINE), 200);
+  }
+  const intercept = Boolean(forward.forwarded && answering);
   if (pollyInbound(env)) {
-    const opening = inboundOpening();
-    await dbRun(env, "UPDATE outbound_calls SET status = 'in_progress', transcript_json = ?, updated_at = ? WHERE id = ?", [
+    const opening = intercept ? INTERCEPTOR_GREETING : inboundOpening();
+    await dbRun(env, "UPDATE outbound_calls SET status = 'in_progress', transcript_json = ?, brief = ?, updated_at = ? WHERE id = ?", [
       JSON.stringify([{ role: "assistant", text: opening }]),
+      intercept ? "Take a message." : "Screen this call",
       nowIso(),
       id,
     ]).catch(() => undefined);
     await recordHandoff(env, { callId: id, path: "polly", ok: true, reason: "converse" });
     return xml(converseTwiml(opening, converseAction(request, id)), 200);
   }
-  ctx.waitUntil(notify(env, id, caller, "", ""));
+  if (!intercept) ctx.waitUntil(notify(env, id, caller, "", ""));
   ctx.waitUntil(learnCaller(env, id, new URL(request.url).origin));
   if (sid) ctx.waitUntil(startCallRecording(env, sid, id));
-  const away = await readActiveAway(env);
-  const first = away ? awayFirstMessage(away.instruction) : INBOUND_GREETING;
-  const prompt = away ? awayPrompt(away.instruction) : permission.allow ? approvedScreening(permission.note) : screeningScript();
+  const away = intercept ? null : await readActiveAway(env);
+  if (intercept) {
+    await dbRun(env, "UPDATE outbound_calls SET brief = ?, updated_at = ? WHERE id = ?", ["Take a message.", nowIso(), id]).catch(() => undefined);
+  }
+  const first = intercept ? INTERCEPTOR_GREETING : away ? awayFirstMessage(away.instruction) : INBOUND_GREETING;
+  const prompt = intercept
+    ? interceptorPrompt()
+    : away
+      ? awayPrompt(away.instruction)
+      : permission.allow
+        ? approvedScreening(permission.note)
+        : screeningScript();
   const connected = await registerElevenLabsCall(env, {
     id,
     from: caller,
@@ -134,7 +166,7 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
     first,
     prompt,
     contact: "Caller",
-    brief: away ? away.instruction : "Find out who is calling and why. Do not reveal personal information.",
+    brief: intercept ? "Take a message." : away ? away.instruction : "Find out who is calling and why. Do not reveal personal information.",
   });
   if (!connected.twiml) {
     const reason = connected.reason || "no_twiml";
@@ -552,6 +584,13 @@ async function learnCaller(env: Env, id: string, origin: string): Promise<void> 
   } catch {
     // A missed follow-up still leaves the live card to poll.
   }
+}
+
+async function noteMissedCaller(env: Env, caller: string): Promise<void> {
+  const { displayNumber } = await import("./sms-desk");
+  const body = missedCallerLine(displayNumber(caller));
+  await pushNotice(env, "JARVIS – Missed call", body, {}).catch(() => false);
+  await sendSms(env, body);
 }
 
 async function notify(env: Env, id: string, phone: string, name: string, reason: string): Promise<void> {

@@ -19,6 +19,7 @@ enum DrawerRoute: Hashable {
     case agents
     case approvals
     case calls
+    case interceptor
     case memory
     case news
     case settings
@@ -119,6 +120,7 @@ struct JarvisShell: View {
         DrawerItem(route: .agents, title: "Agents", subtitle: "Team & missions", icon: "person.3"),
         DrawerItem(route: .approvals, title: "Approvals", subtitle: "Review & confirm", icon: "checkmark.circle"),
         DrawerItem(route: .calls, title: "Calls", subtitle: "Calls & messages", icon: "phone"),
+        DrawerItem(route: .interceptor, title: "Interceptor", subtitle: "Forwarded calls", icon: "phone.arrow.down.left"),
         DrawerItem(route: .memory, title: "Memory", subtitle: "Facts & notes", icon: "brain"),
         DrawerItem(route: .news, title: "News", subtitle: "Headlines & briefings", icon: "newspaper"),
         DrawerItem(route: .settings, title: "Settings", subtitle: "Preferences", icon: "gearshape")
@@ -197,6 +199,8 @@ struct JarvisShell: View {
             CloudApprovalsView()
         case .calls:
             CallLogView()
+        case .interceptor:
+            InterceptorView()
         case .memory:
             CloudMemoryGate()
         case .news:

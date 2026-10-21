@@ -838,6 +838,17 @@ struct CloudClient: Sendable {
         return parsed?["active"] as? Bool ?? false
     }
 
+    func interceptorState() async throws -> InterceptorState {
+        try await sendNoBody(method: "GET", path: "/calls/interceptor")
+    }
+
+    func setInterceptor(enabled: Bool? = nil, busy: Bool? = nil) async throws -> InterceptorState {
+        var body: [String: Any] = [:]
+        if let enabled { body["enabled"] = enabled }
+        if let busy { body["busy"] = busy }
+        return try await sendJSON(method: "POST", path: "/calls/interceptor", body: body)
+    }
+
     func awayStatus() async throws -> (active: Bool, instruction: String) {
         let (payload, status) = try await raw(method: "GET", path: "/calls/away", authorize: true, body: nil, query: [])
         guard (200..<300).contains(status),
@@ -1132,6 +1143,11 @@ struct CloudPersonaTask: Decodable, Sendable {
         case agentId = "agent_id"
         case approvalSummary = "approval_summary"
     }
+}
+
+struct InterceptorState: Decodable, Sendable {
+    var enabled: Bool
+    var busy: Bool
 }
 
 struct CallingConfig: Decodable, Sendable {

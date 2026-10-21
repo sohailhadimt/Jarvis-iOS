@@ -91,6 +91,7 @@ struct RootView: View {
                 Task { await engine.startSession(continuous: true) }
             }
             engine.startScreenWatch()
+            Task { await InterceptorSync.reconcile() }
             openPendingCallMessage()
             if settings.onboarded {
                 DeviceLocation.shared.prepare()
@@ -135,6 +136,7 @@ struct RootView: View {
             }
             if phase == .active {
                 considerStartup()
+                Task { await InterceptorSync.reconcile() }
                 startListeningIfRequested()
                 if settings.privacyLock, !unlocked {
                     Task { unlocked = await PrivacyGate.unlock() }

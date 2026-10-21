@@ -187,6 +187,18 @@ Startup chime turns the synth effects on or off. Spoken lines and effects follow
 
 The next Codemagic `ios-testflight` archive on this branch includes the sequence. GitHub Actions job **iOS compile** builds the app for the simulator without signing, which checks that the Swift compiles. It does not upload a TestFlight build.
 
+## Call interceptor
+
+iOS cannot intercept a normal carrier call. Conditional forwarding sends busy, unanswered, and unreachable calls to the JARVIS Twilio number. The drawer and Calling settings open **Interceptor**.
+
+The switch is on until you turn it off. JARVIS then answers with: "You've reached Sohail Hadi's line. He's unavailable right now. I'm J.A.R.V.I.S., his assistant. May I take a message?" He takes the message and sends the usual call summary by push or text. With the switch off and Busy mode off, he says "Please try again later." and texts who called.
+
+Busy mode answers on its own, including when the switch is off. Settings > Focus > a Focus > Add Filter > JARVIS Busy mode turns it on. The Shortcuts action **Set JARVIS busy mode** does the same. After that Focus ends, busy mode turns off the next time you open the app. The home ring shows BUSY while it is on and JARVIS is idle.
+
+The screen lists the generic GSM codes `**67*`, `**61*`, and `**62*`, then the JARVIS number and `#`, plus `##002#` to cancel. The number comes from the worker's calling config. Some UK networks use a different code. A direct call to the JARVIS number still uses the existing screening greeting.
+
+The next Codemagic `ios-testflight` archive on this branch includes the interceptor. This environment does not upload a TestFlight build.
+
 ## Project layout
 
 - `project.yml`: the XcodeGen spec (2 targets: the JARVIS app and the JARVISWidgets extension).

@@ -77,10 +77,13 @@ final class AssistantEngine {
     private(set) var pairLinked = true
     /// True while a spoken away order is still in force.
     private(set) var awayActive = false
-    var interceptor: Bool { inboundCall != nil || awayActive }
+    /// True while Busy mode is answering forwarded calls.
+    private(set) var busyMode = false
+    var interceptor: Bool { inboundCall != nil || awayActive || busyMode }
     var ringLabel: String? {
         if deskCalls.contains(where: { CallDeskStage.of($0) == .dialing }) { return "Dialling" }
         if inboundCall != nil || deskCalls.contains(where: { CallDeskStage.of($0) == .live }) { return "On the call" }
+        if busyMode, phase == .idle { return "BUSY" }
         switch phase {
         case .listening: return "LISTENING"
         case .speaking: return "SPEAKING"
@@ -1799,6 +1802,11 @@ final class AssistantEngine {
         Task { await self.loadPairing(refresh: true) }
     }
 
+    func setBusyMode(_ on: Bool) {
+        busyMode = on
+        VoiceMeter.shared.interceptor = interceptor
+    }
+
     func playRecording(_ id: String) {
         Task { await self.playCallRecording(id) }
     }
@@ -2061,10 +2069,13 @@ final class AssistantEngine {
         if let config = try? await client.callingConfig() {
             grokConnected = config.assistantWebhook ?? false
         }
+        if let gate = try? await client.interceptorState() {
+            busyMode = gate.busy
+        }
         if let away = try? await client.awayStatus() {
             awayActive = away.active
-            VoiceMeter.shared.interceptor = interceptor
         }
+        VoiceMeter.shared.interceptor = interceptor
         await DevicePresence.shared.postIfDue()
         guard let calls = try? await client.activeInboundCalls() else { return }
         let seen = Set(calls.map(\.id))

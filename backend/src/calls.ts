@@ -383,6 +383,10 @@ export async function handleCallApi(request: Request, env: Env, path: string): P
   if (request.method === "POST" && (path === "/calls" || path === "/calls/outbound")) return createCall(request, env, path === "/calls/outbound");
   if (request.method === "GET" && path === "/calls") return listCalls(env);
   if (path === "/calls/away") return awayRoute(request, env);
+  if (path === "/calls/interceptor") {
+    const { interceptorRoute } = await import("./interceptor");
+    return interceptorRoute(request, env);
+  }
   if (request.method === "POST" && path === "/calls/presence") return presenceRoute(request, env);
   const parts = path.split("/").filter(Boolean);
   if (request.method === "POST" && parts[0] === "calls" && parts[1] && parts[2] === "decide" && parts.length === 3) {

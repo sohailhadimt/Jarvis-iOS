@@ -1,4 +1,5 @@
 import { FALLBACK_SAY_VOICE, INBOUND_GREETING } from "./calls";
+import { INTERCEPTOR_GREETING } from "./interceptor";
 import { dbFirst, dbRun } from "./db";
 import { nowIso } from "./http";
 import { completeChat, type ChatMessage } from "./llm";
@@ -54,7 +55,12 @@ export async function continueInboundConversation(env: Env, callId: string, spee
   const heard = speech.replace(/\s+/g, " ").trim().slice(0, 500);
   if (!heard) {
     const theirs = lines.some((line) => line.role === "them");
-    if (!theirs) return converseTwiml("I'm still here. Who's calling, and how can I help?", action);
+    if (!theirs) {
+      const again = lines.some((line) => line.text.includes(INTERCEPTOR_GREETING))
+        ? "I'm still here. May I take a message?"
+        : "I'm still here. Who's calling, and how can I help?";
+      return converseTwiml(again, action);
+    }
     return finish(env, callId, lines, "They went quiet.");
   }
   lines.push({ role: "them", text: heard });
@@ -86,7 +92,7 @@ async function finish(env: Env, callId: string, lines: Turn[], summary: string):
 
 async function nextLine(env: Env, lines: Turn[]): Promise<{ say: string; done: boolean; summary: string }> {
   const messages: ChatMessage[] = [
-    { role: "system", content: persona() },
+    { role: "system", content: persona(lines) },
     ...lines.slice(-12).map((line) => ({
       role: line.role === "them" ? ("user" as const) : ("assistant" as const),
       content: line.text,
@@ -129,7 +135,18 @@ async function summarise(env: Env, lines: Turn[]): Promise<string> {
   return clip(heard, 180);
 }
 
-function persona(): string {
+function persona(lines: Turn[]): string {
+  const opening = lines.find((line) => line.role === "assistant")?.text ?? "";
+  if (opening.includes(INTERCEPTOR_GREETING)) {
+    return [
+      "You are JARVIS, Sohail Hadi's personal assistant, on a forwarded call.",
+      "You already asked to take a message. Collect their name and the message.",
+      "Keep every reply to one or two short spoken sentences. British English. No lists.",
+      "Never claim to be Sohail Hadi. Do not invent his schedule, location, health, or other personal details.",
+      "If they say goodbye, or the message is complete, set done to true, say a polite goodbye, and put one sentence in summary.",
+      'Reply with JSON only: {"say":"...","done":false,"summary":""}',
+    ].join("\n");
+  }
   return [
     "You are JARVIS, a warm, witty British butler and Master Hadi's personal assistant, on a live telephone call.",
     "You are happy to chat and to tell a short joke if they ask.",
