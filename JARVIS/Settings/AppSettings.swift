@@ -208,18 +208,23 @@ final class AppSettings {
     var speechLocale: String { didSet { d.set(speechLocale, forKey: "speechLocale") } }
     /// Full-screen captions start on when a voice session opens.
     var captionsDefault: Bool { didSet { d.set(captionsDefault, forKey: "captionsDefault") } }
-    /// 0 waits about 700ms of silence. 1 ends a turn after about 500ms. Barge-in only.
+    /// Shifts the speech threshold. 0 is stricter. 1 accepts a quieter close voice.
     var vadSensitivity: Double { didSet { d.set(vadSensitivity, forKey: "vadSensitivity") } }
-    /// Seconds of quiet after the latest words before a turn ends. Default is 1.75.
+    /// Seconds of quiet before a turn ends when the words already sound finished. Default is 0.65.
+    /// A saved value above 1 second, including the old 1.75 default, becomes 0.65.
     var endpointSilence: Double {
         didSet {
-            let clamped = min(3, max(1, endpointSilence))
+            let clamped = min(1, max(0.4, endpointSilence))
             if clamped != endpointSilence {
                 endpointSilence = clamped
                 return
             }
             d.set(clamped, forKey: "endpointSilence")
         }
+    }
+    /// How long an unfinished sentence may run on. Medium matches the Realtime API default.
+    var turnEagerness: TurnEagerness {
+        didSet { d.set(turnEagerness.rawValue, forKey: "turnEagerness") }
     }
     /// When on, and a voice print is saved, only that speaker reaches speech recognition.
     var voiceMatchEnabled: Bool { didSet { d.set(voiceMatchEnabled, forKey: "voiceMatchEnabled") } }
@@ -323,8 +328,13 @@ final class AppSettings {
         speechLocale = d.string(forKey: "speechLocale") ?? "en-GB"
         captionsDefault = d.object(forKey: "captionsDefault") as? Bool ?? true
         vadSensitivity = d.object(forKey: "vadSensitivity") as? Double ?? 0.5
-        let storedPause = d.object(forKey: "endpointSilence") as? Double ?? 1.75
-        endpointSilence = min(3, max(1, storedPause))
+        let storedPause = d.object(forKey: "endpointSilence") as? Double
+        if let storedPause, storedPause <= 1 {
+            endpointSilence = min(1, max(0.4, storedPause))
+        } else {
+            endpointSilence = 0.65
+        }
+        turnEagerness = TurnEagerness(rawValue: d.string(forKey: "turnEagerness") ?? "") ?? .medium
         voiceMatchEnabled = d.object(forKey: "voiceMatchEnabled") as? Bool ?? false
         voiceMatchSensitivity = VoiceMatchSensitivity(rawValue: d.string(forKey: "voiceMatchSensitivity") ?? "") ?? .balanced
         voiceMatchPrompted = d.object(forKey: "voiceMatchPrompted") as? Bool ?? false

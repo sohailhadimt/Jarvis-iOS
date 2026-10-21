@@ -31,10 +31,16 @@ final class AssistantEngine {
     static let shared = AssistantEngine()
 
     private(set) var phase: JarvisPhase = .idle {
-        didSet { VoiceMeter.shared.phase = phase }
+        didSet {
+            VoiceMeter.shared.phase = phase
+            listener.gate.turn.setAssistantSpeaking(phase == .speaking)
+        }
     }
     private(set) var level: Double = 0 {
-        didSet { VoiceMeter.shared.level = level }
+        didSet {
+            // Non-zero levels are written on the audio thread. A zero here drops the ring at once.
+            if level == 0 { VoiceMeter.shared.level = 0 }
+        }
     }
     private(set) var transcript = ""
     private(set) var reply = ""
@@ -166,18 +172,21 @@ final class AssistantEngine {
     private let minimumUtteranceSeconds: Double = 0.8
     /// Sentences still being spoken for the current streamed reply. Cancelled on barge-in.
     @ObservationIgnored private var spokenQueue: SpokenQueue?
+    /// Speaks "Right." only when the real reply is still silent after 1.2 seconds.
+    @ObservationIgnored private var fillerTask: Task<Void, Never>?
+    @ObservationIgnored private var fillerIndex = 0
     /// Enrolment owns the microphone. Wake and hands-free listening stay down until it finishes.
     @ObservationIgnored private var enrollmentHold = false
     @ObservationIgnored private var resumeSessionAfterEnrollment = false
 
-    /// Quiet after the latest partial. Settings, clamped to 1–3 seconds. Default 1.75.
+    /// Quiet after the latest words, only for the unused file-capture path. Live turns use the meter.
     private var endpointPause: Duration {
-        let seconds = min(3, max(1, AppSettings.shared.endpointSilence))
+        let seconds = min(1, max(0.4, AppSettings.shared.endpointSilence))
         return .milliseconds(Int((seconds * 1000).rounded()))
     }
 
     /// off → connecting → listening ↔ userSpeaking → thinking → aiSpeaking → listening.
-    /// Mute drops into muted. Barge-in (speech for 250ms during playback) returns to userSpeaking.
+    /// Mute drops into muted. Barge-in is 150 ms of the user's own speech during playback.
     var voiceState: VoiceState {
         if VoiceSession.shared.exiting { return .ended }
         guard isSessionActive else { return .off }
@@ -199,6 +208,9 @@ final class AssistantEngine {
         output.onLevel = { [weak self] value in self?.ingestLevel(value) }
         output.onBargeIn = { [weak self] in self?.bargeIn() }
         listener.onBargeLevel = { [weak self] value in self?.noteBarge(value) }
+        listener.gate.turn.setHandler { [weak self] event in
+            Task { @MainActor in self?.handleTurn(event) }
+        }
         tools.onComposeMessage = { [weak self] draft in self?.messageDraft = draft }
         tools.onComposeMail = { [weak self] draft in self?.mailDraft = draft }
         output.bindVoiceGate(listener.gate)
@@ -307,6 +319,12 @@ final class AssistantEngine {
         isContinuous = continuous
         phase = .listening
         listener.holdEngine = true
+        listener.gate.turn.reset()
+        listener.gate.turn.setPause(AppSettings.shared.endpointSilence)
+        listener.gate.turn.setSensitivity(AppSettings.shared.vadSensitivity)
+        listener.gate.turn.setEagerness(AppSettings.shared.turnEagerness)
+        HTTPConnections.prewarm()
+        output.prewarm()
         publishControlState()
 
         let activityOK = beginLiveActivity()
@@ -587,6 +605,9 @@ final class AssistantEngine {
     private static func configureVoiceSession(_ session: AVAudioSession) throws {
         try session.setCategory(.playAndRecord, mode: .voiceChat,
                                 options: [.defaultToSpeaker, .allowBluetoothHFP])
+        // 10 ms buffers keep barge-in and the first TTS buffer from waiting on a large chunk.
+        try? session.setPreferredSampleRate(48_000)
+        try? session.setPreferredIOBufferDuration(0.01)
     }
 
     /// Category first, then activate. A session that was interrupted is brought back every listen.
@@ -628,6 +649,8 @@ final class AssistantEngine {
 
     private func interrupt() {
         silenceTask?.cancel()
+        fillerTask?.cancel()
+        fillerTask = nil
         spokenQueue?.cancel()
         spokenQueue = nil
         turnTask?.cancel()
@@ -638,6 +661,10 @@ final class AssistantEngine {
 
     private func beginListening(manual: Bool) {
         LatencyLog.clear()
+        listener.gate.turn.setPause(AppSettings.shared.endpointSilence)
+        listener.gate.turn.setSensitivity(AppSettings.shared.vadSensitivity)
+        listener.gate.turn.setEagerness(AppSettings.shared.turnEagerness)
+        listener.gate.turn.noteTranscript("")
         manualTurn = manual
         transcript = ""
         heardVoice = false
@@ -750,7 +777,9 @@ final class AssistantEngine {
     }
 
     private func shouldCaptureForGroq() -> Bool {
-        !fileCaptureBroken && !groqTranscriptionBroken && KeychainStore.get(.groq) != nil
+        // A whole-file Whisper upload starts only after the recording stops. Live turns use
+        // streaming recognition so the reply can begin when the meter hears the pause.
+        false
     }
 
     private func handleTranscript(_ text: String, isFinal: Bool) {
@@ -777,7 +806,6 @@ final class AssistantEngine {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             if isFinal, !transcript.isEmpty {
-                if !endpointArmed { armEndpoint() }
                 holdListen()
             } else if isFinal, isSessionActive, isContinuous {
                 sessionLog.info("empty recognition result; restarting listen")
@@ -788,6 +816,7 @@ final class AssistantEngine {
         let changed = trimmed != lastPartial
         lastPartial = trimmed
         transcript = trimmed
+        listener.gate.turn.noteTranscript(trimmed)
         userIsSpeaking = true
         if utteranceStarted == nil { utteranceStarted = Date() }
         if changed {
@@ -795,15 +824,7 @@ final class AssistantEngine {
             heldListen = false
         }
         guard !manualTurn else { return }
-        // The first partial only shows the words. A later partial, or the recogniser closing, arms the pause.
-        if partialCount < 2 && !isFinal {
-            pushActivity()
-            return
-        }
-        if changed || !endpointArmed {
-            LatencyLog.noteSpeechEnd()
-            armEndpoint()
-        }
+        // The turn meter ends the pause. Partials only keep the words on screen.
         if isFinal { holdListen() }
         pushActivity()
     }
@@ -814,9 +835,9 @@ final class AssistantEngine {
             return
         }
         guard phase == .listening else { return }
-        // A closed recogniser must not cut the sentence off. Silence still ends the turn.
+        // A closed recogniser must not cut the sentence off. The turn meter ends it.
         if !transcript.isEmpty {
-            if !endpointArmed { armEndpoint() }
+            holdListen()
             return
         }
         if isSessionActive && isContinuous {
@@ -870,11 +891,21 @@ final class AssistantEngine {
     private func finishUtterance() {
         guard phase == .listening else { return }
         silenceTask?.cancel()
+        let heard = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if heard.count < 2 {
+            LatencyLog.noteFalseTrigger()
+            userIsSpeaking = false
+            transcript = ""
+            lastPartial = ""
+            partialCount = 0
+            return
+        }
         LatencyLog.noteSpeechEndIfNeeded()
         LatencyLog.event("speech-end")
         phase = .thinking
         level = 0
         pushActivity()
+        armReplyFiller()
         if captureFile {
             captureFile = false
             let url = listener.stopFileCapture()
@@ -2255,7 +2286,7 @@ final class AssistantEngine {
         defer { listener.setBargeMonitor(false) }
         let s = AppSettings.shared
         guard let key = KeychainStore.get(.elevenLabs) else {
-            errorMessage = "Add an ElevenLabs key in Settings. ElevenLabs is the only voice."
+            await output.speakDevice(text)
             return
         }
         let voice = voiceID.isEmpty ? s.voiceID : voiceID
@@ -2276,36 +2307,59 @@ final class AssistantEngine {
             }
         }
         sessionLog.error("ElevenLabs failed: \(last?.localizedDescription ?? "", privacy: .public)")
-        errorMessage = JarvisLines.voiceFailed
+        await output.speakDevice(text)
+    }
+
+    /// Covers a slow model or a slow voice stream. Cancelled as soon as reply audio starts.
+    private func armReplyFiller() {
+        fillerTask?.cancel()
+        fillerTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(SemanticTurn.fillerAfterMs))
+            guard let self, !Task.isCancelled else { return }
+            guard !LatencyLog.replyAudioHeard else { return }
+            guard self.phase == .thinking || self.phase == .speaking else { return }
+            LatencyLog.noteFiller()
+            await self.output.speakFiller(self.nextFiller())
+        }
+    }
+
+    private func nextFiller() -> String {
+        let lines = ["Right.", "One moment.", "Yes."]
+        let line = lines[fillerIndex % lines.count]
+        fillerIndex += 1
+        return line
+    }
+
+    func voiceDebugSnapshot() -> (latency: LatencySnapshot, meter: VoiceTurnSnapshot) {
+        (LatencyLog.snapshot(), listener.gate.turn.snapshot())
+    }
+
+    private func handleTurn(_ event: VoiceTurnEvent) {
+        switch event {
+        case .speechBegan:
+            guard phase == .listening else { return }
+            userIsSpeaking = true
+            if utteranceStarted == nil { utteranceStarted = Date() }
+            silenceTask?.cancel()
+            endpointArmed = false
+            pushActivity()
+        case .endOfTurn:
+            guard phase == .listening, !manualTurn else { return }
+            LatencyLog.noteSpeechEnd()
+            finishUtterance()
+        case .barge:
+            bargeIn()
+        case .ignoredBurst:
+            LatencyLog.noteFalseTrigger()
+            if phase == .listening {
+                userIsSpeaking = false
+            }
+        }
     }
 
     private func noteBarge(_ value: Double) {
-        guard phase == .speaking else {
-            bargeSince = nil
-            return
-        }
-        if listener.speechBandRatio < 0.30 {
-            bargeSince = nil
-            return
-        }
-        if AppSettings.shared.voiceMatchEnabled, !listener.allowsUtterance {
-            bargeSince = nil
-            return
-        }
-        let sensitivity: Double = min(1.0, max(0.0, AppSettings.shared.vadSensitivity))
-        let base: Double = listener.voiceProcessingEnabled ? 0.32 : 0.48
-        let span: Double = 1.2 - sensitivity * 0.4
-        let threshold: Double = base * span
-        if value > threshold {
-            let start = bargeSince ?? Date()
-            bargeSince = start
-            if Date().timeIntervalSince(start) >= 0.25 {
-                bargeSince = nil
-                bargeIn()
-            }
-        } else if value < threshold * 0.6 {
-            bargeSince = nil
-        }
+        // Barge-in is the turn meter's 150ms speech decision. Loudness here used to trip on the television.
+        _ = value
     }
 
     /// Mic energy during playback: stop the voice immediately and listen.

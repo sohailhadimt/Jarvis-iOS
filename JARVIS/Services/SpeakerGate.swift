@@ -23,6 +23,7 @@ final class SpeakerGate: @unchecked Sendable {
     private var analysisPending = false
     private var lastKick: TimeInterval = 0
     private var latched = false
+    let turn = VoiceTurnMeter()
 
     func update(enabled: Bool, profile: VoiceProfile?, threshold: Double) {
         lock.lock()
@@ -65,22 +66,33 @@ final class SpeakerGate: @unchecked Sendable {
         let raw: Float = Self.rawRMS(samples, count: frames)
         let level: Float = Float(AudioTaps.normalized(raw))
         let rate: Float = Float(buffer.format.sampleRate)
-        let band: Float = SpeechBandMeter.shared.ratio(samples: samples, count: frames, sampleRate: rate)
+        let measured = SpeechBandMeter.shared.measure(samples: samples, count: frames, sampleRate: rate)
+        let ms = Int((Double(frames) / max(buffer.format.sampleRate, 1) * 1000).rounded())
         lock.lock()
-        let smoothed: Float = speechBand * 0.55 + band * 0.45
+        let smoothed: Float = speechBand * 0.55 + measured.speechBand * 0.45
         let now: TimeInterval = Date().timeIntervalSinceReferenceDate
-        let speechLike: Bool = smoothed >= 0.28 && level >= 0.10
+        let lockOn: Bool = enabled && profile != nil
+        let speakerOK: Bool = !lockOn || freshLocked(now)
+        lock.unlock()
+        let decision = turn.push(
+            rms: raw,
+            speechBand: measured.speechBand,
+            flatness: measured.flatness,
+            level: level,
+            frameMs: ms,
+            speakerOK: speakerOK
+        )
+        let speechLike: Bool = decision.hearsSpeech
+        lock.lock()
         if speechLike {
             speechBand = smoothed
             speechBandHeldUntil = now + 0.35
         } else if now >= speechBandHeldUntil {
             speechBand = smoothed
         }
-        let lockOn: Bool = enabled && profile != nil
         if !lockOn {
-            // No enrolled print: every buffer is his. A speech-band filter here was dropping the mic.
             lock.unlock()
-            return [buffer]
+            return speechLike ? [buffer] : []
         }
         if speechLike {
             appendLocked(samples, count: frames, rate: buffer.format.sampleRate)

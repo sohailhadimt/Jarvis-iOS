@@ -20,7 +20,10 @@ targets:
   JARVIS:
     type: application
     platform: iOS
-    scheme: {}            # shared scheme so CI (Codemagic) can build it
+    scheme:               # shared scheme so CI (Codemagic) can build it
+      test:
+        targets:
+          - JARVISVoiceTests
     sources:
       - path: JARVIS
         includes:
@@ -100,6 +103,21 @@ targets:
     dependencies:
       - target: JARVISWidgets
         embed: true
+  JARVISVoiceTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: JARVISVoiceTests
+    dependencies:
+      - target: JARVIS
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.sohail.jarvis.voice-tests
+        PRODUCT_NAME: JARVISVoiceTests
+        SWIFT_VERSION: "5.0"
+        SWIFT_STRICT_CONCURRENCY: minimal
+        TARGETED_DEVICE_FAMILY: "1"
   JARVISWidgets:
     type: app-extension
     platform: iOS

@@ -289,13 +289,23 @@ struct VoicesSettingsView: View {
                     Text("German").tag("de-DE")
                     Text("Spanish").tag("es-ES")
                 }
+                Picker("Eagerness", selection: $settings.turnEagerness) {
+                    ForEach(TurnEagerness.allCases) { value in
+                        Text(value.title).tag(value)
+                    }
+                }
                 VStack(alignment: .leading) {
-                    Text("Pause before I reply \(settings.endpointSilence, format: .number.precision(.fractionLength(1))) s")
-                    Slider(value: $settings.endpointSilence, in: 1...3, step: 0.1)
+                    Text("Pause before I reply \(settings.endpointSilence, format: .number.precision(.fractionLength(2))) s")
+                    Slider(value: $settings.endpointSilence, in: 0.4...1.0, step: 0.05)
                 }
                 VStack(alignment: .leading) {
                     Text("VAD sensitivity \(settings.vadSensitivity, format: .number.precision(.fractionLength(2)))")
                     Slider(value: $settings.vadSensitivity, in: 0...1)
+                }
+                NavigationLink {
+                    VoiceTimingView()
+                } label: {
+                    Label("Voice timing", systemImage: "timer")
                 }
                 Picker("Orb style", selection: $settings.orbStyle) {
                     Text("ChatGPT").tag(OrbStyle.chatGPT)
@@ -304,7 +314,7 @@ struct VoicesSettingsView: View {
             } header: {
                 Text("Voice mode")
             } footer: {
-                Text("The home ring brightens with JARVIS's voice and, more gently, with the microphone. Start with voice opens listening as soon as JARVIS is on screen. Lines under the greeting show the live turn. Pause before I reply is how long quiet must last after you stop talking. VAD sensitivity only changes how easily a word interrupts JARVIS while he is speaking. The Action Button session is unaffected.")
+                Text("The home ring brightens with JARVIS's voice and, more gently, with the microphone. Start with voice opens listening as soon as JARVIS is on screen. Pause before I reply is the short wait after a finished sentence. Eagerness is how long an unfinished sentence may continue: low up to 8 seconds, medium up to 4, high up to 2. VAD sensitivity shifts how sure the speech detector must be. Voice ID, when it is on, ignores other speakers. Quiet or distant sound is ignored either way. Voice timing shows the last reply delay and the turn-meter checks. The Action Button session uses the same listener.")
             }
             Section("Selected: \(settings.voiceName)") {
                 VStack(alignment: .leading) {

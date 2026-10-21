@@ -45,11 +45,13 @@ enum SpeechLocales {
 final class SpeechListener {
     var onLevel: ((Double) -> Void)?
     var onBargeLevel: ((Double) -> Void)?
+    var onTurn: ((VoiceTurnEvent) -> Void)?
     var onTranscript: ((String, Bool) -> Void)?
     var onError: ((any Error) -> Void)?
 
     let gate = SpeakerGate()
     private let log = Logger(subsystem: "com.sohail.jarvis", category: "speech")
+    private let levels = LevelCoalescer()
     private var allowServerRecognition = false
     private var recognizer: SFSpeechRecognizer? = SFSpeechRecognizer(locale: Locale(identifier: "en-GB")) ?? SFSpeechRecognizer()
     private var engine: AVAudioEngine?
@@ -98,10 +100,7 @@ final class SpeechListener {
             request.requiresOnDeviceRecognition = true
         }
 
-        let levelHandler: @Sendable (Float) -> Void = { [weak self] rms in
-            let value = AudioTaps.normalized(rms)
-            Task { @MainActor in self?.onLevel?(value) }
-        }
+        let levelHandler = listeningLevel()
         applyVoicePolicy()
         try installTap(AudioTaps.recognitionTap(request: request, gate: gate, level: levelHandler), bufferSize: 1024)
 
@@ -132,10 +131,7 @@ final class SpeechListener {
         let format = engine.inputNode.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { throw ListenerError.noInput }
         let writer = try PCMFileWriter(source: format, url: url)
-        let levelHandler: @Sendable (Float) -> Void = { [weak self] rms in
-            let value = AudioTaps.normalized(rms)
-            Task { @MainActor in self?.onLevel?(value) }
-        }
+        let levelHandler = listeningLevel()
         do {
             applyVoicePolicy()
             try installTap(AudioTaps.fileTap(writer: writer, gate: gate, level: levelHandler), bufferSize: 4096)
@@ -162,10 +158,7 @@ final class SpeechListener {
         bargeMonitor = enabled
         guard holdEngine, request == nil, writer == nil else { return }
         if enabled {
-            let handler: @Sendable (Float) -> Void = { [weak self] rms in
-                let value = AudioTaps.normalized(rms)
-                Task { @MainActor in self?.onBargeLevel?(value) }
-            }
+            let handler: @Sendable (Float) -> Void = { _ in }
             try? installTap(AudioTaps.bargeTap(gate: gate, level: handler), bufferSize: 1024)
         } else {
             try? installTap(AudioTaps.silentTap(), bufferSize: 1024)
@@ -191,6 +184,16 @@ final class SpeechListener {
         task?.cancel()
         request = nil
         task = nil
+    }
+
+    private func listeningLevel() -> @Sendable (Float) -> Void {
+        let levels = self.levels
+        return { [weak self] rms in
+            let value = AudioTaps.normalized(rms)
+            VoiceMeter.shared.level = value
+            guard levels.allow() else { return }
+            Task { @MainActor in self?.onLevel?(value) }
+        }
     }
 
     private func makeEngine() throws -> AVAudioEngine {
@@ -253,10 +256,13 @@ final class SpeechListener {
         voiceProcessingAttempted = true
         do {
             try engine.inputNode.setVoiceProcessingEnabled(true)
+            engine.inputNode.isVoiceProcessingAGCEnabled = true
             engine.inputNode.isVoiceProcessingBypassed = false
             voiceProcessingEnabled = true
+            LatencyLog.noteVoiceProcessing(true)
         } catch {
             voiceProcessingEnabled = false
+            LatencyLog.noteVoiceProcessing(false)
         }
     }
 
