@@ -100,7 +100,7 @@ struct IntegrationsSettingsView: View {
                 if saved { Text("Saved in the Keychain.").font(.footnote).foregroundStyle(.green) }
             }
         }
-        .navigationTitle("Integrations")
+        .navigationTitle("Apps")
         .toolbar(.visible, for: .navigationBar)
         .onAppear {
             agentKey = KeychainStore.get(.agentWebhook) ?? ""

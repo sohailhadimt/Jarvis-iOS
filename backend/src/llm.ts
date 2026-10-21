@@ -1,6 +1,10 @@
 import { getState, setState } from "./db";
+import { isRecord, json } from "./http";
+import { gatherLive, readFix, spokenAnswer } from "./live-answer";
 import type { Env } from "./types";
 import { GEMINI_MODEL, GEMINI_URL, GROQ_MODEL, GROQ_URL, LIMITS } from "./types";
+
+export const CHAT_FALLBACK = "I'm here, sir. I couldn't reach my notes just now. Ask me again in a moment.";
 
 export interface ToolCall {
   id: string;
@@ -48,19 +52,32 @@ export async function completeChat(
   env: Env,
   messages: ChatMessage[],
   tools: LlmTool[] | null,
+  options?: { timeoutMs?: number; maxTokens?: number; budgetMs?: number },
 ): Promise<LlmSuccess | LlmFailure> {
+  const started = Date.now();
+  const allowance = (): number => {
+    const cap = options?.timeoutMs ?? LIMITS.llmTimeoutMs;
+    if (!options?.budgetMs) return cap;
+    return Math.min(cap, options.budgetMs - (Date.now() - started));
+  };
   const cooldownRaw = await getState(env, COOLDOWN_KEY);
   const cooldownUntil = cooldownRaw ? Date.parse(cooldownRaw) : 0;
   const geminiCooling = Number.isFinite(cooldownUntil) && cooldownUntil > Date.now();
 
   if (env.GEMINI_API_KEY && !geminiCooling) {
-    const gemini = await callProvider("gemini", GEMINI_URL, env.GEMINI_API_KEY, GEMINI_MODEL, messages, tools);
+    const geminiWait = allowance();
+    if (geminiWait < 200) {
+      return { ok: false, code: "timeout", message: "The reply missed the latency budget." };
+    }
+    const gemini = await callProvider("gemini", GEMINI_URL, env.GEMINI_API_KEY, GEMINI_MODEL, messages, tools, geminiWait, options?.maxTokens);
     if (gemini.ok) return gemini;
     if (gemini.code === "rate_limited") {
       await setState(env, COOLDOWN_KEY, new Date(Date.now() + LIMITS.rateLimitCooldownMs).toISOString());
     }
     if (!env.GROQ_API_KEY) return gemini;
-    const groq = await callProvider("groq", GROQ_URL, env.GROQ_API_KEY, GROQ_MODEL, messages, tools);
+    const groqWait = allowance();
+    if (groqWait < 200) return gemini;
+    const groq = await callProvider("groq", GROQ_URL, env.GROQ_API_KEY, GROQ_MODEL, messages, tools, groqWait, options?.maxTokens);
     if (groq.ok) return groq;
     if (gemini.code === "rate_limited" && groq.code === "rate_limited") {
       return {
@@ -79,7 +96,9 @@ export async function completeChat(
   }
 
   if (env.GROQ_API_KEY) {
-    const groq = await callProvider("groq", GROQ_URL, env.GROQ_API_KEY, GROQ_MODEL, messages, tools);
+    const groqWait = allowance();
+    if (groqWait < 200) return { ok: false, code: "timeout", message: "The reply missed the latency budget." };
+    const groq = await callProvider("groq", GROQ_URL, env.GROQ_API_KEY, GROQ_MODEL, messages, tools, groqWait, options?.maxTokens);
     if (!groq.ok && geminiCooling) {
       return {
         ...groq,
@@ -104,6 +123,59 @@ export async function completeChat(
   };
 }
 
+export async function chatResponse(request: Request, env: Env): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ ok: false, reply: CHAT_FALLBACK, provider: null });
+  }
+  if (!isRecord(body) || !Array.isArray(body.messages)) {
+    return json({ ok: false, reply: CHAT_FALLBACK, provider: null });
+  }
+  const messages: ChatMessage[] = [];
+  for (const item of body.messages) {
+    if (!isRecord(item)) continue;
+    const role = item.role;
+    if (role !== "system" && role !== "user" && role !== "assistant") continue;
+    const content = typeof item.content === "string" ? item.content.trim().slice(0, 4000) : "";
+    if (!content) continue;
+    messages.push({ role, content });
+    if (messages.length >= 20) break;
+  }
+  if (!messages.some((message) => message.role === "user")) {
+    return json({ ok: false, reply: CHAT_FALLBACK, provider: null });
+  }
+  const question = [...messages].reverse().find((message) => message.role === "user")?.content ?? "";
+  const live = await gatherLive(env, question, readFix(body.location));
+  if (live?.reply) {
+    return json({ ok: true, reply: live.reply, provider: "gemini" });
+  }
+  let chatMessages = messages;
+  if (live?.notes) {
+    chatMessages = [
+      {
+        role: "system",
+        content:
+          "Use these notes to answer in one or two spoken sentences. Give the fact. Do not say you will search. Do not mention links or URLs.\n" +
+          live.notes,
+      },
+      ...messages,
+    ];
+  }
+  const result = await completeChat(env, chatMessages, null);
+  if (!result.ok) {
+    console.error("chat failed", result.code);
+    return json({ ok: false, reply: CHAT_FALLBACK, provider: null });
+  }
+  const reply = spokenAnswer(result.message.content ?? "");
+  if (!reply) {
+    console.error("chat returned an empty reply", result.provider);
+    return json({ ok: false, reply: CHAT_FALLBACK, provider: result.provider });
+  }
+  return json({ ok: true, reply, provider: result.provider });
+}
+
 async function callProvider(
   provider: "gemini" | "groq",
   url: string,
@@ -111,14 +183,21 @@ async function callProvider(
   model: string,
   messages: ChatMessage[],
   tools: LlmTool[] | null,
+  timeoutMs: number = LIMITS.llmTimeoutMs,
+  maxTokens: number = 2048,
 ): Promise<LlmSuccess | LlmFailure> {
   const body: Record<string, unknown> = {
     model,
     messages: messages.map(toWireMessage),
     temperature: 0.2,
-    max_tokens: 2048,
+    max_tokens: maxTokens,
   };
-  if (tools && tools.length > 0) body.tools = tools;
+  if (tools && tools.length > 0) body.tools = provider === "gemini" ? geminiTools(tools) : tools;
+  if (provider === "groq") {
+    body.reasoning_effort = "low";
+    body.include_reasoning = false;
+    body.max_completion_tokens = maxTokens;
+  }
   try {
     const response = await fetch(url, {
       method: "POST",
@@ -127,7 +206,7 @@ async function callProvider(
         "content-type": "application/json",
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(LIMITS.llmTimeoutMs),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const text = await response.text();
     const rateLimited =
@@ -149,7 +228,7 @@ async function callProvider(
       return {
         ok: false,
         code: "upstream",
-        message: `${provider} could not answer (HTTP ${response.status}).`,
+        message: `${provider} could not answer (HTTP ${response.status}): ${providerError(text)}`,
         status: response.status,
       };
     }
@@ -160,7 +239,9 @@ async function callProvider(
       return { ok: false, code: "upstream", message: `${provider} returned a body that was not JSON.` };
     }
     const message = readAssistantMessage(parsed);
-    if (!message) return { ok: false, code: "upstream", message: `${provider} returned no assistant message.` };
+    if (!message) {
+      return { ok: false, code: "upstream", message: `${provider} returned no assistant message (${finishReason(parsed)}).` };
+    }
     return { ok: true, provider, model, message };
   } catch (err) {
     const name = err instanceof Error ? err.name : "";
@@ -173,6 +254,103 @@ async function callProvider(
   }
 }
 
+/** Gemini's OpenAI endpoint rejects additionalProperties inside tool schemas. */
+export function geminiTools(tools: LlmTool[]): LlmTool[] {
+  return tools.map((tool) => ({
+    type: "function",
+    function: {
+      name: tool.function.name,
+      description: tool.function.description,
+      parameters: geminiSchema(tool.function.parameters) as Record<string, unknown>,
+    },
+  }));
+}
+
+function geminiSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => geminiSchema(item));
+  if (!value || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (key === "additionalProperties" || key === "$schema" || key === "strict") continue;
+    out[key] = geminiSchema(item);
+  }
+  if (out.type === "object" && (out.properties == null || typeof out.properties !== "object")) out.properties = {};
+  return out;
+}
+
+export interface SmsProbe {
+  legacy_gemini: string;
+  legacy_groq: string;
+  chat_ok: boolean;
+  chat_code: string;
+  chat_error: string;
+}
+
+/** One raw tool call, with additionalProperties left in, plus the path SMS chat now uses. */
+export async function probeSmsChat(env: Env, tools: LlmTool[]): Promise<SmsProbe> {
+  const messages: ChatMessage[] = [
+    { role: "system", content: "Reply in one short sentence." },
+    { role: "user", content: "Say hello in five words." },
+  ];
+  const [legacyGemini, legacyGroq] = await Promise.all([
+    legacyToolPost(env, "gemini", GEMINI_URL, env.GEMINI_API_KEY, GEMINI_MODEL, messages, tools),
+    legacyToolPost(env, "groq", GROQ_URL, env.GROQ_API_KEY, GROQ_MODEL, messages, tools),
+  ]);
+  const chat = await completeChat(env, messages, tools, { timeoutMs: 8_000, maxTokens: 200 });
+  return {
+    legacy_gemini: legacyGemini,
+    legacy_groq: legacyGroq,
+    chat_ok: chat.ok,
+    chat_code: chat.ok ? "ok" : chat.code,
+    chat_error: chat.ok ? "" : providerError(chat.message),
+  };
+}
+
+async function legacyToolPost(
+  env: Env,
+  provider: string,
+  url: string,
+  apiKey: string | undefined,
+  model: string,
+  messages: ChatMessage[],
+  tools: LlmTool[],
+): Promise<string> {
+  void env;
+  const key = (apiKey ?? "").trim();
+  if (!key) return "not_configured";
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model,
+        messages: messages.map(toWireMessage),
+        temperature: 0.2,
+        ...(provider === "groq"
+          ? { max_completion_tokens: 200, reasoning_effort: "low", include_reasoning: false }
+          : { max_tokens: 200 }),
+        tools,
+      }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    const text = await response.text();
+    if (response.ok) return `ok ${response.status}`;
+    return `${provider} HTTP ${response.status}: ${providerError(text)}`;
+  } catch (err) {
+    return `${provider} request failed: ${providerError(err instanceof Error ? err.message : "unknown error")}`;
+  }
+}
+
+function providerError(text: string): string {
+  const clean = text
+    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/[A-Za-z0-9+/=_-]{24,}/g, "[redacted]")
+    .replace(/\+\d[\d\s().-]{6,}/g, "[number]")
+    .replace(/\s+/g, " ")
+    .trim();
+  return clean.slice(0, 280);
+}
+
 function toWireMessage(message: ChatMessage): Record<string, unknown> {
   const wire: Record<string, unknown> = {
     role: message.role,
@@ -182,6 +360,14 @@ function toWireMessage(message: ChatMessage): Record<string, unknown> {
   if (message.tool_call_id) wire.tool_call_id = message.tool_call_id;
   if (message.name) wire.name = message.name;
   return wire;
+}
+
+function finishReason(payload: unknown): string {
+  if (!payload || typeof payload !== "object") return "unreadable";
+  const choices = (payload as { choices?: unknown }).choices;
+  if (!Array.isArray(choices) || !choices[0] || typeof choices[0] !== "object") return "no choices";
+  const reason = (choices[0] as { finish_reason?: unknown }).finish_reason;
+  return typeof reason === "string" && reason ? reason : "no finish";
 }
 
 function readAssistantMessage(payload: unknown): ChatMessage | null {

@@ -63,15 +63,7 @@ enum LLMError: LocalizedError, Sendable {
     private static let busyCodes: Set<Int> = [429, 500, 502, 503, 504]
 
     static func short(_ error: Error) -> String {
-        if let llm = error as? LLMError {
-            return llm.localizedDescription
-        }
-        let text = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.contains("{") || text.contains("[") || text.contains("\"error\"") {
-            return "JARVIS is busy. Try again in a moment."
-        }
-        if text.isEmpty { return "JARVIS could not answer just now." }
-        return String(text.prefix(120))
+        JarvisLines.explain(error)
     }
 
     /// A 400/422 whose body says the tools payload was rejected. Callers retry once with no tools.

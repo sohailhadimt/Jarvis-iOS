@@ -11,10 +11,41 @@ struct AgentsView: View {
                 NavigationLink {
                     GroupRoomView()
                 } label: {
-                    Label("Group room", systemImage: "bubble.left.and.bubble.right")
+                    Label("Project Money", systemImage: "bubble.left.and.bubble.right")
                 }
             } footer: {
-                Text("Mention an agent with @EDITH, @ULTRON, @FRIDAY, or @JARVIS. They answer here and can reply to each other.")
+                Text("EDITH, ULTRON, and FRIDAY compare notes here. Mention one with @EDITH, @ULTRON, @FRIDAY, or @JARVIS. With JARVIS Cloud on, they answer from the worker.")
+            }
+            Section("Missions") {
+                ForEach(store.missions) { mission in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(mission.goal).lineLimit(3)
+                        Text(mission.status).font(.caption).foregroundStyle(.secondary)
+                        if let report = mission.report, !report.isEmpty {
+                            Text(report).font(.caption).lineLimit(6)
+                        }
+                    }
+                }
+                MissionComposer()
+            }
+            if !store.routines.isEmpty {
+                Section {
+                    ForEach(store.routines) { routine in
+                        Toggle(isOn: Binding(
+                            get: { routine.enabled },
+                            set: { on in Task { await store.setRoutine(id: routine.id, enabled: on) } }
+                        )) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(routine.name)
+                                Text(routine.cron).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("Routines")
+                } footer: {
+                    Text("Off until you turn one on. The worker cron then plans a mission. Nothing is sent, published, or paid.")
+                }
             }
             if !store.jobs.isEmpty {
                 Section("Background tasks") {
@@ -142,7 +173,7 @@ struct GroupRoomView: View {
             }
             .padding()
         }
-        .navigationTitle("Group room")
+        .navigationTitle("Project Money")
     }
 
     private func send() {
@@ -162,16 +193,43 @@ struct AgentEditor: View {
     @State private var instructions = ""
     @State private var avatar = ""
     @State private var memory = ""
+    @State private var colorHex = "4BA8EE"
+    @State private var voiceID = ""
+    @State private var voiceName = ""
+    @State private var tools: Set<String> = []
+
+    private static let toolChoices = [
+        "web_search", "fetch_url", "save_finding", "save_lead", "draft_document",
+        "request_approval", "list_findings", "list_pipeline", "memory", "draft_call",
+        "reminder", "files", "image_gen",
+    ]
 
     var body: some View {
         Form {
             TextField("Name", text: $name)
             TextField("Role", text: $role)
             TextField("Avatar letter", text: $avatar)
+            TextField("Colour hex", text: $colorHex)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
             TextField("Personality and instructions", text: $instructions, axis: .vertical)
                 .lineLimit(4...8)
             TextField("Memory", text: $memory, axis: .vertical)
                 .lineLimit(2...6)
+            TextField("ElevenLabs voice id", text: $voiceID)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            TextField("Voice name", text: $voiceName)
+            Section("Tools") {
+                ForEach(Self.toolChoices, id: \.self) { tool in
+                    Toggle(tool, isOn: Binding(
+                        get: { tools.contains(tool) },
+                        set: { on in
+                            if on { tools.insert(tool) } else { tools.remove(tool) }
+                        }
+                    ))
+                }
+            }
         }
         .navigationTitle(agent == nil ? "New agent" : "Edit agent")
         .toolbar {
@@ -186,23 +244,53 @@ struct AgentEditor: View {
             instructions = agent?.instructions ?? ""
             avatar = agent?.avatar ?? ""
             memory = agent?.memory ?? ""
+            colorHex = agent?.colorHex ?? "4BA8EE"
+            voiceID = agent?.voiceID ?? ""
+            voiceName = agent?.voiceName ?? ""
+            let stored = agent?.tools ?? []
+            tools = Set(stored.isEmpty ? AgentStore.presetTools(id: agent?.id ?? "") : stored)
         }
     }
 
     private func save() {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let letter = avatar.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hex = colorHex.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "#", with: "")
         let saved = NamedAgent(
             id: agent?.id ?? "agent_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(12))",
             name: trimmed,
             role: role.trimmingCharacters(in: .whitespacesAndNewlines),
             instructions: instructions.trimmingCharacters(in: .whitespacesAndNewlines),
             avatar: letter.isEmpty ? String(trimmed.prefix(1)) : String(letter.prefix(2)),
-            colorHex: agent?.colorHex ?? "4BA8EE",
+            colorHex: hex.isEmpty ? "4BA8EE" : hex,
             memory: memory,
-            builtin: agent?.builtin ?? false)
+            builtin: agent?.builtin ?? false,
+            tools: Self.toolChoices.filter { tools.contains($0) },
+            voiceID: voiceID.trimmingCharacters(in: .whitespacesAndNewlines),
+            voiceName: voiceName.trimmingCharacters(in: .whitespacesAndNewlines))
         store.saveAgent(saved, isNew: agent == nil)
         dismiss()
+    }
+}
+
+private struct MissionComposer: View {
+    @State private var store = AgentStore.shared
+    @State private var goal = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Mission for JARVIS", text: $goal, axis: .vertical)
+                .lineLimit(2...4)
+            Button("Assign to the team") { assign() }
+                .disabled(goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
+
+    private func assign() {
+        let text = goal.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        goal = ""
+        Task { _ = await store.startMission(goal: text) }
     }
 }
 

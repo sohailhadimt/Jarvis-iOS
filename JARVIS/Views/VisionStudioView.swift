@@ -6,6 +6,7 @@ struct VisionStudioView: View {
     @Environment(AppSettings.self) private var settings
     @State private var camera = VisionCamera.shared
     @State private var draft = ""
+    @FocusState private var askFocused: Bool
 
     var body: some View {
         ZStack {
@@ -13,8 +14,9 @@ struct VisionStudioView: View {
             ScrollView {
                 studio
             }
+            .scrollDismissesKeyboard(.interactively)
         }
-        .navigationTitle("Vision")
+        .navigationTitle("Camera")
         .toolbar(.visible, for: .navigationBar)
         .task { await camera.acquire(owner: .panel) }
         .onDisappear { camera.release(owner: .panel) }
@@ -105,6 +107,7 @@ struct VisionStudioView: View {
                 TextField("", text: $draft, prompt: Text("Ask about the photo…").foregroundStyle(settings.accentColor.opacity(0.55)))
                     .font(.system(size: 15, weight: .regular, design: .monospaced))
                     .foregroundStyle(.white)
+                    .focused($askFocused)
                     .submitLabel(.send)
                     .onSubmit(sendDraft)
                 Button(action: sendDraft) {
@@ -137,6 +140,8 @@ struct VisionStudioView: View {
     }
 
     private func askSight() {
+        askFocused = false
+        JarvisHaptics.tap()
         engine.ask("What do you see?")
     }
 
@@ -144,6 +149,8 @@ struct VisionStudioView: View {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         draft = ""
+        askFocused = false
+        JarvisHaptics.tap()
         engine.ask(text)
     }
 }

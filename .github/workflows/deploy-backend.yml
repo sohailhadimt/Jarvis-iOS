@@ -6,10 +6,82 @@ on:
     paths:
       - "backend/**"
       - ".github/workflows/deploy-backend.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/deploy-backend.yml"
   workflow_dispatch:
 
 jobs:
+  sms_log:
+    # Reads Twilio status on a manual run or a pull request.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+      TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+      TWILIO_FROM_NUMBER: ${{ secrets.TWILIO_FROM_NUMBER }}
+      OWNER_PHONE: ${{ secrets.OWNER_PHONE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install
+        run: npm ci
+
+      - name: Recent worker errors
+        run: |
+          set +e
+          node --input-type=module <<'NODE'
+          const account = process.env.CLOUDFLARE_ACCOUNT_ID || "";
+          const token = process.env.CLOUDFLARE_API_TOKEN || "";
+          if (!account || !token) {
+            console.log("worker logs skipped");
+            process.exit(0);
+          }
+          const now = Date.now();
+          const body = {
+            queryId: "sms-errors",
+            timeframe: { from: now - 6 * 60 * 60 * 1000, to: now },
+            view: "events",
+            limit: 30,
+            parameters: {
+              datasets: ["cloudflare-workers"],
+              needle: { value: "sms", isRegex: false },
+            },
+          };
+          const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/workers/observability/telemetry/query`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          const text = await response.text();
+          const redacted = text
+            .replace(/\+\d[\d\s().-]{6,}/g, "[number]")
+            .replace(/\b0\d{9,10}\b/g, "[number]")
+            .replace(/[A-Za-z0-9+/=_-]{24,}/g, "[redacted]");
+          console.log(`worker logs HTTP ${response.status}`);
+          console.log(redacted.slice(0, 4000));
+          NODE
+
+      - name: Twilio messages and call rows
+        run: bash ../.github/scripts/diagnose-sms.sh
+
+      - name: Start TestFlight build
+        env:
+          CODEMAGIC_API_TOKEN: ${{ secrets.CODEMAGIC_API_TOKEN }}
+        run: bash ../.github/scripts/start-testflight.sh
+
   deploy:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -35,15 +107,368 @@ jobs:
       - name: Test
         run: npx vitest run
 
-      - name: Require a real D1 database id
+      - name: Resolve D1 database
         run: |
-          if grep -q "00000000-0000-0000-0000-000000000000" wrangler.toml; then
-            echo "Replace database_id in backend/wrangler.toml with the id printed by: npx wrangler d1 create jarvis-db"
-            exit 1
-          fi
+          set -euo pipefail
+          node <<'NODE'
+          import { execSync } from "node:child_process";
+          import { readFileSync, writeFileSync } from "node:fs";
+
+          function rowsFrom(raw) {
+            const start = raw.indexOf("[");
+            const objectStart = raw.indexOf("{");
+            const sliceFrom = start === -1 ? objectStart : objectStart === -1 ? start : Math.min(start, objectStart);
+            if (sliceFrom === -1) throw new Error(raw.trim() || "wrangler d1 list returned no JSON");
+            const parsed = JSON.parse(raw.slice(sliceFrom));
+            if (Array.isArray(parsed)) return parsed;
+            if (Array.isArray(parsed.result)) return parsed.result;
+            if (Array.isArray(parsed.d1)) return parsed.d1;
+            return [];
+          }
+
+          function list() {
+            const raw = execSync("npx wrangler d1 list --json", { encoding: "utf8" });
+            return rowsFrom(raw);
+          }
+
+          let rows = list();
+          let row = rows.find((item) => item.name === "jarvis-db");
+          if (!row) {
+            execSync("npx wrangler d1 create jarvis-db", { stdio: "inherit" });
+            rows = list();
+            row = rows.find((item) => item.name === "jarvis-db");
+          }
+          const id = row?.uuid || row?.database_id;
+          if (!id) {
+            console.error("jarvis-db has no id after create.");
+            process.exit(1);
+          }
+          const toml = readFileSync("wrangler.toml", "utf8");
+          const pattern = /database_id\s*=\s*["'][^"']*["']/;
+          if (!pattern.test(toml)) {
+            console.error("wrangler.toml has no database_id line.");
+            process.exit(1);
+          }
+          const next = toml.replace(pattern, `database_id = "${id}"`);
+          writeFileSync("wrangler.toml", next);
+          console.log(`D1 jarvis-db ${id}`);
+          NODE
 
       - name: Apply D1 schema
-        run: npx wrangler d1 execute jarvis-db --remote --file=./schema.sql --yes
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if npx wrangler d1 execute jarvis-db --remote --file=./schema.sql --yes; then
+              exit 0
+            fi
+            echo "schema apply failed (attempt ${attempt}); waiting"
+            sleep 8
+          done
+          exit 1
+
+      - name: Register workers.dev subdomain
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/subdomain"
+          current=$(curl -sS -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" "$api" || true)
+          existing=$(node -e 'let s=""; try { const j=JSON.parse(process.argv[1]); s=j.result&&j.result.subdomain||""; } catch {} if (s) process.stdout.write(s)' "$current")
+          if [ -n "$existing" ]; then
+            echo "workers.dev subdomain is already registered: ${existing}"
+            exit 0
+          fi
+          for candidate in jarvis-hadi sohailhadimt-jarvis jarvis-sohailhadimt; do
+            code=$(curl -sS -o /tmp/workers-subdomain.json -w "%{http_code}" -X PUT \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "$api" \
+              --data "{\"subdomain\":\"${candidate}\"}")
+            if [ "$code" = "200" ]; then
+              echo "Registered workers.dev subdomain: ${candidate}"
+              exit 0
+            fi
+            echo "Subdomain ${candidate} was not accepted (HTTP ${code})."
+          done
+          echo "Could not register a workers.dev subdomain. Open the Workers onboarding page in Cloudflare and choose one, then rerun this workflow."
+          exit 1
 
       - name: Deploy Worker
-        run: npx wrangler deploy
+        run: |
+          set -euo pipefail
+          npx wrangler deploy | tee /tmp/wrangler-deploy.txt
+          clean=$(sed -E 's/\x1B\[[0-9;]*[A-Za-z]//g' /tmp/wrangler-deploy.txt)
+          url=$(printf '%s\n' "$clean" | grep -oE 'https://[A-Za-z0-9.-]+\.workers\.dev' | head -1 || true)
+          if [ -z "$url" ]; then
+            echo "Deploy finished without a workers.dev URL."
+            exit 1
+          fi
+          echo "WORKER_URL=${url}" >> "$GITHUB_ENV"
+          echo "Worker URL: ${url}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set Worker secrets
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          JARVIS_APP_TOKEN: ${{ secrets.JARVIS_APP_TOKEN }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM_NUMBER: ${{ secrets.TWILIO_FROM_NUMBER }}
+          OWNER_PHONE: ${{ secrets.OWNER_PHONE }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          ELEVENLABS_AGENT_ID: ${{ secrets.ELEVENLABS_AGENT_ID }}
+          ELEVENLABS_WEBHOOK_SECRET: ${{ secrets.ELEVENLABS_WEBHOOK_SECRET }}
+          ELEVENLABS_FORCE_POLLY: ${{ secrets.ELEVENLABS_FORCE_POLLY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+          APNS_KEY_ID: ${{ secrets.APNS_KEY_ID }}
+          APNS_TEAM_ID: ${{ secrets.APNS_TEAM_ID }}
+          APNS_PRIVATE_KEY: ${{ secrets.APNS_PRIVATE_KEY }}
+          APNS_BUNDLE_ID: ${{ secrets.APNS_BUNDLE_ID }}
+          APNS_ENVIRONMENT: ${{ secrets.APNS_ENVIRONMENT }}
+          JARVIS_WEBHOOK_URL: ${{ secrets.JARVIS_WEBHOOK_URL }}
+          JARVIS_WEBHOOK_KEY: ${{ secrets.JARVIS_WEBHOOK_KEY }}
+        run: |
+          set -euo pipefail
+          put_if_present() {
+            local name="$1"
+            local value="${!name-}"
+            local attempt=1
+            if [ -z "$value" ]; then
+              echo "missing $name"
+              return 1
+            fi
+            while [ "$attempt" -le 4 ]; do
+              if printf '%s' "$value" | npx wrangler secret put "$name"; then
+                echo "set $name"
+                return 0
+              fi
+              echo "retry $name ($attempt)"
+              sleep $((attempt * 4))
+              attempt=$((attempt + 1))
+            done
+            echo "failed $name"
+            return 1
+          }
+          required=(
+            GEMINI_API_KEY
+            GROQ_API_KEY
+            JARVIS_APP_TOKEN
+            TWILIO_ACCOUNT_SID
+            TWILIO_AUTH_TOKEN
+            TWILIO_FROM_NUMBER
+            OWNER_PHONE
+            ELEVENLABS_API_KEY
+            ELEVENLABS_AGENT_ID
+          )
+          optional=(
+            ELEVENLABS_WEBHOOK_SECRET
+            ELEVENLABS_FORCE_POLLY
+            TAVILY_API_KEY
+            BRAVE_API_KEY
+            APNS_KEY_ID
+            APNS_TEAM_ID
+            APNS_PRIVATE_KEY
+            APNS_BUNDLE_ID
+            APNS_ENVIRONMENT
+            JARVIS_WEBHOOK_URL
+            JARVIS_WEBHOOK_KEY
+          )
+          missing_required=()
+          missing_optional=()
+          for name in "${required[@]}"; do
+            if [ -z "${!name-}" ]; then
+              echo "missing $name"
+              missing_required+=("$name")
+            else
+              put_if_present "$name"
+            fi
+          done
+          for name in "${optional[@]}"; do
+            if [ -z "${!name-}" ]; then
+              echo "missing $name"
+              missing_optional+=("$name")
+            else
+              put_if_present "$name"
+            fi
+          done
+          {
+            echo "## Worker secrets"
+            if [ ${#missing_required[@]} -eq 0 ]; then
+              echo "Required secrets were set."
+            else
+              echo "Missing required GitHub secrets (not sent to the worker):"
+              for name in "${missing_required[@]}"; do echo "- \`$name\`"; done
+            fi
+            if [ ${#missing_optional[@]} -gt 0 ]; then
+              echo "Optional secrets not set:"
+              for name in "${missing_optional[@]}"; do echo "- \`$name\`"; done
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Point Twilio voice and SMS webhooks
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TWILIO_ACCOUNT_SID:-}" ] || [ -z "${TWILIO_AUTH_TOKEN:-}" ]; then
+            echo "TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN are required to set the number webhooks."
+            exit 1
+          fi
+          if [ -z "${WORKER_URL:-}" ]; then
+            echo "WORKER_URL is missing, so the Twilio webhooks were not changed."
+            exit 1
+          fi
+          base="${WORKER_URL%/}"
+          voice="${base}/calls/inbound"
+          sms="${base}/calls/sms"
+          status="${base}/calls/inbound-status"
+          # Incoming number for the bought Twilio UK mobile. Not an auth token.
+          sid="PN66046ff3fcdfc8f9aa8ed11811dd9d5d"
+          curl -sS -u "${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}" \
+            -o /tmp/twilio-number.json \
+            -X POST "https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/IncomingPhoneNumbers/${sid}.json" \
+            --data-urlencode "VoiceUrl=${voice}" \
+            --data-urlencode "VoiceMethod=POST" \
+            --data-urlencode "SmsUrl=${sms}" \
+            --data-urlencode "SmsMethod=POST" \
+            --data-urlencode "StatusCallback=${status}" \
+            --data-urlencode "StatusCallbackMethod=POST"
+          EXPECT_VOICE="$voice" EXPECT_SMS="$sms" EXPECT_STATUS="$status" node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          const body = JSON.parse(readFileSync("/tmp/twilio-number.json", "utf8"));
+          if (body.code || !body.sid) {
+            console.error(body.message || "Twilio did not update the number.");
+            process.exit(1);
+          }
+          const voice = body.voice_url || "";
+          const sms = body.sms_url || "";
+          if (voice !== process.env.EXPECT_VOICE || sms !== process.env.EXPECT_SMS) {
+            console.error("Twilio saved different webhook URLs than this deploy.");
+            process.exit(1);
+          }
+          if (body.status_callback !== process.env.EXPECT_STATUS || body.status_callback_method !== "POST") {
+            console.error("Twilio did not save the inbound status callback.");
+            process.exit(1);
+          }
+          if (body.voice_method !== "POST" || body.sms_method !== "POST") {
+            console.error("Twilio did not keep POST for voice and SMS.");
+            process.exit(1);
+          }
+          console.log(`Twilio ${body.sid}`);
+          console.log(`Voice POST ${voice}`);
+          console.log(`SMS POST ${sms}`);
+          NODE
+          {
+            echo "## Twilio webhooks"
+            echo "- Voice POST \`${voice}\`"
+            echo "- SMS POST \`${sms}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Register ElevenLabs post-call webhook and settle calls
+        env:
+          JARVIS_APP_TOKEN: ${{ secrets.JARVIS_APP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${JARVIS_APP_TOKEN:-}" ] || [ -z "${WORKER_URL:-}" ]; then
+            echo "JARVIS_APP_TOKEN and WORKER_URL are required to settle calls."
+            exit 1
+          fi
+          base="${WORKER_URL%/}"
+          attempt=1
+          while [ "$attempt" -le 4 ]; do
+            code=$(curl -sS -o /tmp/settle.json -w "%{http_code}" \
+              -X POST "${base}/calls/settle" \
+              -H "authorization: Bearer ${JARVIS_APP_TOKEN}" \
+              -H "content-type: application/json" \
+              --data '{}')
+            echo "settle HTTP ${code} attempt ${attempt}"
+            if node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          const body = JSON.parse(readFileSync("/tmp/settle.json", "utf8"));
+          const target = "call_2fe78971459946b3bd5bdcd82c15b378";
+          const settled = Array.isArray(body.settled) ? body.settled : [];
+          const hit = settled.find((row) => row && row.call_id === target);
+          const webhook = body.webhook || {};
+          const seen = body.target || {};
+          console.log(`webhook step=${webhook.step || ""} ok=${Boolean(webhook.ok)} created=${Boolean(webhook.created)} attached=${Boolean(webhook.attached)} status=${webhook.status ?? 0} error=${webhook.error || ""}`);
+          console.log(`target found=${Boolean(seen.found)} status=${seen.status || ""} conversation=${Boolean(seen.has_conversation)} screen=${seen.screen || ""}`);
+          if (body.note) console.log(`sweep ${body.note}`);
+          const sms = body.sms || {};
+          const pollyId = "call_f0ce67d2098c49208dacf2c63f719957";
+          const polly = settled.find((row) => row && row.call_id === pollyId);
+          console.log(`sms sid=${sms.sid || ""} status=${sms.status || ""} error_code=${sms.error_code || ""} error=${sms.error || ""} sent=${Boolean(sms.sent)}`);
+          const correction = body.correction || {};
+          console.log(`correction sid=${correction.sid || ""} status=${correction.status || ""} error_code=${correction.error_code || ""} error=${correction.error || ""} sent=${Boolean(correction.sent)}`);
+          const choice = body.choice || {};
+          console.log(`choice sid=${choice.sid || ""} status=${choice.status || ""} error_code=${choice.error_code || ""} error=${choice.error || ""} sent=${Boolean(choice.sent)}`);
+          console.log(`polly ${polly ? `${polly.status} message=${polly.message_id || "none"}` : "missing"}`);
+          if (polly && polly.spoken) console.log(polly.spoken);
+          if (hit && hit.message_id && webhook.attached && polly && (polly.message_id || polly.status === "completed")) {
+            if (/…|They said|The user|you have a message/i.test(hit.spoken || "")) process.exit(1);
+            process.exit(0);
+          }
+          for (const row of settled) {
+            if (!row) continue;
+            console.error(`${row.call_id} ${row.status} message=${row.message_id || "none"}`);
+          }
+          process.exit(1);
+          NODE
+            then
+              break
+            fi
+            if [ "$attempt" -eq 4 ]; then
+              echo "Settle did not store the backfill message."
+              exit 1
+            fi
+            sleep $((attempt * 8))
+            attempt=$((attempt + 1))
+          done
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          const body = JSON.parse(readFileSync("/tmp/settle.json", "utf8"));
+          const target = "call_2fe78971459946b3bd5bdcd82c15b378";
+          const settled = Array.isArray(body.settled) ? body.settled : [];
+          const hit = settled.find((row) => row && row.call_id === target);
+          const webhook = body.webhook || {};
+          console.log(`webhook ok=${Boolean(webhook.ok)} created=${Boolean(webhook.created)} attached=${Boolean(webhook.attached)} status=${webhook.status ?? 0}`);
+          if (!hit || !hit.message_id) {
+            console.error(`No unread message for ${target}.`);
+            for (const row of settled) {
+              if (!row) continue;
+              console.error(`${row.call_id} ${row.status} message=${row.message_id || "none"}`);
+            }
+            process.exit(1);
+          }
+          console.log(`${target} ${hit.message_id} ${hit.status}`);
+          console.log(hit.spoken || "");
+          const sms = body.sms || {};
+          const polly = settled.find((row) => row && row.call_id === "call_f0ce67d2098c49208dacf2c63f719957");
+          console.log(`sms sid=${sms.sid || ""} status=${sms.status || ""} error_code=${sms.error_code || ""} error=${sms.error || ""} sent=${Boolean(sms.sent)}`);
+          const correction = body.correction || {};
+          console.log(`correction sid=${correction.sid || ""} status=${correction.status || ""} error_code=${correction.error_code || ""} error=${correction.error || ""} sent=${Boolean(correction.sent)}`);
+          const choice = body.choice || {};
+          console.log(`choice sid=${choice.sid || ""} status=${choice.status || ""} error_code=${choice.error_code || ""} error=${choice.error || ""} sent=${Boolean(choice.sent)}`);
+          console.log(`polly ${polly ? `${polly.call_id} ${polly.message_id || "none"} ${polly.status}` : "missing"}`);
+          if (polly && polly.spoken) console.log(polly.spoken);
+          if (/…|They said|The user|you have a message/i.test(hit.spoken || "")) {
+            console.error("Spoken line is still unpolished.");
+            process.exit(1);
+          }
+          if (!webhook.attached) {
+            console.error("Post-call webhook was not attached.");
+            process.exit(1);
+          }
+          const summary = [
+            "## Post-call settle",
+            `- Webhook attached: ${Boolean(webhook.attached)} (created ${Boolean(webhook.created)}, HTTP ${webhook.status ?? 0})`,
+            `- ${target}: \`${hit.message_id}\``,
+            `- Spoken: ${hit.spoken || ""}`,
+          ].join("\n");
+          const { appendFileSync } = await import("node:fs");
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
+          NODE
+
+      - name: Live worker checks
+        env:
+          JARVIS_APP_TOKEN: ${{ secrets.JARVIS_APP_TOKEN }}
+        run: bash ../.github/scripts/live-check.sh

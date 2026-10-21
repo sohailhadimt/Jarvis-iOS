@@ -50,15 +50,59 @@ enum CloudStage {
 }
 
 enum CloudTime {
-    static func display(_ iso: String?) -> String {
-        guard let iso, !iso.isEmpty else { return "" }
+    static func date(_ iso: String) -> Date? {
         let fractional = ISO8601DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let plain = ISO8601DateFormatter()
         plain.formatOptions = [.withInternetDateTime]
-        let date = fractional.date(from: iso) ?? plain.date(from: iso)
-        return date?.formatted(date: .abbreviated, time: .shortened) ?? iso
+        return fractional.date(from: iso) ?? plain.date(from: iso)
     }
+
+    static func display(_ iso: String?) -> String {
+        guard let iso, !iso.isEmpty else { return "" }
+        return date(iso)?.formatted(date: .abbreviated, time: .shortened) ?? iso
+    }
+}
+
+struct AgentPending: Decodable, Sendable {
+    var messageId: String
+    var status: String
+}
+
+struct AgentMessage: Decodable, Sendable {
+    var id: String
+    var conversationId: String
+    var role: String
+    var text: String
+    var status: String
+    var replyTo: String?
+    var createdAt: String
+}
+
+struct CloudChatReply: Decodable, Sendable {
+    var ok: Bool
+    var reply: String
+}
+
+struct LiveTicket: Decodable, Sendable {
+    var ok: Bool
+    var token: String
+    var model: String
+    var websocketURL: String
+    var expiresAt: String?
+    var sessionExpiresAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case ok, token, model
+        case websocketURL = "websocket_url"
+        case expiresAt = "expires_at"
+        case sessionExpiresAt = "session_expires_at"
+    }
+}
+
+enum LiveTicketResult: Sendable {
+    case ready(LiveTicket)
+    case unavailable(String)
 }
 
 struct CloudHealth: Decodable, Sendable {
@@ -370,7 +414,7 @@ enum CloudSpeech {
         if !failed.isEmpty {
             facts.append("Failed. " + joined(failed.map { task in
                 var line = task.goal
-                if let error = task.error, !error.isEmpty { line += ". \(error)" }
+                if let error = task.error, !error.isEmpty { line += ". \(JarvisLines.explain(error))" }
                 return line
             }, count: failed.count))
         }
@@ -420,7 +464,7 @@ enum CloudSpeech {
             let lines = detail.subtasks.map { sub in
                 var line = "\(sub.agent) \(sub.status): \(sub.title)"
                 if let summary = sub.resultSummary, !summary.isEmpty { line += ". \(summary)" }
-                if let error = sub.error, !error.isEmpty { line += ". \(error)" }
+                if let error = sub.error, !error.isEmpty { line += ". \(JarvisLines.explain(error))" }
                 return line
             }
             parts.append("Subtasks. " + lines.joined(separator: " "))
@@ -492,7 +536,7 @@ enum CloudSpeech {
     private static func taskLine(_ task: CloudTask) -> String {
         var line = "\(task.status): \(task.goal)"
         if let summary = task.resultSummary, !summary.isEmpty { line += ". \(summary)" }
-        if let error = task.error, !error.isEmpty { line += ". \(error)" }
+        if let error = task.error, !error.isEmpty { line += ". \(JarvisLines.explain(error))" }
         return line
     }
 
@@ -525,6 +569,40 @@ struct CloudClient: Sendable {
     var base: URL
     var token: String
 
+    func postAgentChat(message: String, conversationId: String) async throws -> AgentPending {
+        try await sendJSON(method: "POST", path: "/agent/chat", body: [
+            "message": message,
+            "conversationId": conversationId,
+        ])
+    }
+
+    func agentMessages(conversationId: String, since: String) async throws -> [AgentMessage] {
+        struct Envelope: Decodable { var messages: [AgentMessage] }
+        let envelope: Envelope = try await sendNoBody(
+            method: "GET",
+            path: "/agent/messages",
+            query: [
+                URLQueryItem(name: "conversationId", value: conversationId),
+                URLQueryItem(name: "since", value: since),
+            ]
+        )
+        return envelope.messages
+    }
+
+    func converse(messages: [[String: String]], location: (lat: Double, lon: Double)? = nil) async -> String? {
+        do {
+            var body: [String: Any] = ["messages": messages]
+            if let location {
+                body["location"] = ["lat": location.lat, "lon": location.lon]
+            }
+            let envelope: CloudChatReply = try await sendJSON(method: "POST", path: "/chat", body: body)
+            let text = envelope.reply.trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? nil : text
+        } catch {
+            return nil
+        }
+    }
+
     func health() async throws -> CloudHealth {
         let (data, status) = try await raw(method: "GET", path: "/health", authorize: false, body: nil, query: [])
         if let health = try? JSONDecoder().decode(CloudHealth.self, from: data), status == 200 || status == 503 {
@@ -550,6 +628,37 @@ struct CloudClient: Sendable {
 
     func briefing() async throws -> CloudBriefing {
         try await decode(path: "/briefing")
+    }
+
+    /// A short-lived Gemini Live token. The API key stays on the worker.
+    func liveTicket() async -> LiveTicketResult {
+        do {
+            let body = Data("{}".utf8)
+            let (data, status) = try await raw(method: "POST", path: "/voice/live-token", authorize: true, body: body, query: [])
+            if status == 429 { return .unavailable("quota") }
+            guard (200..<300).contains(status),
+                  let ticket = try? JSONDecoder().decode(LiveTicket.self, from: data),
+                  ticket.ok,
+                  ticket.websocketURL.hasPrefix("wss://"),
+                  !ticket.token.isEmpty else {
+                return .unavailable("unavailable")
+            }
+            return .ready(ticket)
+        } catch {
+            return .unavailable("unavailable")
+        }
+    }
+
+    /// Turn and barge-in notes. A failure stays on the phone for one more try.
+    func postVoiceDebug(events: [[String: String]]) async -> Bool {
+        guard !events.isEmpty else { return true }
+        do {
+            let body = try JSONSerialization.data(withJSONObject: ["events": events])
+            let (_, status) = try await raw(method: "POST", path: "/debug/voice", authorize: true, body: body, query: [])
+            return (200..<300).contains(status)
+        } catch {
+            return false
+        }
     }
 
     func approvals(status: String? = nil) async throws -> [CloudApproval] {
@@ -697,6 +806,9 @@ struct CloudClient: Sendable {
             "avatar": agent.avatar,
             "color_hex": agent.colorHex,
             "memory": agent.memory,
+            "tools": agent.tools,
+            "voice_id": agent.voiceID,
+            "voice_name": agent.voiceName,
         ]
         let path = creating ? "/agents" : "/agents/\(Self.path(agent.id))"
         let envelope: PersonaEnvelope = try await sendJSON(method: "POST", path: path, body: body)
@@ -744,8 +856,30 @@ struct CloudClient: Sendable {
         try await sendNoBody(method: "GET", path: "/calls/config")
     }
 
+    /// Sends from the Twilio number. The spoken result never includes the destination.
+    func sendTwilioSms(to number: String, body: String) async -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: ["to": number, "body": body]) else {
+            return "The text was not sent."
+        }
+        do {
+            let (raw, status) = try await raw(method: "POST", path: "/messages/sms", authorize: true, body: data, query: [])
+            guard (200..<300).contains(status),
+                  let parsed = try? JSONSerialization.jsonObject(with: raw) as? [String: Any] else {
+                return "The text was not sent."
+            }
+            let sid = parsed["sid"] as? String ?? ""
+            if parsed["ok"] as? Bool == true, sid.range(of: #"^SM[0-9a-fA-F]{32}$"#, options: .regularExpression) != nil {
+                return "The text is sent."
+            }
+            let error = (parsed["error"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return error.isEmpty ? "The text was not sent." : error
+        } catch {
+            return "The text was not sent."
+        }
+    }
+
     func placeOutboundCall(to number: String, contactName: String, brief: String) async -> CallPlaceResult {
-        let body: [String: Any] = ["to": number, "contact_name": contactName, "brief": brief]
+        let body: [String: Any] = ["to": number, "purpose": brief, "contact_name": contactName]
         let data: Data
         do {
             data = try JSONSerialization.data(withJSONObject: body)
@@ -753,10 +887,10 @@ struct CloudClient: Sendable {
             return .failed("The call brief could not be sent.")
         }
         do {
-            let (payload, status) = try await raw(method: "POST", path: "/calls", authorize: true, body: data, query: [])
+            let (payload, status) = try await raw(method: "POST", path: "/calls/outbound", authorize: true, body: data, query: [])
             if status == 503 { return .notSetUp }
             guard (200..<300).contains(status) else {
-                return .failed(Self.failure(data: payload, status: status).localizedDescription)
+                return .failed(JarvisLines.explain(Self.failure(data: payload, status: status)))
             }
             let envelope = try JSONDecoder().decode(CallEnvelope.self, from: payload)
             return .placed(envelope.call)
@@ -764,15 +898,255 @@ struct CloudClient: Sendable {
             if case .http(let code, let message) = error, code == 503 || message.contains("Calling not set up") {
                 return .notSetUp
             }
-            return .failed(error.localizedDescription)
+            return .failed(JarvisLines.explain(error))
         } catch {
-            return .failed(error.localizedDescription)
+            return .failed(JarvisLines.explain(error))
         }
     }
 
-    func outboundCall(id: String) async throws -> PhoneCallRecord {
-        let envelope: CallEnvelope = try await sendNoBody(method: "GET", path: "/calls/\(Self.path(id))")
+    func setAway(_ text: String) async throws -> Bool {
+        let body = try JSONSerialization.data(withJSONObject: ["text": text])
+        let (payload, status) = try await raw(method: "POST", path: "/calls/away", authorize: true, body: body, query: [])
+        guard (200..<300).contains(status) else { return false }
+        let parsed = try JSONSerialization.jsonObject(with: payload) as? [String: Any]
+        return parsed?["active"] as? Bool ?? false
+    }
+
+    func interceptorState() async throws -> InterceptorState {
+        try await sendNoBody(method: "GET", path: "/calls/interceptor")
+    }
+
+    func setInterceptor(enabled: Bool? = nil, busy: Bool? = nil) async throws -> InterceptorState {
+        var body: [String: Any] = [:]
+        if let enabled { body["enabled"] = enabled }
+        if let busy { body["busy"] = busy }
+        return try await sendJSON(method: "POST", path: "/calls/interceptor", body: body)
+    }
+
+    func awayStatus() async throws -> (active: Bool, instruction: String) {
+        let (payload, status) = try await raw(method: "GET", path: "/calls/away", authorize: true, body: nil, query: [])
+        guard (200..<300).contains(status),
+              let parsed = try JSONSerialization.jsonObject(with: payload) as? [String: Any] else {
+            return (false, "")
+        }
+        return (parsed["active"] as? Bool ?? false, parsed["instruction"] as? String ?? "")
+    }
+
+    func postPresence(activity: String, busy: Bool, lat: Double?, lon: Double?) async {
+        var body: [String: Any] = ["activity": activity, "busy": busy]
+        if let lat, let lon {
+            body["lat"] = lat
+            body["lon"] = lon
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else { return }
+        _ = try? await raw(method: "POST", path: "/calls/presence", authorize: true, body: data, query: [])
+    }
+
+    func decideCall(id: String, choice: String) async -> Bool {
+        guard let body = try? JSONSerialization.data(withJSONObject: ["choice": choice]) else { return false }
+        guard let (payload, status) = try? await raw(method: "POST", path: "/calls/\(Self.path(id))/decide", authorize: true, body: body, query: []) else {
+            return false
+        }
+        return (200..<300).contains(status) && !payload.isEmpty
+    }
+
+    func recordingData(id: String) async throws -> Data {
+        let (payload, status) = try await raw(method: "GET", path: "/calls/\(Self.path(id))/recording", authorize: true, body: nil, query: [])
+        guard (200..<300).contains(status), !payload.isEmpty else { throw CloudFailure.http(status, "No recording yet.") }
+        return payload
+    }
+
+    func outboundCall(id: String, refresh: Bool = true) async throws -> PhoneCallRecord {
+        let query = refresh ? [] : [URLQueryItem(name: "refresh", value: "0")]
+        let envelope: CallEnvelope = try await sendNoBody(method: "GET", path: "/calls/\(Self.path(id))", query: query)
         return envelope.call
+    }
+
+    func activeInboundCalls() async throws -> [PhoneCallRecord] {
+        let envelope: CallListEnvelope = try await sendNoBody(method: "GET", path: "/calls/active")
+        return envelope.calls
+    }
+
+    func screenCall(id: String, action: String) async -> ScreenResult {
+        await postCallAction(path: "/calls/\(Self.path(id))/screen", body: ["action": action])
+    }
+
+    func setCallPersonal(id: String, allow: Bool, note: String) async -> ScreenResult {
+        await postCallAction(path: "/calls/\(Self.path(id))/personal", body: ["allow": allow, "note": note])
+    }
+
+    func registerCallDevice(token: String) async -> ScreenResult {
+        await postCallAction(path: "/calls/device", body: ["token": token])
+    }
+
+    func replaceCallPermissions(_ rules: [[String: Any]]) async -> ScreenResult {
+        await postCallAction(path: "/calls/permissions", body: ["rules": rules])
+    }
+
+    func callQuestions() async throws -> [CallQuestion] {
+        let envelope: QuestionEnvelope = try await sendNoBody(method: "GET", path: "/calls/questions")
+        return envelope.questions
+    }
+
+    func answerCallQuestion(callId: String, questionId: String, text: String) async -> ScreenResult {
+        await postCallAction(path: "/calls/\(Self.path(callId))/answer", body: ["question_id": questionId, "text": text])
+    }
+
+    func ownerCallSettings() async throws -> OwnerCallSettings {
+        try await sendNoBody(method: "GET", path: "/calls/settings")
+    }
+
+    func saveOwnerCallSettings(_ settings: OwnerCallSettings) async -> ScreenResult {
+        await postCallAction(path: "/calls/settings", body: [
+            "mobile": settings.mobile,
+            "quiet_start": settings.quietStart,
+            "quiet_end": settings.quietEnd,
+            "max_calls_per_day": settings.maxCallsPerDay,
+            "urgent_only": settings.urgentOnly,
+            "question_timeout_seconds": settings.questionTimeoutSeconds,
+        ])
+    }
+
+    func ownerAlerts() async throws -> [OwnerAlert] {
+        let envelope: AlertEnvelope = try await sendNoBody(method: "GET", path: "/calls/alerts")
+        return envelope.alerts
+    }
+
+    func unreadCallMessages() async throws -> [CallMessage] {
+        struct Envelope: Decodable { var messages: [CallMessage] }
+        let envelope: Envelope = try await sendNoBody(
+            method: "GET",
+            path: "/calls/messages",
+            query: [URLQueryItem(name: "unread", value: "1")]
+        )
+        return envelope.messages
+    }
+
+    func recentCallMessages() async throws -> [CallMessage] {
+        struct Envelope: Decodable { var messages: [CallMessage] }
+        let envelope: Envelope = try await sendNoBody(method: "GET", path: "/calls/messages")
+        return envelope.messages
+    }
+
+    func callMessage(id: String) async throws -> CallMessage {
+        struct Envelope: Decodable { var message: CallMessage }
+        let envelope: Envelope = try await sendNoBody(method: "GET", path: "/calls/messages/\(Self.path(id))")
+        return envelope.message
+    }
+
+    func markCallMessageRead(id: String) async -> Bool {
+        struct Ack: Decodable { var ok: Bool }
+        do {
+            let ack: Ack = try await sendNoBody(method: "POST", path: "/calls/messages/\(Self.path(id))/read")
+            return ack.ok
+        } catch {
+            return false
+        }
+    }
+
+    func pairingTicket(refresh: Bool) async throws -> PairingTicket {
+        if refresh {
+            return try await sendJSON(method: "POST", path: "/calls/pair", body: [String: Any]())
+        }
+        return try await sendNoBody(method: "GET", path: "/calls/pair")
+    }
+
+    func callHunts() async throws -> [CallHunt] {
+        let envelope: HuntListEnvelope = try await sendNoBody(method: "GET", path: "/calls/hunts")
+        return envelope.hunts
+    }
+
+    func chooseHunt(huntID: String, quoteID: String) async -> String? {
+        await shopMessage(method: "POST", path: "/calls/hunts/\(Self.path(huntID))/choose", body: ["quote_id": quoteID])
+    }
+
+    func createShop(goal: String, providers: [[String: String]]) async throws -> String {
+        return try await createShopDraft(goal: goal, providers: providers).message
+    }
+
+    /// A draft list. An empty id means no businesses were found and nothing can be rung.
+    func createShopDraft(goal: String, providers: [[String: String]]) async throws -> (id: String, message: String) {
+        let ack: ShopAck = try await sendJSON(
+            method: "POST",
+            path: "/calls/hunts",
+            body: ["goal": goal, "providers": providers]
+        )
+        return (ack.huntId ?? "", ack.message ?? "The list is on your phone, Sir.")
+    }
+
+    func replaceShop(huntID: String, providers: [[String: String]]) async throws -> String {
+        let ack: ShopAck = try await sendJSON(
+            method: "POST",
+            path: "/calls/hunts/\(Self.path(huntID))/providers",
+            body: ["providers": providers]
+        )
+        return ack.message ?? "The list is updated, Sir."
+    }
+
+    func startShop(huntID: String) async throws -> String {
+        let ack: ShopAck = try await sendJSON(
+            method: "POST",
+            path: "/calls/hunts/\(Self.path(huntID))/start",
+            body: [String: Any]()
+        )
+        return ack.message ?? "Calling the first one now, Sir."
+    }
+
+    private func shopMessage(method: String, path: String, body: [String: Any]) async -> String? {
+        do {
+            let ack: ShopAck = try await sendJSON(method: method, path: path, body: body)
+            return ack.message
+        } catch {
+            return nil
+        }
+    }
+
+    func postBusy(_ blocks: [[String: Any]]) async {
+        guard let data = try? JSONSerialization.data(withJSONObject: ["blocks": blocks]) else { return }
+        _ = try? await raw(method: "POST", path: "/calendar/busy", authorize: true, body: data, query: [])
+    }
+
+    private func postCallAction(path: String, body: [String: Any]) async -> ScreenResult {
+        let data: Data
+        do {
+            data = try JSONSerialization.data(withJSONObject: body)
+        } catch {
+            return .failed("That request could not be sent.")
+        }
+        do {
+            let (payload, status) = try await raw(method: "POST", path: path, authorize: true, body: data, query: [])
+            if status == 503 {
+                let message = JarvisLines.explain(Self.failure(data: payload, status: status))
+                return .notSetUp(message)
+            }
+            guard (200..<300).contains(status) else {
+                return .failed(JarvisLines.explain(Self.failure(data: payload, status: status)))
+            }
+            let audio = (try? JSONDecoder().decode(ScreenAck.self, from: payload))?.audio ?? ""
+            return .done(audio)
+        } catch {
+            return .failed(JarvisLines.explain(error))
+        }
+    }
+
+    func createMission(goal: String) async throws -> CloudMission {
+        let envelope: MissionEnvelope = try await sendJSON(method: "POST", path: "/missions", body: ["goal": goal])
+        return envelope.mission
+    }
+
+    func missions() async throws -> [CloudMission] {
+        let envelope: MissionListEnvelope = try await sendNoBody(method: "GET", path: "/missions")
+        return envelope.missions
+    }
+
+    func routines() async throws -> [CloudRoutine] {
+        let envelope: RoutineListEnvelope = try await sendNoBody(method: "GET", path: "/routines")
+        return envelope.routines
+    }
+
+    func setRoutine(id: String, enabled: Bool) async throws {
+        let _: AckEnvelope = try await sendJSON(
+            method: "POST", path: "/routines/\(Self.path(id))", body: ["enabled": enabled])
     }
 
     func postGroupLine(author: String, text: String) async throws {
@@ -780,12 +1154,19 @@ struct CloudClient: Sendable {
     }
 
     private struct CallEnvelope: Decodable { var call: PhoneCallRecord }
+    private struct CallListEnvelope: Decodable { var calls: [PhoneCallRecord] }
+    private struct QuestionEnvelope: Decodable { var questions: [CallQuestion] }
+    private struct AlertEnvelope: Decodable { var alerts: [OwnerAlert] }
+    private struct ScreenAck: Decodable { var audio: String? }
     private struct PersonaListEnvelope: Decodable { var agents: [CloudPersona] }
     private struct PersonaEnvelope: Decodable { var agent: CloudPersona }
     private struct PersonaTaskEnvelope: Decodable { var task: CloudPersonaTask }
     private struct PersonaTaskListEnvelope: Decodable { var tasks: [CloudPersonaTask] }
     private struct GroupEnvelope: Decodable { var messages: [CloudGroupLine] }
     private struct AckEnvelope: Decodable { var ok: Bool? }
+    private struct MissionEnvelope: Decodable { var mission: CloudMission }
+    private struct MissionListEnvelope: Decodable { var missions: [CloudMission] }
+    private struct RoutineListEnvelope: Decodable { var routines: [CloudRoutine] }
 
     private static func path(_ id: String) -> String {
         id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
@@ -801,11 +1182,59 @@ struct CloudPersona: Decodable, Sendable {
     var colorHex: String
     var memory: String
     var builtin: Bool
+    var tools: [String]
+    var voiceID: String
+    var voiceName: String
 
     enum CodingKeys: String, CodingKey {
-        case id, name, role, instructions, avatar, memory, builtin
+        case id, name, role, instructions, avatar, memory, builtin, tools
         case colorHex = "color_hex"
+        case voiceID = "voice_id"
+        case voiceName = "voice_name"
     }
+
+    init(id: String, name: String, role: String, instructions: String, avatar: String, colorHex: String, memory: String, builtin: Bool, tools: [String] = [], voiceID: String = "", voiceName: String = "") {
+        self.id = id
+        self.name = name
+        self.role = role
+        self.instructions = instructions
+        self.avatar = avatar
+        self.colorHex = colorHex
+        self.memory = memory
+        self.builtin = builtin
+        self.tools = tools
+        self.voiceID = voiceID
+        self.voiceName = voiceName
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        role = try c.decode(String.self, forKey: .role)
+        instructions = try c.decode(String.self, forKey: .instructions)
+        avatar = try c.decode(String.self, forKey: .avatar)
+        colorHex = try c.decode(String.self, forKey: .colorHex)
+        memory = try c.decode(String.self, forKey: .memory)
+        builtin = try c.decode(Bool.self, forKey: .builtin)
+        tools = try c.decodeIfPresent([String].self, forKey: .tools) ?? []
+        voiceID = try c.decodeIfPresent(String.self, forKey: .voiceID) ?? ""
+        voiceName = try c.decodeIfPresent(String.self, forKey: .voiceName) ?? ""
+    }
+}
+
+struct CloudMission: Decodable, Sendable {
+    var id: String
+    var goal: String
+    var status: String
+    var report: String?
+}
+
+struct CloudRoutine: Decodable, Sendable {
+    var id: String
+    var name: String
+    var cron: String
+    var enabled: Bool
 }
 
 struct CloudPersonaTask: Decodable, Sendable {
@@ -823,13 +1252,53 @@ struct CloudPersonaTask: Decodable, Sendable {
     }
 }
 
+struct InterceptorState: Decodable, Sendable {
+    var enabled: Bool
+    var busy: Bool
+}
+
 struct CallingConfig: Decodable, Sendable {
     var configured: Bool
     var message: String
     var missing: [String]
+    var fromNumber: String?
+    var forwarding: CallingForwarding?
+    var screening: ScreeningFlags?
+    var assistantWebhook: Bool?
+    var texts: String?
+
+    enum CodingKeys: String, CodingKey {
+        case configured, message, missing, forwarding, screening, texts
+        case fromNumber = "from_number"
+        case assistantWebhook = "assistant_webhook"
+    }
 }
 
-struct PhoneCallLine: Decodable, Sendable {
+struct CallingForwarding: Decodable, Sendable {
+    var unconditional: String
+    var noAnswer: String
+    var busy: String
+    var unreachable: String
+    var cancel: String
+
+    enum CodingKeys: String, CodingKey {
+        case unconditional, busy, unreachable, cancel
+        case noAnswer = "no_answer"
+    }
+}
+
+struct ScreeningFlags: Decodable, Sendable {
+    var mobileSet: Bool
+    var push: Bool
+    var voip: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case push, voip
+        case mobileSet = "mobile_set"
+    }
+}
+
+struct PhoneCallLine: Decodable, Equatable, Sendable {
     var role: String
     var text: String
 }
@@ -845,15 +1314,202 @@ struct PhoneCallRecord: Decodable, Sendable {
     var error: String?
     var createdAt: String
     var updatedAt: String
+    var direction: String?
+    var callerName: String?
+    var reason: String?
+    var personalAllowed: Bool?
+    var personalRequested: Bool?
+    var decision: String?
+    var stage: String?
+    var callbackNeeded: Bool?
+    var recording: Bool?
+    var delegation: CallDelegation?
 
-    var isFinished: Bool { status == "completed" || status == "failed" }
+    var isFinished: Bool { status == "completed" || status == "failed" || status == "declined" }
+    var isInbound: Bool { direction == "inbound" }
 
     enum CodingKeys: String, CodingKey {
-        case id, to, brief, status, transcript, summary, error
+        case id, to, brief, status, transcript, summary, error, direction, reason, decision
         case contactName = "contact_name"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case callerName = "caller_name"
+        case personalAllowed = "personal_allowed"
+        case personalRequested = "personal_requested"
+        case stage, recording, delegation
+        case callbackNeeded = "callback_needed"
     }
+}
+
+struct CallDelegation: Decodable, Sendable {
+    var id: String
+    var status: String
+    var summary: String
+    var decision: String?
+}
+
+struct CallQuestion: Decodable, Identifiable, Equatable, Sendable {
+    var id: String
+    var callId: String
+    var question: String
+    var status: String
+    var answer: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, question, status, answer
+        case callId = "call_id"
+    }
+}
+
+struct OwnerCallSettings: Codable, Equatable, Sendable {
+    var mobile: String
+    var quietStart: String
+    var quietEnd: String
+    var maxCallsPerDay: Int
+    var urgentOnly: Bool
+    var questionTimeoutSeconds: Int
+
+    enum CodingKeys: String, CodingKey {
+        case mobile
+        case quietStart = "quiet_start"
+        case quietEnd = "quiet_end"
+        case maxCallsPerDay = "max_calls_per_day"
+        case urgentOnly = "urgent_only"
+        case questionTimeoutSeconds = "question_timeout_seconds"
+    }
+}
+
+struct CallMessage: Decodable, Identifiable, Equatable, Sendable {
+    var id: String
+    var callId: String
+    var callerName: String
+    var summary: String
+    var spoken: String
+    var calledAt: String
+    var read: Bool
+    var transcript: [PhoneCallLine]
+    var recording: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case id, summary, spoken, read, transcript, recording
+        case callId = "call_id"
+        case callerName = "caller_name"
+        case calledAt = "called_at"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        callId = try container.decode(String.self, forKey: .callId)
+        callerName = try container.decodeIfPresent(String.self, forKey: .callerName) ?? ""
+        summary = try container.decodeIfPresent(String.self, forKey: .summary) ?? ""
+        spoken = try container.decodeIfPresent(String.self, forKey: .spoken) ?? ""
+        calledAt = try container.decodeIfPresent(String.self, forKey: .calledAt) ?? ""
+        read = try container.decodeIfPresent(Bool.self, forKey: .read) ?? false
+        transcript = try container.decodeIfPresent([PhoneCallLine].self, forKey: .transcript) ?? []
+        recording = try container.decodeIfPresent(Bool.self, forKey: .recording) ?? false
+    }
+}
+
+struct PairingTicket: Decodable, Equatable, Sendable {
+    var code: String
+    var expiresAt: String
+    var number: String
+    var paired: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case code, number, paired
+        case expiresAt = "expires_at"
+    }
+}
+
+struct CallQuote: Decodable, Identifiable, Equatable, Sendable {
+    var id: String
+    var business: String
+    var phone: String
+    var price: String
+    var availability: String
+    var fees: String
+    var terms: String
+    var summary: String
+    var status: String
+    var recommended: Bool
+    var transcript: [PhoneCallLine]
+
+    enum CodingKeys: String, CodingKey {
+        case id, business, phone, price, availability, fees, terms, summary, status, recommended, transcript
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        business = try container.decodeIfPresent(String.self, forKey: .business) ?? ""
+        phone = try container.decodeIfPresent(String.self, forKey: .phone) ?? ""
+        price = try container.decodeIfPresent(String.self, forKey: .price) ?? ""
+        availability = try container.decodeIfPresent(String.self, forKey: .availability) ?? ""
+        fees = try container.decodeIfPresent(String.self, forKey: .fees) ?? ""
+        terms = try container.decodeIfPresent(String.self, forKey: .terms) ?? ""
+        summary = try container.decodeIfPresent(String.self, forKey: .summary) ?? ""
+        status = try container.decodeIfPresent(String.self, forKey: .status) ?? ""
+        recommended = try container.decodeIfPresent(Bool.self, forKey: .recommended) ?? false
+        transcript = try container.decodeIfPresent([PhoneCallLine].self, forKey: .transcript) ?? []
+    }
+}
+
+struct CallHunt: Decodable, Identifiable, Equatable, Sendable {
+    var id: String
+    var goal: String
+    var status: String
+    var recommendedId: String
+    var quotes: [CallQuote]
+
+    enum CodingKeys: String, CodingKey {
+        case id, goal, status, quotes
+        case recommendedId = "recommended_id"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        goal = try container.decodeIfPresent(String.self, forKey: .goal) ?? ""
+        status = try container.decodeIfPresent(String.self, forKey: .status) ?? ""
+        recommendedId = try container.decodeIfPresent(String.self, forKey: .recommendedId) ?? ""
+        quotes = try container.decodeIfPresent([CallQuote].self, forKey: .quotes) ?? []
+    }
+}
+
+private struct ShopAck: Decodable {
+    var message: String?
+    var huntId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case message
+        case huntId = "hunt_id"
+    }
+}
+
+private struct HuntListEnvelope: Decodable {
+    var hunts: [CallHunt]
+}
+
+struct OwnerAlert: Decodable, Identifiable, Equatable, Sendable {
+    var id: String
+    var kind: String
+    var summary: String
+    var detail: String
+    var channel: String
+    var createdAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, summary, detail, channel
+        case createdAt = "created_at"
+    }
+}
+
+enum ScreenResult: Sendable {
+    case done(String)
+    case notSetUp(String)
+    case failed(String)
 }
 
 enum CallPlaceResult: Sendable {
@@ -867,9 +1523,11 @@ struct CloudGroupLine: Decodable, Sendable {
     var author: String
     var text: String
     var role: String?
+    var createdAt: String?
 
     enum CodingKeys: String, CodingKey {
         case id, author, text, role
+        case createdAt = "created_at"
     }
 }
 

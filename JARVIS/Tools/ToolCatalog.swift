@@ -141,4 +141,43 @@ enum ToolCatalog {
         }
         return tools
     }
+
+    /// Voice mode uses the Twilio number. The handset dialler is not offered, so a live turn cannot place a tel: call.
+    static func liveDefinitions(settings: AppSettings) -> [JSONValue] {
+        let blocked: Set<String> = ["call_contact", "call_number"]
+        var tools = definitions(settings: settings, includeWebSearch: true).filter { tool in
+            guard let name = tool["function"]?["name"]?.string else { return true }
+            return !blocked.contains(name)
+        }
+        tools.append(fn(
+            "place_outbound_call",
+            "Place a call from the JARVIS Twilio number. Nothing is dialled until the user taps Approve. The callee hears JARVIS speaking for Master Hadi, never Sohail. Do not say the call is ringing until the tool result says a call was placed.",
+            ["to": str("Phone number to ring"),
+             "contact_name": str("Who is being called"),
+             "brief": str("What to say. Start with Ask them, Tell them, or Book. Do not include the owner's number.")],
+            required: ["to", "brief"]
+        ))
+        tools.append(fn(
+            "shop_around",
+            "Draft a shop-around list of businesses. Nothing is rung until the user taps Approve. Do not book or pay on the quote calls.",
+            ["goal": str("What to shop for"),
+             "providers": str("Optional business names and phone numbers")],
+            required: ["goal"]
+        ))
+        tools.append(fn(
+            "book_quote",
+            "Book one quoted option with a confirmation call. Nothing is paid. Nothing is dialled until the user taps Approve.",
+            ["hunt_id": str("Comparison id, if known"),
+             "quote_id": str("Quote id, if known")]
+        ))
+        tools.append(fn(
+            "send_sms",
+            "Send an SMS from the JARVIS Twilio number. Nothing is sent until the user taps Approve.",
+            ["to": str("Destination number"),
+             "contact_name": str("Who the text is for"),
+             "body": str("Message text")],
+            required: ["to", "body"]
+        ))
+        return tools
+    }
 }

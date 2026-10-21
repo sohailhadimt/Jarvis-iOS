@@ -34,10 +34,9 @@ struct JarvisStandByWidget: Widget {
         StaticConfiguration(kind: SharedConfig.standByWidgetKind, provider: StandByProvider()) { entry in
             StandByWidgetView(entry: entry)
                 .containerBackground(.black, for: .widget)
-                .widgetURL(URL(string: "jarvis://standby"))
         }
         .configurationDisplayName("JARVIS")
-        .description("The JARVIS orb and last reply. Tap to open the StandBy conversation view.")
+        .description("The JARVIS orb and last reply. On the Lock Screen, a tap opens JARVIS listening. On the Home Screen, a tap opens StandBy.")
         .supportedFamilies([.systemSmall, .accessoryCircular, .accessoryRectangular, .accessoryInline])
     }
 }
@@ -47,6 +46,21 @@ struct StandByWidgetView: View {
     let entry: StandByEntry
 
     var body: some View {
+        content.widgetURL(destination)
+    }
+
+    /// Lock Screen families open listening. The Home Screen widget still opens StandBy.
+    private var destination: URL? {
+        switch family {
+        case .accessoryCircular, .accessoryRectangular, .accessoryInline:
+            URL(string: "jarvis://listen")
+        default:
+            URL(string: "jarvis://standby")
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         switch family {
         case .accessoryCircular:
             StaticOrb().padding(2)
@@ -56,7 +70,7 @@ struct StandByWidgetView: View {
                 Text(entry.reply).font(.caption2).lineLimit(3)
             }
         case .accessoryInline:
-            Label("JARVIS", systemImage: "waveform.circle")
+            Label("JARVIS", systemImage: "mic.fill")
         default:
             VStack(spacing: 6) {
                 StaticOrb().frame(maxWidth: .infinity, maxHeight: .infinity)

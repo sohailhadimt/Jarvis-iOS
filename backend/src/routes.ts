@@ -1,6 +1,14 @@
+import { agentChat, agentMessages, agentReply } from "./agent-chat";
+import { getCallMessage, listCallMessages, markCallMessageRead } from "./call-messages";
 import { authorize } from "./auth";
 import { handleCallApi, handleCallWebhook, isCallWebhook } from "./calls";
+import { bookApproved, chooseQuoteRoute, createHuntRoute, listHunts, replaceHuntRoute, startHuntRoute } from "./hunt";
+import { handleOwnerWebhook, isOwnerWebhook, rememberOrigin, routeOwnerApi } from "./owner-alert";
+import { routeRelay } from "./relay";
+import { handleScreenWebhook, inboundFallbackResponse, isScreenWebhook, routeScreeningApi } from "./screening";
+import { handleCallStream, lastCallDebug } from "./stream";
 import { buildBriefing } from "./briefing";
+import { chatResponse, probeSmsChat } from "./llm";
 import { computeNextRun, parseCron } from "./cron";
 import {
   dbAll,
@@ -32,8 +40,11 @@ import {
   readJson,
 } from "./http";
 import { markPersonaDraft, routePersona } from "./personas";
+import { lastSmsErrors, pairResponse, recordSmsError, saveBusy, sendOwnerSmsRoute } from "./sms-desk";
+import { liveTokenResponse } from "./live-token";
+import { readVoiceDebug, saveVoiceDebug } from "./voice-debug";
 import { optionalSourceUrls } from "./sources";
-import { isPipelineStage, parseMrr } from "./tools";
+import { isPipelineStage, parseMrr, toolsForNames } from "./tools";
 import type {
   ActivityRow,
   ApprovalRow,
@@ -57,11 +68,33 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
 
   try {
     if (request.method === "GET" && path === "/health") return health(env);
+    const streamId = /^\/calls\/stream\/(call_[A-Za-z0-9]+)$/.exec(path);
+    if (streamId && request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+      return handleCallStream(request, env, streamId[1]);
+    }
+    if (isOwnerWebhook(request.method, path)) return handleOwnerWebhook(request, env, path);
+    if (isScreenWebhook(request.method, path)) return handleScreenWebhook(request, env, path, ctx);
     if (isCallWebhook(request.method, path)) return handleCallWebhook(request, env, path);
     const auth = authorize(request, env.JARVIS_APP_TOKEN);
     if (!auth.ok) return auth.response;
+    ctx.waitUntil(rememberOrigin(env, url.origin));
+    if (request.method === "GET" && path === "/debug/last-calls") return lastCallDebug(env);
+    if (request.method === "GET" && path === "/debug/last-sms-errors") return lastSmsErrors(env);
+    if (request.method === "POST" && path === "/debug/voice") return saveVoiceDebug(request, env);
+    if (request.method === "POST" && path === "/voice/live-token") return liveTokenResponse(env);
+    if (request.method === "POST" && path === "/messages/sms") return sendOwnerSmsRoute(request, env);
+    if (request.method === "GET" && path === "/debug/voice") return json({ events: await readVoiceDebug(env) });
+    if (request.method === "POST" && path === "/debug/sms-probe") {
+      const report = await probeSmsChat(env, toolsForNames(["web_search", "draft_document", "request_approval"]));
+      await recordSmsError(env, "probe", JSON.stringify(report)).catch(() => undefined);
+      return json(report);
+    }
 
     const parts = path.split("/").filter(Boolean);
+    if (request.method === "POST" && path === "/chat") return chatResponse(request, env);
+    if (request.method === "POST" && path === "/agent/chat") return agentChat(request, env, ctx);
+    if (request.method === "POST" && path === "/agent/reply") return agentReply(request, env);
+    if (request.method === "GET" && path === "/agent/messages") return agentMessages(env, url);
     if (request.method === "POST" && path === "/tasks") return createTask(request, env, ctx);
     if (request.method === "GET" && path === "/tasks") return listTasks(env, url);
     if (request.method === "GET" && parts[0] === "tasks" && parts[1] && parts.length === 2) return getTask(env, parts[1]);
@@ -85,6 +118,32 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "POST" && parts[0] === "pipeline" && parts[1] && parts.length === 2) {
       return writePipeline(request, env, parts[1]);
     }
+    if (request.method === "GET" && path === "/calls/pair") return pairResponse(env, false);
+    if (request.method === "POST" && path === "/calls/pair") return pairResponse(env, true);
+    if (request.method === "GET" && path === "/calls/hunts") return listHunts(env);
+    if (request.method === "POST" && path === "/calls/hunts") return createHuntRoute(request, env);
+    if (request.method === "GET" && path === "/calls/messages") return listCallMessages(env, url);
+    if (request.method === "POST" && path === "/calls/settle") {
+      const { settleOpenCalls } = await import("./call-settle");
+      return settleOpenCalls(env);
+    }
+    const readMessage = /^\/calls\/messages\/(cmsg_[A-Za-z0-9]+)\/read$/.exec(path);
+    if (request.method === "POST" && readMessage) return markCallMessageRead(env, readMessage[1]);
+    const oneMessage = /^\/calls\/messages\/(cmsg_[A-Za-z0-9]+)$/.exec(path);
+    if (request.method === "GET" && oneMessage) return getCallMessage(env, oneMessage[1]);
+    const huntChoice = /^\/calls\/hunts\/(hunt_[A-Za-z0-9]+)\/choose$/.exec(path);
+    if (request.method === "POST" && huntChoice) return chooseQuoteRoute(request, env, huntChoice[1]);
+    const huntProviders = /^\/calls\/hunts\/(hunt_[A-Za-z0-9]+)\/providers$/.exec(path);
+    if (request.method === "POST" && huntProviders) return replaceHuntRoute(request, env, huntProviders[1]);
+    const huntStart = /^\/calls\/hunts\/(hunt_[A-Za-z0-9]+)\/start$/.exec(path);
+    if (request.method === "POST" && huntStart) return startHuntRoute(env, huntStart[1]);
+    if (request.method === "POST" && path === "/calendar/busy") return saveBusy(request, env);
+    const owned = await routeOwnerApi(request, env, path);
+    if (owned) return owned;
+    const relayed = await routeRelay(request, env, path);
+    if (relayed) return relayed;
+    const screened = await routeScreeningApi(request, env, path);
+    if (screened) return screened;
     const callResponse = await handleCallApi(request, env, path);
     if (callResponse) return callResponse;
     const persona = await routePersona(request, env, path, parts);
@@ -93,6 +152,7 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
   } catch (err) {
     const message = err instanceof Error ? err.message : "Request failed.";
     console.error("jarvis request failed", message);
+    if (request.method === "POST" && path === "/calls/inbound") return inboundFallbackResponse();
     return apiError(500, "internal", message);
   }
 }
@@ -302,15 +362,29 @@ async function decideApproval(
       );
     }
   }
+  let confirmation = false;
+  let paymentRefused = false;
+  let bookingHeld = false;
+  if (status === "approved" && row.action === "book_quote") {
+    const booked = await bookApproved(env, row);
+    confirmation = booked.dialed;
+    paymentRefused = booked.refused;
+    bookingHeld = booked.held;
+  }
+  const approvedLine = confirmation
+    ? `Approval ${id} approved. A confirmation call was placed. Nothing was paid.`
+    : bookingHeld
+      ? `Approval ${id} approved. The booking call waits until businesses can be rung. Nothing was paid.`
+      : paymentRefused
+        ? `Approval ${id} approved. Payment was requested, so nothing was called or paid.`
+        : `Approval ${id} approved. Nothing was sent, published, or paid.`;
   if (row.task_id) {
     await logProgress(
       env,
       row.task_id,
       row.subtask_id,
       status === "approved" ? "info" : "warn",
-      status === "approved"
-        ? `Approval ${id} approved. Nothing was sent, published, or paid.`
-        : `Approval ${id} rejected.`,
+      status === "approved" ? approvedLine : `Approval ${id} rejected.`,
       { reason },
     );
     await recomputeTaskStatus(env, row.task_id);
@@ -319,9 +393,16 @@ async function decideApproval(
     id,
     reason,
     external_action_taken: false,
+    confirmation_call: confirmation,
+    paid: false,
   });
   const updated = await dbFirst<ApprovalRow>(env, "SELECT * FROM approvals WHERE id = ?", [id]);
-  return json({ approval: updated ? mapApproval(updated) : null, external_action_taken: false });
+  return json({
+    approval: updated ? mapApproval(updated) : null,
+    external_action_taken: false,
+    confirmation_call: confirmation,
+    paid: false,
+  });
 }
 
 async function listMemory(env: Env, url: URL): Promise<Response> {
