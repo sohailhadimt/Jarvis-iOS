@@ -1,6 +1,6 @@
 import { delegatedBrief, isBlockedNumber, placeOutboundCall, safeError, toE164 } from "./calls";
 import { dbAll, dbFirst, dbRun, getState, setState } from "./db";
-import { isRecord, json, newId, nowIso, apiError, asString } from "./http";
+import { isRecord, json, newId, nowIso, apiError, asString, readJson } from "./http";
 import { CHAT_FALLBACK, completeChat, type ChatMessage } from "./llm";
 import { spokenAnswer } from "./live-answer";
 import { inQuietHours, londonDay, londonMinutes, readCallSettings, readOwnerMobile } from "./owner-alert";
@@ -531,6 +531,25 @@ export async function textDelivery(env: Env): Promise<"blocked" | "ready" | "unk
 export async function sendSms(env: Env, to: string, body: string): Promise<boolean> {
   const result = await sendSmsResult(env, to, body);
   return result.ok;
+}
+
+/** Authenticated send from the app. The phone calls this only after Approve. The response has no destination. */
+export async function sendOwnerSmsRoute(request: Request, env: Env): Promise<Response> {
+  const body = await readJson(request);
+  if (!body.ok) return body.response;
+  if (!isRecord(body.value)) return apiError(400, "bad_request", "to and body are required.");
+  const to = asString(body.value.to, 40);
+  const text = asString(body.value.body, 320);
+  if (!to || !text) return apiError(400, "bad_request", "to and body are required.");
+  const dest = toE164(to);
+  if (!dest || isBlockedNumber(dest)) return apiError(400, "bad_request", "That number cannot be texted this way.");
+  const result = await sendSmsResult(env, dest, text);
+  const accepted = result.ok && /^SM[0-9a-f]{32}$/i.test(result.sid);
+  return json({
+    ok: accepted,
+    sid: accepted ? result.sid : "",
+    error: accepted ? "" : result.error || "The text was not sent.",
+  });
 }
 
 function smsGap(account: string, token: string, from: string | null, dest: string | null, message: string): string {

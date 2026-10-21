@@ -11,6 +11,7 @@ export interface LiveTicket {
   model: string;
   websocket_url: string;
   expires_at: string;
+  session_expires_at: string;
 }
 
 export interface LiveTicketFailure {
@@ -24,7 +25,8 @@ export async function mintGeminiLiveToken(env: Env, now = Date.now()): Promise<L
   const key = (env.GEMINI_API_KEY ?? "").trim();
   if (!key) return { ok: false, reason: "not_configured", status: 503 };
   const expires = new Date(now + 30 * 60 * 1000).toISOString();
-  const sessionBy = new Date(now + 2 * 60 * 1000).toISOString();
+  // A slow start used to miss the 2 minute new-session window and fall back with no error.
+  const sessionBy = new Date(now + 10 * 60 * 1000).toISOString();
   let response: Response;
   try {
     response = await fetch(TOKEN_URL, {
@@ -55,6 +57,7 @@ export async function mintGeminiLiveToken(env: Env, now = Date.now()): Promise<L
     model: GEMINI_LIVE_MODEL,
     websocket_url: `${SOCKET_URL}?access_token=${encodeURIComponent(token)}`,
     expires_at: expires,
+    session_expires_at: sessionBy,
   };
 }
 

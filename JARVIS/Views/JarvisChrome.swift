@@ -189,7 +189,9 @@ private struct LiveCaption: View {
 
     var body: some View {
         if engine.isSessionActive, engine.phase == .listening {
-            if engine.microphoneMuted {
+            if engine.pendingSummary != nil {
+                caption("Tap Approve to go ahead.", color: Color(hex: "#7EB6FF"))
+            } else if engine.microphoneMuted {
                 caption("The microphone is muted, sir.", color: Color(hex: "#A39BB4"))
             } else if let error = engine.errorMessage, !error.isEmpty, engine.transcript.isEmpty {
                 caption(JarvisLines.explain(error), color: Color(hex: "#C9C6D4"))

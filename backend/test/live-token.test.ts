@@ -48,7 +48,9 @@ describe("Gemini Live token", () => {
       expect(ticket.websocket_url).toContain("BidiGenerateContentConstrained");
       expect(ticket.websocket_url).toContain("access_token=ephemeral-token-value");
       expect(ticket.expires_at).toBe("2026-10-21T16:30:00.000Z");
+      expect(ticket.session_expires_at).toBe("2026-10-21T16:10:00.000Z");
       expect(sent).toContain('"uses":1');
+      expect(sent).toContain('"newSessionExpireTime":"2026-10-21T16:10:00.000Z"');
       expect(sent).not.toContain("gemini-key-example-value");
       expect(JSON.stringify(ticket)).not.toContain("gemini-key-example-value");
     } finally {

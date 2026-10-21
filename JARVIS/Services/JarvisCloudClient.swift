@@ -89,10 +89,14 @@ struct LiveTicket: Decodable, Sendable {
     var token: String
     var model: String
     var websocketURL: String
+    var expiresAt: String?
+    var sessionExpiresAt: String?
 
     enum CodingKeys: String, CodingKey {
         case ok, token, model
         case websocketURL = "websocket_url"
+        case expiresAt = "expires_at"
+        case sessionExpiresAt = "session_expires_at"
     }
 }
 
@@ -852,6 +856,28 @@ struct CloudClient: Sendable {
         try await sendNoBody(method: "GET", path: "/calls/config")
     }
 
+    /// Sends from the Twilio number. The spoken result never includes the destination.
+    func sendTwilioSms(to number: String, body: String) async -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: ["to": number, "body": body]) else {
+            return "The text was not sent."
+        }
+        do {
+            let (raw, status) = try await raw(method: "POST", path: "/messages/sms", authorize: true, body: data, query: [])
+            guard (200..<300).contains(status),
+                  let parsed = try? JSONSerialization.jsonObject(with: raw) as? [String: Any] else {
+                return "The text was not sent."
+            }
+            let sid = parsed["sid"] as? String ?? ""
+            if parsed["ok"] as? Bool == true, sid.range(of: #"^SM[0-9a-fA-F]{32}$"#, options: .regularExpression) != nil {
+                return "The text is sent."
+            }
+            let error = (parsed["error"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return error.isEmpty ? "The text was not sent." : error
+        } catch {
+            return "The text was not sent."
+        }
+    }
+
     func placeOutboundCall(to number: String, contactName: String, brief: String) async -> CallPlaceResult {
         let body: [String: Any] = ["to": number, "purpose": brief, "contact_name": contactName]
         let data: Data
@@ -1035,12 +1061,17 @@ struct CloudClient: Sendable {
     }
 
     func createShop(goal: String, providers: [[String: String]]) async throws -> String {
+        return try await createShopDraft(goal: goal, providers: providers).message
+    }
+
+    /// A draft list. An empty id means no businesses were found and nothing can be rung.
+    func createShopDraft(goal: String, providers: [[String: String]]) async throws -> (id: String, message: String) {
         let ack: ShopAck = try await sendJSON(
             method: "POST",
             path: "/calls/hunts",
             body: ["goal": goal, "providers": providers]
         )
-        return ack.message ?? "The list is on your phone, Sir."
+        return (ack.huntId ?? "", ack.message ?? "The list is on your phone, Sir.")
     }
 
     func replaceShop(huntID: String, providers: [[String: String]]) async throws -> String {
@@ -1449,6 +1480,12 @@ struct CallHunt: Decodable, Identifiable, Equatable, Sendable {
 
 private struct ShopAck: Decodable {
     var message: String?
+    var huntId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case message
+        case huntId = "hunt_id"
+    }
 }
 
 private struct HuntListEnvelope: Decodable {

@@ -40,7 +40,7 @@ import {
   readJson,
 } from "./http";
 import { markPersonaDraft, routePersona } from "./personas";
-import { lastSmsErrors, pairResponse, recordSmsError, saveBusy } from "./sms-desk";
+import { lastSmsErrors, pairResponse, recordSmsError, saveBusy, sendOwnerSmsRoute } from "./sms-desk";
 import { liveTokenResponse } from "./live-token";
 import { readVoiceDebug, saveVoiceDebug } from "./voice-debug";
 import { optionalSourceUrls } from "./sources";
@@ -82,6 +82,7 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "GET" && path === "/debug/last-sms-errors") return lastSmsErrors(env);
     if (request.method === "POST" && path === "/debug/voice") return saveVoiceDebug(request, env);
     if (request.method === "POST" && path === "/voice/live-token") return liveTokenResponse(env);
+    if (request.method === "POST" && path === "/messages/sms") return sendOwnerSmsRoute(request, env);
     if (request.method === "GET" && path === "/debug/voice") return json({ events: await readVoiceDebug(env) });
     if (request.method === "POST" && path === "/debug/sms-probe") {
       const report = await probeSmsChat(env, toolsForNames(["web_search", "draft_document", "request_approval"]));

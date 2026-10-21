@@ -250,6 +250,79 @@ final class ToolExecutor {
             let rows = try await JarvisCloudAPI.client().pipeline()
             return .result(CloudSpeech.pipeline(rows))
 
+        case "place_outbound_call":
+            let number = arg("to") ?? arg("phone_number") ?? ""
+            let who = arg("contact_name") ?? "them"
+            let brief = arg("brief") ?? arg("purpose") ?? ""
+            guard !number.isEmpty, !brief.isEmpty else {
+                return .result("Need a number and what to say. Nothing was dialled.")
+            }
+            return .confirm(PendingAction(summary: "Ring \(who)? Nothing is dialled until you tap Approve. The call is for Master Hadi.") {
+                guard let client = try? JarvisCloudAPI.client() else {
+                    return "The JARVIS cloud is not configured. Nothing was dialled."
+                }
+                switch await client.placeOutboundCall(to: number, contactName: who, brief: brief) {
+                case .placed:
+                    return "The call is placed. I am speaking for Master Hadi."
+                case .notSetUp:
+                    return "Calling is not set up. Nothing was dialled."
+                case .failed(let message):
+                    return message
+                }
+            })
+
+        case "shop_around":
+            let goal = arg("goal") ?? ""
+            guard !goal.isEmpty else { return .result("What should I shop for? Nothing was called.") }
+            let providers = ShopAround.providers(in: [goal, arg("providers") ?? ""].joined(separator: "\n"))
+            let draft = try await JarvisCloudAPI.client().createShopDraft(goal: goal, providers: providers)
+            guard !draft.id.isEmpty else {
+                return .result("\(draft.message) Nothing was called.")
+            }
+            let huntID = draft.id
+            return .confirm(PendingAction(summary: "Start those quote calls? Nothing is rung until you tap Approve. Nothing is booked.") {
+                guard let client = try? JarvisCloudAPI.client() else {
+                    return "The JARVIS cloud is not configured. Nothing was called."
+                }
+                return (try? await client.startShop(huntID: huntID)) ?? "I could not start those calls. Nothing was booked."
+            })
+
+        case "book_quote":
+            let client = try JarvisCloudAPI.client()
+            let rows = try await client.callHunts()
+            let requestedHunt = arg("hunt_id")
+            let hunt = rows.first { $0.id == requestedHunt }
+                ?? rows.first { $0.status == "comparing" || $0.status == "awaiting_approval" }
+            guard let hunt else { return .result("There is no comparison to book. Nothing was dialled.") }
+            let requestedQuote = arg("quote_id")
+            let quote = hunt.quotes.first { $0.id == requestedQuote && $0.status == "quoted" }
+                ?? hunt.quotes.first { $0.id == hunt.recommendedId && $0.status == "quoted" }
+                ?? hunt.quotes.first { $0.status == "quoted" }
+            guard let quote else { return .result("There is no quote to book yet. Nothing was dialled.") }
+            let huntID = hunt.id
+            let quoteID = quote.id
+            let business = quote.business.isEmpty ? "that business" : quote.business
+            return .confirm(PendingAction(summary: "Book \(business)? Nothing is dialled until you tap Approve. Nothing is paid.") {
+                guard let client = try? JarvisCloudAPI.client() else {
+                    return "The JARVIS cloud is not configured. Nothing was booked."
+                }
+                return await client.chooseHunt(huntID: huntID, quoteID: quoteID) ?? "I could not book that. Nothing was paid."
+            })
+
+        case "send_sms":
+            let number = arg("to") ?? arg("phone_number") ?? ""
+            let body = arg("body") ?? ""
+            let who = arg("contact_name") ?? "them"
+            guard !number.isEmpty, !body.isEmpty else {
+                return .result("Need a number and a message. Nothing was sent.")
+            }
+            return .confirm(PendingAction(summary: "Text \(who)? Nothing is sent until you tap Approve.") {
+                guard let client = try? JarvisCloudAPI.client() else {
+                    return "The JARVIS cloud is not configured. Nothing was sent."
+                }
+                return await client.sendTwilioSms(to: number, body: body)
+            })
+
         default:
             return .result("ERROR: unknown tool \(name)")
         }

@@ -23,6 +23,10 @@ final class GeminiLiveTests: XCTestCase {
         XCTAssertTrue(text.contains("web_search"))
         XCTAssertTrue(text.contains("BLOCKING"))
         XCTAssertTrue(text.contains("silenceDurationMs"))
+        XCTAssertTrue(text.contains("800"))
+        XCTAssertTrue(text.contains("START_SENSITIVITY_HIGH"))
+        XCTAssertTrue(text.contains("END_SENSITIVITY_LOW"))
+        XCTAssertFalse(text.contains("END_SENSITIVITY_HIGH"))
         XCTAssertFalse(text.contains("outputAudioTranscription"))
         XCTAssertFalse(LiveWire.rejectsText("setup accepted"))
     }
@@ -86,5 +90,27 @@ final class GeminiLiveTests: XCTestCase {
         let native = LivePCM.int16([0.5, -0.5, 0], sourceRate: 16_000)
         XCTAssertEqual(native.count, 6)
         XCTAssertTrue(LivePCM.int16([], sourceRate: 48_000).isEmpty)
+        XCTAssertTrue(LivePCM.int16([1], sourceRate: 0).isEmpty)
+    }
+
+    func testDownsampleAveragesAToneThatWouldAlias() {
+        var samples: [Float] = []
+        for index in 0..<48 {
+            samples.append(index.isMultiple(of: 2) ? 1 : -1)
+        }
+        let pcm = LivePCM.int16(samples, sourceRate: 48_000)
+        XCTAssertEqual(pcm.count, 32)
+        let first = pcm.withUnsafeBytes { raw in
+            Int(Int16(littleEndian: raw.loadUnaligned(as: Int16.self)))
+        }
+        XCTAssertLessThan(abs(first), 20_000)
+    }
+
+    func testDebugDetailDropsNumbersAndTokens() {
+        let text = VoiceDebugLog.safe("ring +44 7700 900123 access_token=ephemeral-secret")
+        XCTAssertFalse(text.contains("7700"))
+        XCTAssertFalse(text.contains("ephemeral-secret"))
+        XCTAssertTrue(text.contains("[number]"))
+        XCTAssertTrue(text.contains("access_token redacted"))
     }
 }

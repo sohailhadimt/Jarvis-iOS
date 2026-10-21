@@ -42,8 +42,9 @@ enum LiveEffect: Equatable {
 }
 
 enum LiveWire {
-    /// 400 ms of silence ends the turn. The server default is about 800 ms, which spends the 1 second budget before George starts.
-    static let silenceDurationMs = 400
+    /// Server VAD for a normal speaking voice. High start sensitivity hears a quiet first syllable.
+    /// Low end sensitivity and 800 ms of silence let a natural pause finish the turn.
+    static let silenceDurationMs = 800
 
     static func setup(instruction: String, declarations: [JSONValue], modality: LiveModality) -> String {
         var setup: [String: Any] = [
@@ -56,8 +57,9 @@ enum LiveWire {
                 "automaticActivityDetection": [
                     "disabled": false,
                     "silenceDurationMs": silenceDurationMs,
-                    "prefixPaddingMs": 200,
-                    "endOfSpeechSensitivity": "END_SENSITIVITY_HIGH",
+                    "prefixPaddingMs": 300,
+                    "startOfSpeechSensitivity": "START_SENSITIVITY_HIGH",
+                    "endOfSpeechSensitivity": "END_SENSITIVITY_LOW",
                 ],
             ] as [String: Any],
         ]
@@ -145,20 +147,33 @@ enum LiveWire {
 }
 
 enum LivePCM {
-    /// Raw little-endian 16-bit mono at 16 kHz. No energy gate and no substituted silence.
+    /// Raw little-endian 16-bit mono at 16 kHz. Each output sample is the average of the
+    /// source samples it covers, so a 48 kHz mic does not alias into the speech band.
+    /// No energy gate and no substituted silence.
     static func int16(_ samples: [Float], sourceRate: Double, targetRate: Double = 16_000) -> Data {
         guard sourceRate > 0, targetRate > 0, !samples.isEmpty else { return Data() }
-        let step = sourceRate / targetRate
+        let outCount = Int((Double(samples.count) * targetRate / sourceRate).rounded(.down))
+        guard outCount > 0 else { return Data() }
         var data = Data()
-        let count = Int((Double(samples.count) / step).rounded(.down))
-        data.reserveCapacity(max(count, 1) * 2)
-        var cursor = 0.0
-        while Int(cursor) < samples.count {
-            let sample = samples[Int(cursor)]
+        data.reserveCapacity(outCount * 2)
+        let scale = sourceRate / targetRate
+        for index in 0..<outCount {
+            let start = Double(index) * scale
+            let end = Double(index + 1) * scale
+            let first = min(samples.count - 1, max(0, Int(start.rounded(.down))))
+            let last = min(samples.count, max(first + 1, Int(end.rounded(.up))))
+            var sum: Float = 0
+            var counted = 0
+            var cursor = first
+            while cursor < last {
+                sum += samples[cursor]
+                counted += 1
+                cursor += 1
+            }
+            let sample = counted > 0 ? sum / Float(counted) : samples[first]
             let clamped = min(1, max(-1, sample))
             var value = Int16(clamped * 32_767).littleEndian
             withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
-            cursor += step
         }
         return data
     }

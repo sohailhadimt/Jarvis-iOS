@@ -183,6 +183,8 @@ final class AssistantEngine {
     /// Gemini Live owns VAD, turns, and tools. The Apple Speech pipeline is the fallback.
     @ObservationIgnored private var usingGeminiLive = false
     @ObservationIgnored private var geminiLive: GeminiLiveSession?
+    @ObservationIgnored private var liveReconnects = 0
+    @ObservationIgnored private var liveReopening = false
 
     /// Quiet after the latest words, only for the unused file-capture path. Live turns use the meter.
     private var endpointPause: Duration {
@@ -401,6 +403,9 @@ final class AssistantEngine {
         let wasSession = isSessionActive
         sessionEpoch += 1
         sessionLog.info("endSession \(reason, privacy: .public)")
+        if usingGeminiLive {
+            VoiceDebugLog.note("live-close", reason)
+        }
         usingGeminiLive = false
         geminiLive?.stop()
         geminiLive = nil
@@ -1053,15 +1058,33 @@ final class AssistantEngine {
     /// Gemini Live when the worker can mint a token. Otherwise the existing on-device pipeline runs.
     private func beginGeminiLive(epoch: Int) async -> Bool {
         guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else {
-            VoiceDebugLog.note("live-fallback", "cloud not configured")
+            VoiceDebugLog.note("live-error", "cloud not configured")
             return false
         }
-        guard epoch == sessionEpoch else { return false }
+        VoiceDebugLog.use(client)
+        liveReconnects = 0
+        liveReopening = false
+        guard let connected = await connectLive(client: client, epoch: epoch) else { return false }
+        return installLive(connected.session, modality: connected.modality, window: connected.window, epoch: epoch)
+    }
+
+    private func liveInstruction() -> String {
         let settings = AppSettings.shared
         let facts = JarvisStore.allFacts()
-        let instruction = settings.systemPrompt(facts: facts)
-            + "\n\nThis is a live conversation. Speak in one to three short sentences. No markdown, lists, or emojis. The user can interrupt."
-        let tools = LiveWire.declarations(from: ToolCatalog.definitions(settings: settings, includeWebSearch: true))
+        return settings.systemPrompt(facts: facts) + """
+
+        This is a live conversation. Speak in one to three short sentences. No markdown, lists, or emojis.
+        The server hears normal speech and decides when the user has finished. Do not ask them to repeat unless the transcript is empty.
+        You can place a Twilio call with place_outbound_call, shop for quotes with shop_around, book a quote with book_quote, send an SMS with send_sms, create a reminder with reminder_create, and read the briefing with get_briefing.
+        Calls, shop dialling, bookings, and texts wait for the Approve button. Never say a call is ringing or a text has been sent until the tool result says it happened.
+        Calls you place speak for Master Hadi, never Sohail. Do not use the iPhone dialler.
+        """
+    }
+
+    private func connectLive(client: CloudClient, epoch: Int) async -> (session: GeminiLiveSession, modality: LiveModality, window: String)? {
+        guard epoch == sessionEpoch else { return nil }
+        let instruction = liveInstruction()
+        let tools = LiveWire.declarations(from: ToolCatalog.liveDefinitions(settings: AppSettings.shared))
         let session = GeminiLiveSession()
         session.onEffect = { [weak self] effect in
             Task { @MainActor in
@@ -1069,7 +1092,7 @@ final class AssistantEngine {
             }
         }
         let textTicket = await client.liveTicket()
-        guard epoch == sessionEpoch else { return false }
+        guard epoch == sessionEpoch else { return nil }
         guard case .ready(let first) = textTicket, let textURL = URL(string: first.websocketURL) else {
             let reason: String
             if case .unavailable(let why) = textTicket {
@@ -1077,38 +1100,72 @@ final class AssistantEngine {
             } else {
                 reason = "token"
             }
-            VoiceDebugLog.note("live-fallback", reason)
-            return false
+            VoiceDebugLog.note("live-error", reason)
+            return nil
         }
         var modality = LiveModality.text
-        var opened = await session.open(url: textURL, instruction: instruction, tools: tools, modality: .text)
+        var window = first.sessionExpiresAt ?? first.expiresAt ?? ""
+        var opened = await openLive(session, url: textURL, instruction: instruction, tools: tools, modality: .text, client: client, epoch: epoch)
         if opened == .textRejected {
-            VoiceDebugLog.note("live-modality", "text rejected")
+            VoiceDebugLog.note("live-error", "text modality rejected")
             let audioTicket = await client.liveTicket()
             guard epoch == sessionEpoch, case .ready(let second) = audioTicket, let audioURL = URL(string: second.websocketURL) else {
-                VoiceDebugLog.note("live-fallback", "audio token")
-                return false
+                VoiceDebugLog.note("live-error", "audio token")
+                return nil
             }
             modality = .audioTranscript
-            opened = await session.open(url: audioURL, instruction: instruction, tools: tools, modality: .audioTranscript)
+            window = second.sessionExpiresAt ?? second.expiresAt ?? window
+            opened = await openLive(session, url: audioURL, instruction: instruction, tools: tools, modality: .audioTranscript, client: client, epoch: epoch)
         }
         guard opened == .ready, epoch == sessionEpoch, isSessionActive else {
             session.stop()
-            VoiceDebugLog.note("live-fallback", opened == .textRejected ? "modality" : "setup")
-            return false
+            if case .failed(let reason) = opened {
+                VoiceDebugLog.note("live-error", reason)
+            } else if opened == .textRejected {
+                VoiceDebugLog.note("live-error", "modality")
+            }
+            return nil
         }
+        return (session, modality, window)
+    }
+
+    /// One setup, then one fresh token if the socket or setup fails. The token itself is never logged.
+    private func openLive(
+        _ session: GeminiLiveSession,
+        url: URL,
+        instruction: String,
+        tools: [JSONValue],
+        modality: LiveModality,
+        client: CloudClient,
+        epoch: Int
+    ) async -> LiveOpenResult {
+        var opened = await session.open(url: url, instruction: instruction, tools: tools, modality: modality)
+        if case .failed(let reason) = opened {
+            VoiceDebugLog.note("live-error", reason)
+            let retry = await client.liveTicket()
+            guard epoch == sessionEpoch, case .ready(let ticket) = retry, let retryURL = URL(string: ticket.websocketURL) else {
+                return opened
+            }
+            opened = await session.open(url: retryURL, instruction: instruction, tools: tools, modality: modality)
+        }
+        return opened
+    }
+
+    private func installLive(_ session: GeminiLiveSession, modality: LiveModality, window: String, epoch: Int) -> Bool {
         do {
             try listener.startLiveFeed { [weak session] pcm in
                 session?.sendAudio(pcm)
             }
         } catch {
             session.stop()
-            VoiceDebugLog.note("live-fallback", "microphone")
+            VoiceDebugLog.note("live-error", "microphone")
+            noteCapturePath()
             return false
         }
         guard epoch == sessionEpoch, isSessionActive else {
             session.stop()
             listener.stop()
+            VoiceDebugLog.note("live-close", "cancelled")
             return false
         }
         geminiLive = session
@@ -1116,10 +1173,49 @@ final class AssistantEngine {
         output.bindSharedPlayer(listener.sharedPlayback)
         output.prewarm()
         phase = .listening
-        VoiceDebugLog.note("live-start", modality == .text ? "text" : "audio-transcript")
-        VoiceDebugLog.note("listen", "live aec \(listener.voiceProcessingEnabled ? "on" : "off") rate \(Int(listener.inputSampleRate.rounded()))")
+        let mode = modality == .text ? "text" : "audio-transcript"
+        VoiceDebugLog.note("live-open", "\(mode) session \(window)")
+        noteCapturePath()
         pushActivity()
         return true
+    }
+
+    private func noteCapturePath() {
+        let permission: String
+        switch AVAudioApplication.shared.recordPermission {
+        case .granted: permission = "granted"
+        case .denied: permission = "denied"
+        default: permission = "undetermined"
+        }
+        VoiceDebugLog.note("mic-permission", permission)
+        let route = AVAudioSession.sharedInstance().currentRoute
+        let inputs = route.inputs.map(\.portType.rawValue).joined(separator: "+")
+        let outputs = route.outputs.map(\.portType.rawValue).joined(separator: "+")
+        let rate = Int(listener.inputSampleRate.rounded())
+        let mic = microphoneMuted ? "muted" : "open"
+        let aec = listener.voiceProcessingEnabled ? "on" : "off"
+        VoiceDebugLog.note("audio-route", "mic \(mic) in \(inputs) out \(outputs) hz \(rate) aec \(aec)")
+    }
+
+    private func reopenLive() async {
+        guard usingGeminiLive, liveReconnects < 1, let client = try? JarvisCloudAPI.client() else {
+            liveReopening = false
+            fallBackFromLive("reconnect")
+            return
+        }
+        liveReconnects += 1
+        VoiceDebugLog.use(client)
+        let epoch = sessionEpoch
+        geminiLive?.stop()
+        guard let connected = await connectLive(client: client, epoch: epoch) else {
+            liveReopening = false
+            fallBackFromLive("reconnect")
+            return
+        }
+        liveReopening = false
+        if !installLive(connected.session, modality: connected.modality, window: connected.window, epoch: epoch) {
+            fallBackFromLive("reconnect")
+        }
     }
 
     private func handleLive(_ effect: LiveEffect) {
@@ -1130,17 +1226,16 @@ final class AssistantEngine {
         case .speak(let text):
             enqueueLiveSpeech(text)
         case .interrupt:
-            VoiceDebugLog.note("barge", "live")
+            VoiceDebugLog.note("barge-in", "live")
             stopLivePlayback()
         case .speechStart:
             userIsSpeaking = true
-            VoiceDebugLog.note("speech-began", "live")
             stopLivePlayback()
             pushActivity()
         case .speechEnd:
             userIsSpeaking = false
             LatencyLog.noteSpeechEnd()
-            VoiceDebugLog.note("end-of-turn", "live")
+            VoiceDebugLog.note("turn-complete", "activity-end")
             pushActivity()
         case .user(let text):
             transcript = text
@@ -1148,12 +1243,21 @@ final class AssistantEngine {
             pushActivity()
         case .userFinal(let text):
             transcript = text
+            VoiceDebugLog.note("input-transcript", text)
             _ = recordUser(text)
             pushActivity()
         case .tool(let id, let name, let arguments):
             Task { await self.answerLiveTool(id: id, name: name, arguments: arguments) }
         case .failed(let reason):
-            fallBackFromLive(reason)
+            if liveReopening { return }
+            let recoverable = reason == "goaway" || reason == "socket" || reason == "audio send"
+            if recoverable, liveReconnects < 1 {
+                liveReopening = true
+                VoiceDebugLog.note("live-error", reason)
+                Task { await self.reopenLive() }
+            } else {
+                fallBackFromLive(reason)
+            }
         }
     }
 
@@ -1215,7 +1319,12 @@ final class AssistantEngine {
         case .confirm(let action):
             pendingAction = action
             pendingSummary = action.summary
-            result = "Waiting for the user to confirm on the iPhone. Do not repeat the action."
+            result = "Nothing has been sent or dialled. Tell the user to tap Approve on the iPhone. Do not claim it is done."
+        }
+        if name == "shop_around" || name == "book_quote" || name == "place_outbound_call" {
+            if let client = try? JarvisCloudAPI.client(), let rows = try? await client.callHunts() {
+                hunts = rows
+            }
         }
         statusLine = nil
         geminiLive?.sendToolResult(id: id, name: name, result: result)
@@ -1224,6 +1333,7 @@ final class AssistantEngine {
 
     private func fallBackFromLive(_ reason: String) {
         guard usingGeminiLive else { return }
+        liveReopening = false
         usingGeminiLive = false
         geminiLive?.stop()
         geminiLive = nil
@@ -1231,8 +1341,8 @@ final class AssistantEngine {
         spokenQueue = nil
         output.stop()
         listener.stop()
-        let detail = reason.replacingOccurrences(of: "http", with: "").prefix(80)
-        VoiceDebugLog.note("live-fallback", String(detail))
+        VoiceDebugLog.note("live-error", VoiceDebugLog.safe(reason))
+        VoiceDebugLog.note("live-close", "fallback")
         beginListening(manual: false)
     }
 
@@ -2557,7 +2667,9 @@ final class AssistantEngine {
     func confirmPendingAction() {
         guard pendingAction != nil else { return }
         interrupt()
-        listener.stop()
+        if !usingGeminiLive {
+            listener.stop()
+        }
         turnTask = Task {
             await runPendingAction()
         }
@@ -2577,6 +2689,9 @@ final class AssistantEngine {
         phase = .thinking
         pushActivity()
         let result = await action.perform()
+        if usingGeminiLive, let client = try? JarvisCloudAPI.client(), let rows = try? await client.callHunts() {
+            hunts = rows
+        }
         recordAssistant(result)
         await say(result)
         guard !Task.isCancelled else { return }
@@ -2620,7 +2735,9 @@ final class AssistantEngine {
         let monitor = !listener.isEngineRunning && !microphoneMuted
         listener.refreshVoiceProcessing()
         listener.gate.turn.setEchoCancelled(listener.voiceProcessingEnabled)
-        VoiceDebugLog.note("playback", listener.voiceProcessingEnabled ? "aec on" : "aec off")
+        let mic = microphoneMuted ? "mic-muted" : "mic-open"
+        VoiceDebugLog.note("tts-start", "george \(mic)")
+        defer { VoiceDebugLog.note("tts-stop", "george \(mic)") }
         if listener.isEngineRunning, !microphoneMuted, !usingGeminiLive {
             listener.setBargeMonitor(true)
         }

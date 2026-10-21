@@ -54,17 +54,53 @@ enum AudioTaps {
         }
     }
 
+    /// Channel 0 is the microphone. If that channel is empty, the louder channel is used instead.
     nonisolated static func floatSamples(_ buffer: AVAudioPCMBuffer) -> [Float] {
         let frames = Int(buffer.frameLength)
         guard frames > 0 else { return [] }
-        if let channels = buffer.floatChannelData {
-            return Array(UnsafeBufferPointer(start: channels[0], count: frames))
+        let channels = Int(buffer.format.channelCount)
+        if let data = buffer.floatChannelData, channels > 0 {
+            return loudest(channels: channels, frames: frames) { data[$0] }
         }
-        if let channels = buffer.int16ChannelData {
-            let source = UnsafeBufferPointer(start: channels[0], count: frames)
-            return source.map { Float($0) / 32_768 }
+        if let data = buffer.int16ChannelData, channels > 0 {
+            var best = [Float]()
+            var bestLevel: Float = -1
+            for channel in 0..<channels {
+                let source = UnsafeBufferPointer(start: data[channel], count: frames)
+                let samples = source.map { Float($0) / 32_768 }
+                let level = energy(samples)
+                if channel == 0 || level > bestLevel {
+                    best = samples
+                    bestLevel = level
+                }
+                if channel == 0, level > 0.000_001 { return samples }
+            }
+            return best
         }
         return []
+    }
+
+    private nonisolated static func loudest(channels: Int, frames: Int,
+                                            channelAt: (Int) -> UnsafeMutablePointer<Float>) -> [Float] {
+        var best = [Float]()
+        var bestLevel: Float = -1
+        for channel in 0..<channels {
+            let samples = Array(UnsafeBufferPointer(start: channelAt(channel), count: frames))
+            let level = energy(samples)
+            if channel == 0, level > 0.000_001 { return samples }
+            if level > bestLevel {
+                best = samples
+                bestLevel = level
+            }
+        }
+        return best
+    }
+
+    private nonisolated static func energy(_ samples: [Float]) -> Float {
+        guard !samples.isEmpty else { return 0 }
+        var sum: Float = 0
+        for sample in samples { sum += sample * sample }
+        return sum / Float(samples.count)
     }
 
     /// Mic level during playback. Also feeds the voice gate so barge-in can require the enrolled speaker.
