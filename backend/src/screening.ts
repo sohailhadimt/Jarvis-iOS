@@ -24,7 +24,7 @@ const ACTIVE = ["screening", "listening", "handling", "message", "connecting", "
 
 export function isScreenWebhook(method: string, path: string): boolean {
   if (method !== "POST") return false;
-  if (path === "/calls/inbound" || path === "/calls/sms") return true;
+  if (path === "/calls/inbound" || path === "/calls/inbound-status" || path === "/calls/sms") return true;
   return /^\/calls\/(?:join|voicemail|converse)\/[A-Za-z0-9_]+$/.test(path);
 }
 
@@ -48,6 +48,7 @@ export async function handleScreenWebhook(request: Request, env: Env, path: stri
     if (path === "/calls/inbound") return inboundFallbackResponse();
     return xml(say(`${INBOUND_GREETING} I'm sorry, call screening is not set up. Goodbye.`), 503);
   }
+  if (path === "/calls/inbound-status") return inboundStatus(request, env);
   if (path === "/calls/inbound") {
     try {
       return await inboundCall(request, env, ctx);
@@ -160,6 +161,16 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
     ]).catch(() => undefined);
   }
   return new Response(connected.twiml, { status: 200, headers: { "content-type": "text/xml; charset=utf-8" } });
+}
+
+async function inboundStatus(request: Request, env: Env): Promise<Response> {
+  const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
+  const params = await formParams(request);
+  const valid = await twilioRequestSigned(request, params, token);
+  if (!valid) return xml("<Response></Response>", 403);
+  const { settleDisconnectedCall } = await import("./call-settle");
+  await settleDisconnectedCall(env, params.CallSid || "", params.CallStatus || "").catch(() => undefined);
+  return xml("<Response></Response>", 200);
 }
 
 async function converseWebhook(request: Request, env: Env, id: string): Promise<Response> {

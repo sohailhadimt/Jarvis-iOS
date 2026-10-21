@@ -164,21 +164,34 @@ console.log(JSON.stringify({
 function redact(text) {
   return String(text).replace(/\+\d{6,}/g, "[number]").replace(/\b\d{8,}\b/g, "[digits]");
 }
-const from = normalise(process.env.TWILIO_FROM_NUMBER || "");
-const text = "Sir, Me rang at 00:59. Um, tell me a joke.";
-const form = new URLSearchParams({ From: from, To: owner, Body: text });
-const sent = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Messages.json`, {
-  method: "POST",
-  headers: { authorization: auth, "content-type": "application/x-www-form-urlencoded" },
-  body: form.toString(),
-});
-const sentBody = await sent.json().catch(() => ({}));
+const accountInfo = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}.json`, { headers: { authorization: auth } });
+const accountBody = await accountInfo.json().catch(() => ({}));
 console.log(JSON.stringify({
-  send_http: sent.status,
-  sid: sentBody.sid || "",
-  status: sentBody.status || "",
-  error_code: sentBody.code || null,
-  error: redact(sentBody.message || ""),
+  account_http: accountInfo.status,
+  account_status: accountBody.status || "",
+  account_type: accountBody.type || "",
+}));
+const profiles = await fetch("https://trusthub.twilio.com/v1/CustomerProfiles?PageSize=20", { headers: { authorization: auth } });
+const profileBody = await profiles.json().catch(() => ({}));
+console.log(JSON.stringify({
+  profiles_http: profiles.status,
+  profiles_code: profileBody.code || null,
+  profiles_message: redact(profileBody.message || ""),
+  profiles: (profileBody.results || []).map((item) => ({ status: item.status, sid: item.sid })),
+}));
+const bundles = await fetch("https://numbers.twilio.com/v2/RegulatoryCompliance/Bundles?PageSize=20", { headers: { authorization: auth } });
+const bundleBody = await bundles.json().catch(() => ({}));
+console.log(JSON.stringify({
+  bundles_http: bundles.status,
+  bundles_code: bundleBody.code || null,
+  bundles: (bundleBody.results || []).map((item) => ({ status: item.status, sid: item.sid })),
+}));
+const services = await fetch("https://messaging.twilio.com/v1/Services?PageSize=20", { headers: { authorization: auth } });
+const serviceBody = await services.json().catch(() => ({}));
+console.log(JSON.stringify({
+  services_http: services.status,
+  services_code: serviceBody.code || null,
+  services: (serviceBody.services || []).map((item) => ({ sid: item.sid, usecase: item.usecase || "" })),
 }));
 NODE
 rm -f /tmp/settings.json

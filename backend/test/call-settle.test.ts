@@ -11,6 +11,7 @@ interface CallRec {
   transcript_json: string;
   conversation_id: string | null;
   created_at: string;
+  twilio_sid?: string | null;
 }
 
 interface ScreenRec {
@@ -625,6 +626,101 @@ describe("post-call delivery", () => {
       );
       expect(again.status).toBe(200);
       expect(sms).toHaveLength(1);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("settles a hung-up Polly call and texts a saved message that never reached Twilio", async () => {
+    const calls: CallRec[] = [
+      {
+        id: "call_f0ce67d2098c49208dacf2c63f719957",
+        contact_name: "Incoming call",
+        status: "in_progress",
+        summary: "",
+        transcript_json: JSON.stringify([
+          { role: "assistant", text: "Who is calling?" },
+          { role: "them", text: "Tell me a joke." },
+        ]),
+        conversation_id: null,
+        created_at: "2026-10-20T23:02:02.974Z",
+        twilio_sid: "CA109c4e44c456d95e2f30115db502a40c",
+      },
+      {
+        id: "call_959c1db561354036a621adcc6ae1dc35",
+        contact_name: "Incoming call",
+        status: "completed",
+        summary: "Sir, Me rang at 00:59. Um, tell me a joke.",
+        transcript_json: "[]",
+        conversation_id: "conv_me",
+        created_at: "2026-10-20T23:59:34.533Z",
+        twilio_sid: "CAbe3d3488f344fab7738be7fa9a840a51",
+      },
+    ];
+    const screens: ScreenRec[] = [
+      { call_id: "call_f0ce67d2098c49208dacf2c63f719957", direction: "inbound", caller_name: "", reason: "" },
+      { call_id: "call_959c1db561354036a621adcc6ae1dc35", direction: "inbound", caller_name: "Me", reason: "" },
+    ];
+    const messages: MsgRec[] = [
+      {
+        id: "cmsg_32de99cd1efd4a78880feee1b605b8a4",
+        call_id: "call_959c1db561354036a621adcc6ae1dc35",
+        caller_name: "Me",
+        summary: "Sir, Me rang at 00:59. Um, tell me a joke.",
+        spoken: "Sir, Me rang at 00:59. Um, tell me a joke.",
+        called_at: "2026-10-20T23:59:34.533Z",
+        read_at: null,
+        created_at: "2026-10-21T00:01:42.195Z",
+      },
+    ];
+    const env = settleEnv(calls, screens, messages);
+    const sms: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url.includes("/Calls/")) return new Response(JSON.stringify({ status: "completed" }), { status: 200 });
+      if (url.includes("api.twilio.com") && method === "POST") {
+        sms.push(String(init?.body ?? ""));
+        return new Response(JSON.stringify({ sid: "SMexamplemessage0000000000000000", status: "queued" }), { status: 201 });
+      }
+      if (url.includes("/v1/workspace/webhooks") && method === "POST") {
+        return new Response(JSON.stringify({ webhook_id: "wh_test", webhook_secret: "super-secret-value" }), { status: 200 });
+      }
+      if (url.includes("api.elevenlabs.io")) return new Response(JSON.stringify({ webhooks: [] }), { status: 200 });
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+    try {
+      const response = await route(
+        new Request("https://jarvis.example/calls/settle", { method: "POST", headers: { authorization: "Bearer secret-token" } }),
+        env,
+        ctx(),
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        sms: { sid: string; status: string; sent: boolean; error_code: string };
+        settled: Array<{ call_id: string; status: string; message_id: string | null; spoken: string | null }>;
+      };
+      expect(calls[0]?.status).toBe("completed");
+      const polly = body.settled.find((row) => row.call_id === "call_f0ce67d2098c49208dacf2c63f719957");
+      expect(polly?.message_id).toBeTruthy();
+      expect(polly?.spoken).toContain("rang at");
+      expect(polly?.spoken).toContain("Tell me a joke");
+      expect(body.sms.sent).toBe(true);
+      expect(body.sms.sid).toBe("SMexamplemessage0000000000000000");
+      expect(body.sms.status).toBe("queued");
+      expect(body.sms.error_code).toBe("");
+      const saved = sms.map((item) => new URLSearchParams(item).get("Body"));
+      expect(saved).toContain("Sir, Me rang at 00:59. Um, tell me a joke.");
+      expect(sms.length).toBeGreaterThanOrEqual(2);
+
+      const again = await route(
+        new Request("https://jarvis.example/calls/settle", { method: "POST", headers: { authorization: "Bearer secret-token" } }),
+        env,
+        ctx(),
+      );
+      expect(again.status).toBe(200);
+      expect(sms).toHaveLength(saved.length);
     } finally {
       globalThis.fetch = original;
     }

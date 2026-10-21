@@ -1,8 +1,8 @@
-import { dbAll, dbFirst, dbRun } from "./db";
+import { dbAll, dbFirst, dbRun, getState, setState } from "./db";
 import { apiError, json, newId, nowIso } from "./http";
 import { readOwnerMobile } from "./owner-alert";
 import { pushNotice } from "./screening";
-import { sendSms } from "./sms-desk";
+import { sendSmsResult, type SmsResult } from "./sms-desk";
 import type { Env } from "./types";
 
 interface ScreenBits {
@@ -94,8 +94,7 @@ export async function rememberInboundMessage(env: Env, callId: string): Promise<
           nextSpoken,
           existing.id,
         ]);
-        const owner = await readOwnerMobile(env);
-        if (owner) await sendSms(env, owner, nextSpoken);
+        await deliverOwnerText(env, callId);
         await pushNotice(env, "JARVIS", nextSpoken, { kind: "call_message", message_id: existing.id }, "JARVIS_MESSAGE");
       } else if (detail && detail !== existing.summary) {
         const nextSpoken = spokenCallMessage(screen.caller_name, existing.called_at || call.created_at, detail);
@@ -111,13 +110,108 @@ export async function rememberInboundMessage(env: Env, callId: string): Promise<
        VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`,
       [id, callId, who, detail, spoken, call.created_at, now],
     );
-    const owner = await readOwnerMobile(env);
-    if (owner) await sendSms(env, owner, spoken);
+    await deliverOwnerText(env, callId);
     await pushNotice(env, "JARVIS", spoken, { kind: "call_message", message_id: id }, "JARVIS_MESSAGE");
     return true;
   } catch {
     return inbound;
   }
+}
+
+export interface OwnerText {
+  call_id: string;
+  message_id: string;
+  sid: string;
+  status: string;
+  error_code: string;
+  error: string;
+  sent: boolean;
+}
+
+const SMS_OK = new Set(["queued", "accepted", "sending", "sent", "delivered", "received", "receiving"]);
+
+/**
+ * Texts the stored spoken line once. A saved message is not treated as proof the text was sent.
+ * Opt-out (21610) is not retried. The result has no phone numbers.
+ */
+export async function deliverOwnerText(env: Env, callId: string): Promise<OwnerText> {
+  const empty: OwnerText = { call_id: callId, message_id: "", sid: "", status: "", error_code: "", error: "no_message", sent: false };
+  if (!/^call_[A-Za-z0-9]+$/.test(callId)) return { ...empty, error: "bad_call" };
+  const message = await dbFirst<{ id: string; spoken: string }>(
+    env,
+    "SELECT id, spoken FROM call_messages WHERE call_id = ?",
+    [callId],
+  ).catch(() => null);
+  if (!message?.spoken) return empty;
+  const prior = await readReceipt(env, message.id);
+  if (prior && (prior.ok || prior.errorCode === "21610") && prior.spoken === message.spoken) {
+    return {
+      call_id: callId,
+      message_id: message.id,
+      sid: prior.sid,
+      status: prior.status,
+      error_code: prior.errorCode,
+      error: prior.error,
+      sent: false,
+    };
+  }
+  const owner = await readOwnerMobile(env);
+  if (!owner) {
+    const missed: OwnerText = { ...empty, message_id: message.id, error: "owner_number" };
+    await writeReceipt(env, message.id, message.spoken, { ok: false, sid: "", status: "", errorCode: "", error: "owner_number" });
+    return missed;
+  }
+  const result = await sendSmsResult(env, owner, message.spoken);
+  await writeReceipt(env, message.id, message.spoken, result);
+  return {
+    call_id: callId,
+    message_id: message.id,
+    sid: result.sid,
+    status: result.status,
+    error_code: result.errorCode,
+    error: result.error,
+    sent: result.ok,
+  };
+}
+
+interface SmsReceipt {
+  ok: boolean;
+  sid: string;
+  status: string;
+  errorCode: string;
+  error: string;
+  spoken: string;
+}
+
+async function readReceipt(env: Env, messageId: string): Promise<SmsReceipt | null> {
+  const raw = await getState(env, `owner_sms:${messageId}`).catch(() => null);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<SmsReceipt>;
+    const status = typeof parsed.status === "string" ? parsed.status : "";
+    return {
+      ok: parsed.ok === true || SMS_OK.has(status),
+      sid: typeof parsed.sid === "string" ? parsed.sid : "",
+      status,
+      errorCode: typeof parsed.errorCode === "string" ? parsed.errorCode : "",
+      error: typeof parsed.error === "string" ? parsed.error : "",
+      spoken: typeof parsed.spoken === "string" ? parsed.spoken : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function writeReceipt(env: Env, messageId: string, spoken: string, result: SmsResult): Promise<void> {
+  const receipt: SmsReceipt = {
+    ok: result.ok || SMS_OK.has(result.status),
+    sid: result.sid,
+    status: result.status,
+    errorCode: result.errorCode,
+    error: result.error,
+    spoken,
+  };
+  await setState(env, `owner_sms:${messageId}`, JSON.stringify(receipt)).catch(() => undefined);
 }
 
 export async function listCallMessages(env: Env, url: URL): Promise<Response> {

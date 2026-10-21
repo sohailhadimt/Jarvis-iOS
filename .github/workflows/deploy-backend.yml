@@ -14,6 +14,7 @@ on:
 
 jobs:
   sms_log:
+    # Reads Twilio status on a manual run or a pull request. It does not send a text.
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     defaults:
@@ -40,7 +41,7 @@ jobs:
         run: bash ../.github/scripts/diagnose-sms.sh
 
   deploy:
-    if: github.event_name == 'push'
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -280,6 +281,7 @@ jobs:
           base="${WORKER_URL%/}"
           voice="${base}/calls/inbound"
           sms="${base}/calls/sms"
+          status="${base}/calls/inbound-status"
           # Incoming number for the bought Twilio UK mobile. Not an auth token.
           sid="PN66046ff3fcdfc8f9aa8ed11811dd9d5d"
           curl -sS -u "${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}" \
@@ -288,8 +290,10 @@ jobs:
             --data-urlencode "VoiceUrl=${voice}" \
             --data-urlencode "VoiceMethod=POST" \
             --data-urlencode "SmsUrl=${sms}" \
-            --data-urlencode "SmsMethod=POST"
-          EXPECT_VOICE="$voice" EXPECT_SMS="$sms" node --input-type=module <<'NODE'
+            --data-urlencode "SmsMethod=POST" \
+            --data-urlencode "StatusCallback=${status}" \
+            --data-urlencode "StatusCallbackMethod=POST"
+          EXPECT_VOICE="$voice" EXPECT_SMS="$sms" EXPECT_STATUS="$status" node --input-type=module <<'NODE'
           import { readFileSync } from "node:fs";
           const body = JSON.parse(readFileSync("/tmp/twilio-number.json", "utf8"));
           if (body.code || !body.sid) {
@@ -300,6 +304,10 @@ jobs:
           const sms = body.sms_url || "";
           if (voice !== process.env.EXPECT_VOICE || sms !== process.env.EXPECT_SMS) {
             console.error("Twilio saved different webhook URLs than this deploy.");
+            process.exit(1);
+          }
+          if (body.status_callback !== process.env.EXPECT_STATUS || body.status_callback_method !== "POST") {
+            console.error("Twilio did not save the inbound status callback.");
             process.exit(1);
           }
           if (body.voice_method !== "POST" || body.sms_method !== "POST") {
@@ -345,7 +353,13 @@ jobs:
           console.log(`webhook step=${webhook.step || ""} ok=${Boolean(webhook.ok)} created=${Boolean(webhook.created)} attached=${Boolean(webhook.attached)} status=${webhook.status ?? 0} error=${webhook.error || ""}`);
           console.log(`target found=${Boolean(seen.found)} status=${seen.status || ""} conversation=${Boolean(seen.has_conversation)} screen=${seen.screen || ""}`);
           if (body.note) console.log(`sweep ${body.note}`);
-          if (hit && hit.message_id && webhook.attached) {
+          const sms = body.sms || {};
+          const pollyId = "call_f0ce67d2098c49208dacf2c63f719957";
+          const polly = settled.find((row) => row && row.call_id === pollyId);
+          console.log(`sms sid=${sms.sid || ""} status=${sms.status || ""} error_code=${sms.error_code || ""} error=${sms.error || ""} sent=${Boolean(sms.sent)}`);
+          console.log(`polly ${polly ? `${polly.status} message=${polly.message_id || "none"}` : "missing"}`);
+          if (polly && polly.spoken) console.log(polly.spoken);
+          if (hit && hit.message_id && webhook.attached && polly && (polly.message_id || polly.status === "completed")) {
             if (/…|They said|The user|you have a message/i.test(hit.spoken || "")) process.exit(1);
             process.exit(0);
           }
@@ -383,6 +397,11 @@ jobs:
           }
           console.log(`${target} ${hit.message_id} ${hit.status}`);
           console.log(hit.spoken || "");
+          const sms = body.sms || {};
+          const polly = settled.find((row) => row && row.call_id === "call_f0ce67d2098c49208dacf2c63f719957");
+          console.log(`sms sid=${sms.sid || ""} status=${sms.status || ""} error_code=${sms.error_code || ""} error=${sms.error || ""} sent=${Boolean(sms.sent)}`);
+          console.log(`polly ${polly ? `${polly.call_id} ${polly.message_id || "none"} ${polly.status}` : "missing"}`);
+          if (polly && polly.spoken) console.log(polly.spoken);
           if (/…|They said|The user|you have a message/i.test(hit.spoken || "")) {
             console.error("Spoken line is still unpolished.");
             process.exit(1);

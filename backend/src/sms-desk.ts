@@ -343,18 +343,28 @@ export async function saveBusy(request: Request, env: Env): Promise<Response> {
   return json({ ok: true, blocks: rows.length });
 }
 
-export async function sendSms(env: Env, to: string, body: string): Promise<boolean> {
+export interface SmsResult {
+  ok: boolean;
+  sid: string;
+  status: string;
+  errorCode: string;
+  error: string;
+}
+
+/** Texts from the Twilio number. The error string has no phone numbers. */
+export async function sendSmsResult(env: Env, to: string, body: string): Promise<SmsResult> {
   const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
   const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
   const from = toE164(env.TWILIO_FROM_NUMBER ?? "");
   const dest = toE164(to);
   const message = clip(body, 320);
-  if (!account || !token || !from || !dest || !message) return false;
-  const form = new URLSearchParams({ From: from, To: dest, Body: message });
+  const missing = smsGap(account, token, from, dest, message);
+  if (missing) return { ok: false, sid: "", status: "", errorCode: "", error: missing };
+  const form = new URLSearchParams({ From: from ?? "", To: dest ?? "", Body: message });
   try {
     const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Messages.json`, {
       method: "POST",
-      redirect: "error",
+      redirect: "follow",
       signal: AbortSignal.timeout(15_000),
       headers: {
         authorization: `Basic ${btoa(`${account}:${token}`)}`,
@@ -362,10 +372,51 @@ export async function sendSms(env: Env, to: string, body: string): Promise<boole
       },
       body: form.toString(),
     });
-    return response.ok;
-  } catch {
-    return false;
+    const text = await response.text();
+    const parsed = parseSms(text);
+    if (!response.ok) {
+      const error = publicSmsError(parsed.message || "Twilio rejected the text.");
+      console.error("owner sms rejected", parsed.code || response.status, error);
+      return { ok: false, sid: parsed.sid, status: parsed.status, errorCode: parsed.code || String(response.status), error };
+    }
+    return { ok: true, sid: parsed.sid, status: parsed.status || "queued", errorCode: "", error: "" };
+  } catch (err) {
+    const error = publicSmsError(err instanceof Error ? err.message : "Twilio could not be reached.");
+    console.error("owner sms failed", error);
+    return { ok: false, sid: "", status: "", errorCode: "", error };
   }
+}
+
+export async function sendSms(env: Env, to: string, body: string): Promise<boolean> {
+  const result = await sendSmsResult(env, to, body);
+  return result.ok;
+}
+
+function smsGap(account: string, token: string, from: string | null, dest: string | null, message: string): string {
+  if (!account || !token) return "twilio_auth";
+  if (!from) return "from_number";
+  if (!dest) return "owner_number";
+  if (!message) return "empty_body";
+  return "";
+}
+
+function parseSms(text: string): { sid: string; status: string; code: string; message: string } {
+  try {
+    const parsed = JSON.parse(text) as { sid?: unknown; status?: unknown; code?: unknown; message?: unknown };
+    return {
+      sid: typeof parsed.sid === "string" ? parsed.sid : "",
+      status: typeof parsed.status === "string" ? parsed.status : "",
+      code: parsed.code == null ? "" : String(parsed.code),
+      message: typeof parsed.message === "string" ? parsed.message : "",
+    };
+  } catch {
+    return { sid: "", status: "", code: "", message: "" };
+  }
+}
+
+function publicSmsError(text: string): string {
+  const clean = text.replace(/\+\d[\d\s()-]{5,}/g, "[number]").replace(/\b\d{8,}\b/g, "[digits]").replace(/\s+/g, " ").trim();
+  return clean.slice(0, 180);
 }
 
 async function answerOwner(env: Env, phone: string, text: string): Promise<void> {

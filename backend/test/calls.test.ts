@@ -106,6 +106,7 @@ function conversationDb(
   stored: { summary: string | null; status: string; transcript: string },
   messages: string[],
 ): Env["DB"] {
+  let spoken = "";
   return {
     prepare(sql: string) {
       let bound: unknown[] = [];
@@ -118,7 +119,7 @@ function conversationDb(
           return { results: [], success: true, meta: {} };
         },
         async first() {
-          if (sql.includes("call_messages")) return messages.length ? { id: messages[0] } : null;
+          if (sql.includes("call_messages")) return messages.length ? { id: messages[0], spoken } : null;
           if (sql.includes("outbound_calls")) {
             return {
               summary: stored.summary,
@@ -135,7 +136,10 @@ function conversationDb(
           if (sql.includes("status = ?")) stored.status = String(bound[1] ?? stored.status);
           if (sql.includes("status = 'in_progress'")) stored.status = "in_progress";
           if (sql.includes("summary = CASE") && bound[2]) stored.summary = String(bound[2]);
-          if (sql.includes("INSERT INTO call_messages")) messages.push(String(bound[0] ?? ""));
+          if (sql.includes("INSERT INTO call_messages")) {
+            messages.push(String(bound[0] ?? ""));
+            spoken = String(bound[4] ?? "");
+          }
           return { success: true, meta: { changes: 1 } };
         },
       };

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { rememberInboundMessage, spokenCallMessage } from "../src/call-messages";
+import { sendSmsResult } from "../src/sms-desk";
 import { route } from "../src/routes";
 import type { Env } from "../src/types";
 
@@ -229,6 +230,24 @@ describe("call messages", () => {
     );
     expect(await rememberInboundMessage(env, "call_out")).toBe(false);
     expect(messages).toHaveLength(0);
+  });
+
+  it("returns the Twilio error code when the text is rejected", async () => {
+    const env = messageEnv([], [], []);
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ code: 20003, message: "Primary compliance profile is not approved.", status: 401 }), {
+        status: 401,
+      })) as typeof fetch;
+    try {
+      const result = await sendSmsResult(env, "+15557654321", "Sir, Me rang at 00:59. Um, tell me a joke.");
+      expect(result.ok).toBe(false);
+      expect(result.errorCode).toBe("20003");
+      expect(result.error).toContain("compliance profile");
+      expect(result.sid).toBe("");
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 
   it("rejects a missing bearer token", async () => {

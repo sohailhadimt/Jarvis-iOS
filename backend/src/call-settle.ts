@@ -1,10 +1,8 @@
-import { isPlaceholderSummary, messageClock, rememberInboundMessage, spokenCallMessage } from "./call-messages";
+import { deliverOwnerText, isPlaceholderSummary, messageClock, rememberInboundMessage, spokenCallMessage } from "./call-messages";
 import { elevenLabsSignatureValid, guessCaller, readConversation, safeError, type CallLine } from "./calls";
 import { dbAll, dbFirst, dbRun, getState, setState } from "./db";
 import { clip, isRecord, json, parseJsonValue } from "./http";
 import { completeChat } from "./llm";
-import { readOwnerMobile } from "./owner-alert";
-import { sendSms } from "./sms-desk";
 import type { Env } from "./types";
 
 const PUBLIC_POST_CALL_URL = "https://jarvis-backend.jarvis-hadi.workers.dev/calls/elevenlabs/post-call";
@@ -48,6 +46,7 @@ interface OpenCall {
   summary: string | null;
   transcript_json: string | null;
   created_at: string;
+  twilio_sid?: string | null;
 }
 
 interface ListedConversation {
@@ -91,6 +90,9 @@ export async function handleElevenPostCall(request: Request, env: Env): Promise<
 }
 
 const BACKFILL_CALL = "call_2fe78971459946b3bd5bdcd82c15b378";
+const RESEND_CALL = "call_959c1db561354036a621adcc6ae1dc35";
+const POLLY_CALL = "call_f0ce67d2098c49208dacf2c63f719957";
+const TERMINAL_TWILIO = new Set(["completed", "busy", "failed", "no-answer", "canceled", "cancelled"]);
 
 /** App route. Registers the workspace webhook, then settles open inbound calls. */
 export async function settleOpenCalls(env: Env): Promise<Response> {
@@ -103,17 +105,51 @@ export async function settleOpenCalls(env: Env): Promise<Response> {
     note = safeError(err instanceof Error ? err.message : "sweep");
   }
   const target = await describeCall(env, BACKFILL_CALL);
-  return json({ ok: true, webhook, settled, note, target });
+  const sms = await deliverOwnerText(env, RESEND_CALL).catch(() => ({
+    call_id: RESEND_CALL,
+    message_id: "",
+    sid: "",
+    status: "",
+    error_code: "",
+    error: "sms_failed",
+    sent: false,
+  }));
+  return json({ ok: true, webhook, settled, note, target, sms });
 }
 
 /** Cron backup. Webhook registration is throttled; the conversation sweep runs every tick. */
 export async function sweepInboundCalls(env: Env): Promise<SettleHit[]> {
   await ensurePostCallWebhook(env, 6 * 60 * 60 * 1000);
   try {
-    return await deliverInbound(env);
+    const settled = await deliverInbound(env);
+    await retryFailedTexts(env);
+    return settled;
   } catch (err) {
     console.error("inbound call sweep failed", safeError(err instanceof Error ? err.message : "sweep"));
     return [];
+  }
+}
+
+/** A saved message is not a sent text. Retry the ones Twilio refused, except an opt-out. */
+async function retryFailedTexts(env: Env): Promise<void> {
+  const rows = await dbAll<{ key: string; value: string }>(
+    env,
+    "SELECT key, value FROM runtime_state WHERE key LIKE 'owner_sms:%' ORDER BY updated_at DESC LIMIT 20",
+  ).catch(() => []);
+  for (const row of rows) {
+    let failed = false;
+    try {
+      const parsed = JSON.parse(row.value) as { ok?: boolean; errorCode?: string };
+      failed = parsed.ok !== true && parsed.errorCode !== "21610";
+    } catch {
+      failed = false;
+    }
+    if (!failed) continue;
+    const messageId = row.key.slice("owner_sms:".length);
+    const message = await dbFirst<{ call_id: string }>(env, "SELECT call_id FROM call_messages WHERE id = ?", [messageId]).catch(
+      () => null,
+    );
+    if (message?.call_id) await deliverOwnerText(env, message.call_id);
   }
 }
 
@@ -134,13 +170,18 @@ async function deliverInbound(env: Env): Promise<SettleHit[]> {
 async function settleOpenInbound(env: Env): Promise<SettleHit[]> {
   const hits: SettleHit[] = [];
   const open = await loadOpenCalls(env);
-  const target = await loadOpenRow(env, BACKFILL_CALL);
-  if (target && !open.some((row) => row.id === target.id)) open.push(target);
+  for (const id of [BACKFILL_CALL, POLLY_CALL]) {
+    const extra = await loadOpenRow(env, id);
+    if (extra && !open.some((row) => row.id === extra.id)) open.push(extra);
+  }
+  const closed = await closeDisconnected(env, open);
+  hits.push(...closed);
   for (const row of open) {
+    if (hits.some((hit) => hit.call_id === row.id)) continue;
     const local = await repairFromStored(env, row);
     if (local) hits.push(local);
   }
-  const pending = open.filter((row) => !hits.some((hit) => hit.call_id === row.id && hit.message_id));
+  const pending = open.filter((row) => !hits.some((hit) => hit.call_id === row.id));
   const networked = await settleFromElevenLabs(env, pending);
   hits.push(...networked);
   return hits;
@@ -208,10 +249,7 @@ async function refreshUnread(env: Env): Promise<SettleHit[]> {
       new Date().toISOString(),
       row.call_id,
     ]).catch(() => undefined);
-    if (spoken !== row.spoken) {
-      const owner = await readOwnerMobile(env);
-      if (owner) await sendSms(env, owner, spoken);
-    }
+    if (spoken !== row.spoken) await deliverOwnerText(env, row.call_id);
     hits.push({ call_id: row.call_id, message_id: row.id, spoken, summary: spoken, status: "completed" });
   }
   return hits;
@@ -239,7 +277,7 @@ async function storedHit(env: Env, callId: string): Promise<SettleHit | null> {
 async function loadOpenCalls(env: Env): Promise<OpenCall[]> {
   const since = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
   const statusList = OPEN_STATUSES.map((status) => `'${status}'`).join(", ");
-  const columns = "c.id, c.contact_name, c.conversation_id, c.status, c.summary, c.transcript_json, c.created_at";
+  const columns = "c.id, c.contact_name, c.conversation_id, c.status, c.summary, c.transcript_json, c.created_at, c.twilio_sid";
   try {
     return await dbAll<OpenCall>(
       env,
@@ -269,7 +307,7 @@ async function loadOpenCalls(env: Env): Promise<OpenCall[]> {
     console.error("open call query failed", safeError(err instanceof Error ? err.message : "query"));
     const rows = await dbAll<OpenCall>(
       env,
-      `SELECT id, contact_name, conversation_id, status, summary, transcript_json, created_at
+      `SELECT id, contact_name, conversation_id, status, summary, transcript_json, created_at, twilio_sid
        FROM outbound_calls
        WHERE created_at >= ? AND contact_name = 'Incoming call'
        ORDER BY created_at DESC
@@ -506,9 +544,79 @@ async function findInbound(env: Env, id: string, conversationId: string): Promis
 async function loadOpenRow(env: Env, id: string): Promise<OpenCall | null> {
   return dbFirst<OpenCall>(
     env,
-    "SELECT id, contact_name, conversation_id, status, summary, transcript_json, created_at FROM outbound_calls WHERE id = ?",
+    "SELECT id, contact_name, conversation_id, status, summary, transcript_json, created_at, twilio_sid FROM outbound_calls WHERE id = ?",
     [id],
   ).catch(() => null);
+}
+
+/** Polly calls have no ElevenLabs conversation. When Twilio has already hung up, store the message. */
+export async function settleDisconnectedCall(env: Env, sid: string, twilioStatus: string): Promise<void> {
+  if (!sid || !TERMINAL_TWILIO.has(twilioStatus)) return;
+  const found = await dbFirst<{ id: string }>(env, "SELECT id FROM outbound_calls WHERE twilio_sid = ?", [sid]).catch(() => null);
+  if (!found?.id) return;
+  const row = await loadOpenRow(env, found.id);
+  if (!row || row.conversation_id || !OPEN_STATUSES.includes(row.status)) return;
+  await finishLocal(env, row, twilioStatus);
+}
+
+async function closeDisconnected(env: Env, rows: OpenCall[]): Promise<SettleHit[]> {
+  const hits: SettleHit[] = [];
+  for (const row of rows) {
+    if (row.conversation_id || !OPEN_STATUSES.includes(row.status)) continue;
+    const sid = (row.twilio_sid ?? "").trim();
+    if (!sid) continue;
+    const live = await twilioCallStatus(env, sid);
+    if (!TERMINAL_TWILIO.has(live)) continue;
+    const hit = await finishLocal(env, row, live);
+    if (hit) hits.push(hit);
+  }
+  return hits;
+}
+
+async function finishLocal(env: Env, row: OpenCall, live: string): Promise<SettleHit | null> {
+  const lines = linesFromJson(row.transcript_json);
+  const said = storedSaid(row);
+  if (!said) {
+    const status = live === "completed" ? "completed" : "failed";
+    await dbRun(env, "UPDATE outbound_calls SET status = ?, error = ?, updated_at = ? WHERE id = ?", [
+      status,
+      live === "completed" ? null : "The caller hung up.",
+      new Date().toISOString(),
+      row.id,
+    ]);
+    return { call_id: row.id, message_id: null, spoken: null, summary: null, status };
+  }
+  const brief = await summariseCall(env, lines, said, row.created_at);
+  const clean = brief.spoken || spokenCallMessage(brief.name, row.created_at, brief.said || said);
+  if (!clean) return null;
+  await ensureInboundScreen(env, row);
+  await noteCaller(env, row.id, { name: brief.name || guessCaller(lines).name, reason: brief.reason });
+  await dbRun(env, "UPDATE outbound_calls SET status = 'completed', summary = ?, updated_at = ? WHERE id = ?", [
+    clean,
+    new Date().toISOString(),
+    row.id,
+  ]);
+  return finishMessage(env, row.id, "completed");
+}
+
+async function twilioCallStatus(env: Env, sid: string): Promise<string> {
+  const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
+  const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
+  if (!account || !token || !sid) return "";
+  try {
+    const response = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls/${encodeURIComponent(sid)}.json`,
+      {
+        headers: { authorization: `Basic ${btoa(`${account}:${token}`)}` },
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+    if (!response.ok) return "";
+    const body = (await response.json()) as { status?: unknown };
+    return typeof body.status === "string" ? body.status : "";
+  } catch {
+    return "";
+  }
 }
 
 async function ensureInboundScreen(env: Env, row: OpenCall): Promise<void> {
