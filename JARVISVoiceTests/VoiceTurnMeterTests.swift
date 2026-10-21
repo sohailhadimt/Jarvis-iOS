@@ -16,7 +16,7 @@ final class VoiceTurnMeterTests: XCTestCase {
 
         let finished = VoiceTurnMeter.endpointDelayMs(
             minSeconds: 0.65, eagerness: .medium, endProbability: finishedScore)
-        XCTAssertEqual(finished, 650)
+        XCTAssertEqual(finished, 800)
 
         let medium = VoiceTurnMeter.endpointDelayMs(
             minSeconds: 0.65, eagerness: .medium, endProbability: unfinishedScore)
@@ -36,9 +36,13 @@ final class VoiceTurnMeterTests: XCTestCase {
         XCTAssertEqual(SemanticTurn.fillerAfterMs, 1_200)
     }
 
-    func testMissingTranscriptUsesShortPause() {
-        XCTAssertEqual(
-            VoiceTurnMeter.endpointDelayMs(minSeconds: 0.65, eagerness: .low, endProbability: nil),
-            650)
+    func testMissingTranscriptWaits() {
+        let wait = VoiceTurnMeter.endpointDelayMs(minSeconds: 0.85, eagerness: .low, endProbability: nil)
+        let finished = VoiceTurnMeter.endpointDelayMs(
+            minSeconds: 0.85, eagerness: .low, endProbability: SemanticTurn.probability("That is all."))
+        XCTAssertGreaterThanOrEqual(wait, 2_000)
+        XCTAssertGreaterThan(wait, finished)
+        XCTAssertEqual(finished, 850)
+        XCTAssertGreaterThanOrEqual(finished, VoiceTurnMeter.minimumHangoverMs)
     }
 }

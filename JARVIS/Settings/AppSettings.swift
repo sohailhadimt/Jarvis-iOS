@@ -210,11 +210,10 @@ final class AppSettings {
     var captionsDefault: Bool { didSet { d.set(captionsDefault, forKey: "captionsDefault") } }
     /// Shifts the speech threshold. 0 is stricter. 1 accepts a quieter close voice.
     var vadSensitivity: Double { didSet { d.set(vadSensitivity, forKey: "vadSensitivity") } }
-    /// Seconds of quiet before a turn ends when the words already sound finished. Default is 0.65.
-    /// A saved value above 1 second, including the old 1.75 default, becomes 0.65.
+    /// Seconds of quiet before a finished sentence ends. Default is 0.85, and never under 0.8.
     var endpointSilence: Double {
         didSet {
-            let clamped = min(1, max(0.4, endpointSilence))
+            let clamped = min(1.2, max(0.8, endpointSilence))
             if clamped != endpointSilence {
                 endpointSilence = clamped
                 return
@@ -329,10 +328,10 @@ final class AppSettings {
         captionsDefault = d.object(forKey: "captionsDefault") as? Bool ?? true
         vadSensitivity = d.object(forKey: "vadSensitivity") as? Double ?? 0.5
         let storedPause = d.object(forKey: "endpointSilence") as? Double
-        if let storedPause, storedPause <= 1 {
-            endpointSilence = min(1, max(0.4, storedPause))
+        if let storedPause, storedPause >= 0.8, storedPause <= 1.2 {
+            endpointSilence = storedPause
         } else {
-            endpointSilence = 0.65
+            endpointSilence = 0.85
         }
         turnEagerness = TurnEagerness(rawValue: d.string(forKey: "turnEagerness") ?? "") ?? .medium
         voiceMatchEnabled = d.object(forKey: "voiceMatchEnabled") as? Bool ?? false

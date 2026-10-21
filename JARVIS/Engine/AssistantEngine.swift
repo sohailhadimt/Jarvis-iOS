@@ -166,8 +166,10 @@ final class AssistantEngine {
     @ObservationIgnored private var lastPartial = ""
     @ObservationIgnored private var utteranceStarted: Date?
     @ObservationIgnored private var endpointArmed = false
-    /// One extra recognition pass after the recogniser closes, so a pause can still grow.
-    @ObservationIgnored private var heldListen = false
+    /// Recognition restarts after Apple Speech closes on a pause. Capped so a stuck final cannot spin.
+    @ObservationIgnored private var recognitionRestarts = 0
+    /// Words already accepted before the recogniser restarted. A new partial must not replace them.
+    @ObservationIgnored private var heardPrefix = ""
     /// Speech must last this long before silence is allowed to end it.
     private let minimumUtteranceSeconds: Double = 0.8
     /// Sentences still being spoken for the current streamed reply. Cancelled on barge-in.
@@ -181,12 +183,12 @@ final class AssistantEngine {
 
     /// Quiet after the latest words, only for the unused file-capture path. Live turns use the meter.
     private var endpointPause: Duration {
-        let seconds = min(1, max(0.4, AppSettings.shared.endpointSilence))
+        let seconds = min(1.2, max(0.8, AppSettings.shared.endpointSilence))
         return .milliseconds(Int((seconds * 1000).rounded()))
     }
 
     /// off → connecting → listening ↔ userSpeaking → thinking → aiSpeaking → listening.
-    /// Mute drops into muted. Barge-in is 150 ms of the user's own speech during playback.
+    /// Mute drops into muted. Barge-in is 300 ms of the user's own speech, and only while echo cancellation is on.
     var voiceState: VoiceState {
         if VoiceSession.shared.exiting { return .ended }
         guard isSessionActive else { return .off }
@@ -525,8 +527,14 @@ final class AssistantEngine {
         Task {
             let session = AVAudioSession.sharedInstance()
             do {
-                try Self.configureVoiceSession(session)
+                let ready = session.category == .playAndRecord && session.mode == .voiceChat
+                if !ready {
+                    try Self.configureVoiceSession(session)
+                }
                 try session.setActive(true)
+                if session.isInputGainSettable {
+                    try? session.setInputGain(1)
+                }
                 audioConfigured = true
                 output.prewarm()
             } catch {
@@ -610,16 +618,21 @@ final class AssistantEngine {
         try? session.setPreferredIOBufferDuration(0.01)
     }
 
-    /// Category first, then activate. A session that was interrupted is brought back every listen.
+    /// Category first, then activate. A live engine is left alone: setCategory mid-playback stops the voice.
     private func activateAudioSession() -> Bool {
         let session = AVAudioSession.sharedInstance()
-        if applyVoiceSession(session) {
+        let live = listener.isEngineRunning || phase == .speaking
+        if applyVoiceSession(session, allowReconfigure: !live) {
             return true
+        }
+        if live {
+            VoiceDebugLog.note("session", "left the audio session alone during playback")
+            return session.category == .playAndRecord
         }
         sessionLog.error("AVAudioSession failed; retrying after deactivate")
         try? session.setActive(false, options: .notifyOthersOnDeactivation)
         audioConfigured = false
-        if applyVoiceSession(session) {
+        if applyVoiceSession(session, allowReconfigure: true) {
             return true
         }
         errorMessage = JarvisLines.voiceUnavailable
@@ -627,13 +640,26 @@ final class AssistantEngine {
         return false
     }
 
-    private func applyVoiceSession(_ session: AVAudioSession) -> Bool {
+    private func applyVoiceSession(_ session: AVAudioSession, allowReconfigure: Bool) -> Bool {
         do {
-            let categoryReady = audioConfigured && session.category == .playAndRecord && session.mode == .voiceChat
+            let categoryReady = session.category == .playAndRecord && session.mode == .voiceChat
             if !categoryReady {
+                guard allowReconfigure else { return false }
                 try Self.configureVoiceSession(session)
+            } else if !allowReconfigure && audioConfigured {
+                return true
+            }
+            if allowReconfigure {
+                let rate = session.sampleRate
+                if rate == 0 || abs(rate - 48_000) > 50 {
+                    try? session.setPreferredSampleRate(48_000)
+                    try? session.setPreferredIOBufferDuration(0.01)
+                }
             }
             try session.setActive(true)
+            if session.isInputGainSettable {
+                try? session.setInputGain(1)
+            }
             audioConfigured = true
             errorMessage = nil
             if !categoryReady {
@@ -661,6 +687,7 @@ final class AssistantEngine {
 
     private func beginListening(manual: Bool) {
         LatencyLog.clear()
+        listener.gate.turn.reset()
         listener.gate.turn.setPause(AppSettings.shared.endpointSilence)
         listener.gate.turn.setSensitivity(AppSettings.shared.vadSensitivity)
         listener.gate.turn.setEagerness(AppSettings.shared.turnEagerness)
@@ -668,6 +695,7 @@ final class AssistantEngine {
         manualTurn = manual
         transcript = ""
         heardVoice = false
+        heardPrefix = ""
         loudFrames = 0
         captureMeter = 0
         captureFile = false
@@ -675,7 +703,7 @@ final class AssistantEngine {
         lastPartial = ""
         utteranceStarted = nil
         endpointArmed = false
-        heldListen = false
+        recognitionRestarts = 0
         userIsSpeaking = false
         voiceConnecting = false
         output.yieldMicrophone()
@@ -704,6 +732,10 @@ final class AssistantEngine {
             } else {
                 try listener.start()
             }
+            listener.refreshVoiceProcessing()
+            listener.gate.turn.setEchoCancelled(listener.voiceProcessingEnabled)
+            let rate = Int(listener.inputSampleRate.rounded())
+            VoiceDebugLog.note("listen", "aec \(listener.voiceProcessingEnabled ? "on" : "off") rate \(rate)")
             phase = .listening
             listenRetries = 0
             errorMessage = nil
@@ -813,20 +845,33 @@ final class AssistantEngine {
             }
             return
         }
-        let changed = trimmed != lastPartial
-        lastPartial = trimmed
-        transcript = trimmed
-        listener.gate.turn.noteTranscript(trimmed)
+        let combined = Self.joinHeard(heardPrefix, trimmed)
+        let changed = combined != lastPartial
+        lastPartial = combined
+        transcript = combined
+        listener.gate.turn.noteTranscript(combined)
         userIsSpeaking = true
         if utteranceStarted == nil { utteranceStarted = Date() }
         if changed {
             partialCount += 1
-            heldListen = false
+            recognitionRestarts = 0
         }
         guard !manualTurn else { return }
-        // The turn meter ends the pause. Partials only keep the words on screen.
-        if isFinal { holdListen() }
+        // The turn meter ends the pause. A recogniser final only restarts capture and keeps the words.
+        if isFinal {
+            heardPrefix = combined
+            VoiceDebugLog.note("recognition-final", "kept \(combined.count) characters")
+            holdListen()
+        }
         pushActivity()
+    }
+
+    /// A restarted recogniser reports only the new words. The earlier phrase stays in front.
+    private static func joinHeard(_ prefix: String, _ next: String) -> String {
+        if prefix.isEmpty { return next }
+        if next.isEmpty { return prefix }
+        if next.hasPrefix(prefix) { return next }
+        return prefix + " " + next
     }
 
     private func handleListenerError(_ error: any Error) {
@@ -852,11 +897,15 @@ final class AssistantEngine {
         }
     }
 
-    /// Restarts recognition once without wiping the words already heard, so a pause can still grow.
+    /// Restarts recognition without wiping the words already heard, so a pause can still grow.
     private func holdListen() {
-        guard !heldListen else { return }
-        heldListen = true
         guard isSessionActive, phase == .listening, !microphoneMuted, !captureFile else { return }
+        guard recognitionRestarts < 8 else {
+            VoiceDebugLog.note("recognition-restart", "cap")
+            return
+        }
+        recognitionRestarts += 1
+        VoiceDebugLog.note("recognition-restart", "pass \(recognitionRestarts)")
         do {
             try listener.start()
         } catch {
@@ -900,8 +949,10 @@ final class AssistantEngine {
             partialCount = 0
             return
         }
+        heardPrefix = ""
         LatencyLog.noteSpeechEndIfNeeded()
         LatencyLog.event("speech-end")
+        VoiceDebugLog.note("end-of-turn", "characters \(heard.count)")
         phase = .thinking
         level = 0
         pushActivity()
@@ -2280,6 +2331,9 @@ final class AssistantEngine {
 
     private func speak(_ text: String, voiceID: String = "") async {
         let monitor = !listener.isEngineRunning && !microphoneMuted
+        listener.refreshVoiceProcessing()
+        listener.gate.turn.setEchoCancelled(listener.voiceProcessingEnabled)
+        VoiceDebugLog.note("playback", listener.voiceProcessingEnabled ? "aec on" : "aec off")
         if listener.isEngineRunning, !microphoneMuted {
             listener.setBargeMonitor(true)
         }
@@ -2342,6 +2396,7 @@ final class AssistantEngine {
             if utteranceStarted == nil { utteranceStarted = Date() }
             silenceTask?.cancel()
             endpointArmed = false
+            VoiceDebugLog.note("speech-began", listener.voiceProcessingEnabled ? "aec on" : "aec off")
             pushActivity()
         case .endOfTurn:
             guard phase == .listening, !manualTurn else { return }
@@ -2351,6 +2406,7 @@ final class AssistantEngine {
             bargeIn()
         case .ignoredBurst:
             LatencyLog.noteFalseTrigger()
+            VoiceDebugLog.note("ignored-burst", "short")
             if phase == .listening {
                 userIsSpeaking = false
             }
@@ -2365,7 +2421,12 @@ final class AssistantEngine {
     /// Mic energy during playback: stop the voice immediately and listen.
     private func bargeIn() {
         guard phase == .speaking else { return }
+        guard listener.voiceProcessingEnabled else {
+            VoiceDebugLog.note("barge-blocked", "echo cancellation is off")
+            return
+        }
         sessionLog.info("barge-in")
+        VoiceDebugLog.note("barge", "stopped playback")
         UISelectionFeedbackGenerator().selectionChanged()
         commitSpokenFragment()
         let keepListening = isSessionActive || isContinuous
@@ -3101,7 +3162,7 @@ final class AssistantEngine {
         var index: Int = 0
         while index < count {
             let ch = chars[index]
-            let isBreak: Bool = ch == "." || ch == "!" || ch == "?" || ch == ";" || ch == "," || ch == ":"
+            let isBreak: Bool = ch == "." || ch == "!" || ch == "?"
             if isBreak && index >= 1 {
                 let previous = chars[index - 1]
                 if ch == "." && previous.isNumber {

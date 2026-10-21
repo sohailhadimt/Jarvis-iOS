@@ -35,10 +35,15 @@ struct VoiceTurnSnapshot: Sendable {
 final class VoiceTurnMeter: @unchecked Sendable {
     static let calibrationMs = 300
     static let minimumSpeechMs = 250
-    static let bargeMs = 150
+    /// A cough or a speaker reflection is shorter than this. Real barge-in has to last.
+    static let bargeMs = 300
     static let nearFieldSNR: Float = 3.2
-    static let bargeSNR: Float = 4.5
+    static let bargeSNR: Float = 6.2
+    static let bargeOpen: Float = 0.80
+    static let bargeBand: Float = 0.55
     static let minimumBand: Float = 0.45
+    /// A finished sentence still waits this long, so a breath is not the end of the turn.
+    static let minimumHangoverMs = 800
 
     private let log = Logger(subsystem: "com.sohail.jarvis", category: "vad")
     private let lock = NSLock()
@@ -48,8 +53,10 @@ final class VoiceTurnMeter: @unchecked Sendable {
     private var speechMs = 0
     private var silenceMs = 0
     private var bargeRunMs = 0
-    /// One interrupt per stretch of user speech. Continued talking must not fire again 150 ms later.
+    /// One interrupt per stretch of user speech. Continued talking must not fire again 300 ms later.
     private var bargeLatched = false
+    /// Hardware echo cancellation. Barge-in stays off until this is true, so speaker playback cannot stop itself.
+    private var echoCancelled = false
     private var triggered = false
     private var calibrated = false
     private var forwarding = false
@@ -59,9 +66,11 @@ final class VoiceTurnMeter: @unchecked Sendable {
     private var pauseSeconds: Double = 0.65
     private var sensitivity: Double = 0.5
     private var assistantSpeaking = false
-    /// Nil until speech recognition has words. Treated as a finished turn so silence is not blocked.
+    /// Nil until speech recognition has words. A missing transcript is unfinished, so a breath does not close the turn.
     private var endProbability: Float?
     private var eagerness: TurnEagerness = .medium
+    /// Characters in the latest transcript. Growth means the user is still being heard.
+    private var lastTranscriptCount = 0
     private var onEvent: (@Sendable (VoiceTurnEvent) -> Void)?
 
     func setHandler(_ handler: (@Sendable (VoiceTurnEvent) -> Void)?) {
@@ -72,7 +81,18 @@ final class VoiceTurnMeter: @unchecked Sendable {
 
     func setPause(_ seconds: Double) {
         lock.lock()
-        pauseSeconds = min(1, max(0.4, seconds))
+        pauseSeconds = min(1.2, max(0.8, seconds))
+        lock.unlock()
+    }
+
+    /// The listener sets this only after `setVoiceProcessingEnabled` succeeds.
+    func setEchoCancelled(_ enabled: Bool) {
+        lock.lock()
+        if echoCancelled != enabled {
+            echoCancelled = enabled
+            bargeRunMs = 0
+            bargeLatched = false
+        }
         lock.unlock()
     }
 
@@ -105,6 +125,22 @@ final class VoiceTurnMeter: @unchecked Sendable {
         let score: Float? = trimmed.isEmpty ? nil : SemanticTurn.probability(trimmed)
         lock.lock()
         endProbability = score
+        if trimmed.isEmpty {
+            lastTranscriptCount = 0
+            lock.unlock()
+            return
+        }
+        // The energy gate can miss a quiet voice. Words from the recogniser still open the turn,
+        // and a longer partial means he has not finished, so the hangover starts again.
+        let grew = trimmed.count > lastTranscriptCount
+        lastTranscriptCount = trimmed.count
+        if grew && !assistantSpeaking {
+            if !triggered {
+                triggered = true
+                forwarding = true
+            }
+            silenceMs = 0
+        }
         lock.unlock()
     }
 
@@ -124,6 +160,7 @@ final class VoiceTurnMeter: @unchecked Sendable {
         probability = 0
         falseTriggers = 0
         endProbability = nil
+        lastTranscriptCount = 0
         lock.unlock()
     }
 
@@ -164,10 +201,14 @@ final class VoiceTurnMeter: @unchecked Sendable {
     private func advanceLocked(rms: Float, speechBand: Float, flatness: Float, level: Float, step: Int, speakerOK: Bool) -> VoiceTurnEvent? {
         if !calibrated {
             heardMs += step
+            let sample = max(rms, 0.000_1)
             if heardMs == step {
-                noiseFloor = max(rms, 0.000_1)
+                noiseFloor = sample
+            } else if sample < noiseFloor {
+                // Fall quickly so speech during the opening window does not become the noise floor.
+                noiseFloor = noiseFloor * 0.45 + sample * 0.55
             } else {
-                noiseFloor = noiseFloor * 0.85 + max(rms, 0.000_1) * 0.15
+                noiseFloor = noiseFloor * 0.97 + sample * 0.03
             }
             if heardMs >= Self.calibrationMs {
                 calibrated = true
@@ -180,17 +221,25 @@ final class VoiceTurnMeter: @unchecked Sendable {
 
         let snr: Float = rms / max(noiseFloor, 0.000_1)
         let open: Float = Float(0.68 - sensitivity * 0.20)
+        let instant = Self.instant(snr: snr, speechBand: speechBand, flatness: flatness, level: level)
         hidden = Self.recur(hidden, snr: snr, speechBand: speechBand, flatness: flatness, level: level)
         probability = hidden
         let shaped = hidden >= open && speechBand >= Self.minimumBand && snr >= Self.nearFieldSNR
-        let userSpeech = shaped && speakerOK
+        // A close voice still counts when the floor was learned from that same voice.
+        let closeVoice = rms >= 0.04 && speechBand >= Self.minimumBand && flatness <= 0.45 && speakerOK
+        let userSpeech = (shaped && speakerOK) || closeVoice
+        // The leaky state lags the first syllable. Feed that audio to the recogniser without ending the turn on it.
+        let onset = userSpeech || (instant >= open && speechBand >= Self.minimumBand && snr >= Self.nearFieldSNR && speakerOK)
 
         hearing = shaped
         if assistantSpeaking {
             forwarding = false
-            // The 150 ms window is the whole confirmation. The leaky state is too slow for that.
-            let instant = Self.instant(snr: snr, speechBand: speechBand, flatness: flatness, level: level)
-            let interrupt = instant >= open && speechBand >= Self.minimumBand && snr >= Self.bargeSNR && speakerOK
+            // Speaker audio leaks into the mic whenever echo cancellation is off. That must not be an interruption.
+            guard echoCancelled else {
+                bargeRunMs = 0
+                return nil
+            }
+            let interrupt = instant >= Self.bargeOpen && speechBand >= Self.bargeBand && snr >= Self.bargeSNR && speakerOK
             if interrupt {
                 if bargeLatched { return nil }
                 bargeRunMs += step
@@ -210,16 +259,18 @@ final class VoiceTurnMeter: @unchecked Sendable {
             return nil
         }
 
-        if !userSpeech {
+        if !userSpeech && !onset {
             noiseFloor = noiseFloor * 0.985 + max(rms, 0.000_1) * 0.015
         }
 
-        if userSpeech {
-            speechMs += step
+        if userSpeech || onset {
+            if userSpeech {
+                speechMs += step
+            }
             silenceMs = 0
             forwarding = true
             hearing = true
-            if !triggered, speechMs >= Self.minimumSpeechMs {
+            if userSpeech, !triggered, speechMs >= Self.minimumSpeechMs {
                 triggered = true
                 log.info("speech")
                 return .speechBegan
@@ -227,22 +278,33 @@ final class VoiceTurnMeter: @unchecked Sendable {
             return nil
         }
 
-        forwarding = false
         hearing = shaped
         if !triggered {
-            if speechMs > 0, !shaped {
+            // A dip inside the first word is not a rejected blip. Keep the real samples flowing.
+            if speechMs > 0 {
+                silenceMs += step
+                if silenceMs < Self.bargeMs {
+                    forwarding = true
+                    return nil
+                }
+                forwarding = false
                 speechMs = 0
+                silenceMs = 0
                 falseTriggers += 1
                 log.info("ignored burst")
                 return .ignoredBurst
             }
+            forwarding = false
             return nil
         }
 
+        // Keep the recogniser on real audio through the hangover. A gap of digital silence makes it finalise early.
+        forwarding = true
         silenceMs += step
         let hangover = Self.endpointDelayMs(minSeconds: pauseSeconds, eagerness: eagerness, endProbability: endProbability)
         if silenceMs >= hangover {
             triggered = false
+            forwarding = false
             speechMs = 0
             silenceMs = 0
             log.info("end of turn")
@@ -253,13 +315,13 @@ final class VoiceTurnMeter: @unchecked Sendable {
 
     /// Silence required before the turn ends.
     ///
-    /// A missing score uses the short pause. LiveKit emits a default end-of-turn
-    /// probability of 1 when the detector has not answered, so the turn is not blocked.
-    /// Below the eagerness threshold the wait stretches toward that setting's maximum:
-    /// 2s high, 4s medium, 8s low.
+    /// A finished sentence still waits at least 800 ms. A missing transcript is unfinished,
+    /// so a breath or a slow recogniser cannot close the turn. Below the eagerness threshold
+    /// the wait stretches toward that setting's maximum: 2s high, 4s medium, 8s low.
     static func endpointDelayMs(minSeconds: Double, eagerness: TurnEagerness, endProbability: Float?) -> Int {
-        let minMs = Int((min(1, max(0.4, minSeconds)) * 1000).rounded())
-        let probability = endProbability ?? 1
+        let requested = Int((min(1.2, max(0.8, minSeconds)) * 1000).rounded())
+        let minMs = max(Self.minimumHangoverMs, requested)
+        let probability = endProbability ?? 0.15
         if probability >= eagerness.unlikelyThreshold { return minMs }
         let maxMs = eagerness.maxTimeoutMs
         let shortfall = (eagerness.unlikelyThreshold - probability) / eagerness.unlikelyThreshold
@@ -267,7 +329,7 @@ final class VoiceTurnMeter: @unchecked Sendable {
         return minMs + Int(extra.rounded())
     }
 
-    /// Instant speech score, before the recurrent state. Barge-in uses this so it can stop within 150 ms.
+    /// Instant speech score, before the recurrent state. Barge-in uses a higher bar than this score alone.
     static func instant(snr: Float, speechBand: Float, flatness: Float, level: Float) -> Float {
         let snrNorm = min(1, max(0, log2(max(snr, 1)) / 3.5))
         let tonal = 1 - min(1, max(0, flatness))
@@ -328,10 +390,16 @@ enum VoiceTurnFixtures {
             let decision = blip.push(rms: 0.08, speechBand: 0.64, flatness: 0.24, level: 0.42, frameMs: 20, speakerOK: true)
             if let event = decision.event { blipEvents.append(event) }
         }
-        // The burst is only known to be short once the next frame is not speech.
-        let tail = blip.push(rms: 0.01, speechBand: 0.22, flatness: 0.72, level: 0.08, frameMs: 20, speakerOK: true)
-        if let event = tail.event { blipEvents.append(event) }
-        check("short voice", blipEvents == [.ignoredBurst], "events \(blipEvents)")
+        // A short burst is rejected only after it has been quiet for the barge window.
+        var blipAt: Int?
+        for index in 0..<20 {
+            let decision = blip.push(rms: 0.01, speechBand: 0.22, flatness: 0.72, level: 0.08, frameMs: 20, speakerOK: true)
+            if let event = decision.event {
+                blipEvents.append(event)
+                if event == .ignoredBurst, blipAt == nil { blipAt = (index + 1) * 20 }
+            }
+        }
+        check("short voice", blipEvents == [.ignoredBurst] && blipAt == 300, "events \(blipEvents) at \(blipAt ?? -1)ms")
 
         let talk = VoiceTurnMeter()
         talk.setPause(0.65)
@@ -345,12 +413,20 @@ enum VoiceTurnFixtures {
         }
         let began = beganAt ?? -1
         check("speech starts after 250ms", began >= 250 && began <= 400, "began at \(began)ms")
-        var endedAt: Int?
+        var earlyEnd: Int?
         for index in 0..<40 {
             let decision = talk.push(rms: 0.01, speechBand: 0.22, flatness: 0.72, level: 0.08, frameMs: 20, speakerOK: true)
-            if decision.event == .endOfTurn { endedAt = (index + 1) * 20 }
+            if decision.event == .endOfTurn { earlyEnd = (index + 1) * 20 }
         }
-        check("mid-sentence hangover", endedAt == 660 || endedAt == 640 || endedAt == 680, "silence \(endedAt ?? -1)ms")
+        check("brief pause stays open", earlyEnd == nil && talk.snapshot().forwarding, "ended \(earlyEnd ?? -1)ms")
+        var endedAt: Int?
+        for index in 0..<160 {
+            let decision = talk.push(rms: 0.01, speechBand: 0.22, flatness: 0.72, level: 0.08, frameMs: 20, speakerOK: true)
+            if decision.event == .endOfTurn { endedAt = (40 + index + 1) * 20 }
+        }
+        let expectedPause = VoiceTurnMeter.endpointDelayMs(minSeconds: 0.65, eagerness: .medium, endProbability: nil)
+        let pauseGap = abs((endedAt ?? -1_000) - expectedPause)
+        check("mid-sentence hangover", pauseGap <= 20 && expectedPause > 800, "silence \(endedAt ?? -1)ms, expected \(expectedPause)ms")
 
         let sentence = VoiceTurnMeter()
         sentence.setPause(0.65)
@@ -410,6 +486,7 @@ enum VoiceTurnFixtures {
         check("far-field", !farForward, "forwarded \(farForward)")
 
         let barge = VoiceTurnMeter()
+        barge.setEchoCancelled(true)
         barge.setAssistantSpeaking(true)
         for _ in 0..<15 {
             _ = barge.push(rms: 0.01, speechBand: 0.22, flatness: 0.72, level: 0.08, frameMs: 20, speakerOK: true)
@@ -423,9 +500,23 @@ enum VoiceTurnFixtures {
                 if bargeAt == nil { bargeAt = (index + 1) * 20 }
             }
         }
-        check("barge-in", bargeCount == 1 && (bargeAt == 160 || bargeAt == 140 || bargeAt == 180), "at \(bargeAt ?? -1)ms")
+        check("barge-in", bargeCount == 1 && (bargeAt == 300 || bargeAt == 280 || bargeAt == 320), "at \(bargeAt ?? -1)ms")
+
+        let leaked = VoiceTurnMeter()
+        leaked.setEchoCancelled(false)
+        leaked.setAssistantSpeaking(true)
+        for _ in 0..<15 {
+            _ = leaked.push(rms: 0.01, speechBand: 0.22, flatness: 0.72, level: 0.08, frameMs: 20, speakerOK: true)
+        }
+        var leakedEvents: [VoiceTurnEvent] = []
+        for _ in 0..<20 {
+            let decision = leaked.push(rms: 0.09, speechBand: 0.66, flatness: 0.22, level: 0.5, frameMs: 20, speakerOK: true)
+            if let event = decision.event { leakedEvents.append(event) }
+        }
+        check("barge without echo cancellation", leakedEvents.isEmpty, "events \(leakedEvents)")
 
         let echo = VoiceTurnMeter()
+        echo.setEchoCancelled(true)
         echo.setAssistantSpeaking(true)
         for _ in 0..<15 {
             _ = echo.push(rms: 0.01, speechBand: 0.22, flatness: 0.72, level: 0.08, frameMs: 20, speakerOK: true)
@@ -437,7 +528,7 @@ enum VoiceTurnFixtures {
         }
         check("echo", !echoEvents.contains(.barge), "events \(echoEvents)")
 
-        lines.insert("Before this meter: energy gate, 800ms minimum, 1750ms silence, barge at 250ms.", at: 0)
+        lines.insert("Before this meter: energy gate, 800ms minimum, 1750ms silence, barge at 250ms without an echo-cancellation gate.", at: 0)
         lines.insert(passed ? "Voice turn fixtures passed." : "Voice turn fixtures failed.", at: 0)
         return Report(passed: passed, lines: lines)
     }

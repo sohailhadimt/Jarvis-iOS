@@ -29,7 +29,8 @@ enum AudioTaps {
         return { buffer, _ in
             let chunks = gate.observe(buffer)
             if chunks.isEmpty {
-                // Keep the recogniser fed. Silence does not become a transcript.
+                // Voice ID rejected this buffer. Zeros keep the request alive without transcribing it.
+                // A normal pause is not this path: the gate forwards the real samples.
                 if let silent = silentBuffer(buffer) {
                     request.append(silent)
                 }

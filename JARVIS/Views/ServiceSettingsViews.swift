@@ -296,7 +296,7 @@ struct VoicesSettingsView: View {
                 }
                 VStack(alignment: .leading) {
                     Text("Pause before I reply \(settings.endpointSilence, format: .number.precision(.fractionLength(2))) s")
-                    Slider(value: $settings.endpointSilence, in: 0.4...1.0, step: 0.05)
+                    Slider(value: $settings.endpointSilence, in: 0.8...1.2, step: 0.05)
                 }
                 VStack(alignment: .leading) {
                     Text("VAD sensitivity \(settings.vadSensitivity, format: .number.precision(.fractionLength(2)))")
@@ -314,7 +314,7 @@ struct VoicesSettingsView: View {
             } header: {
                 Text("Voice mode")
             } footer: {
-                Text("The home ring brightens with JARVIS's voice and, more gently, with the microphone. Start with voice opens listening as soon as JARVIS is on screen. Pause before I reply is the short wait after a finished sentence. Eagerness is how long an unfinished sentence may continue: low up to 8 seconds, medium up to 4, high up to 2. VAD sensitivity shifts how sure the speech detector must be. Voice ID, when it is on, ignores other speakers. Quiet or distant sound is ignored either way. Voice timing shows the last reply delay and the turn-meter checks. The Action Button session uses the same listener.")
+                Text("The home ring brightens with JARVIS's voice and, more gently, with the microphone. Start with voice opens listening as soon as JARVIS is on screen. Pause before I reply is the wait after a finished sentence, at least 0.8 seconds. Eagerness is how long an unfinished sentence may continue: low up to 8 seconds, medium up to 4, high up to 2. Playback stops only after 300 ms of your own voice, and only while echo cancellation is on. Voice timing shows the last reply delay and the turn-meter checks. The Action Button session uses the same listener.")
             }
             Section("Selected: \(settings.voiceName)") {
                 VStack(alignment: .leading) {

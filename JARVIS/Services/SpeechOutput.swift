@@ -101,9 +101,6 @@ final class SpeechOutput: NSObject {
 
     func speakElevenLabs(text: String, voiceID: String, apiKey: String,
                          stability: Double, similarity: Double, monitorMicrophone: Bool) async throws {
-        playbackSignal?.fire()
-        playbackSignal = nil
-        player?.stop()
         preparePlayback()
         LatencyLog.event("tts-request")
         if let data = await takePrefetch(text) {

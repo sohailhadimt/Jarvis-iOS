@@ -63,6 +63,18 @@ final class SpeechListener {
     private var voiceProcessingAttempted = false
     private var bargeMonitor = false
     private(set) var voiceProcessingEnabled = false
+    var inputSampleRate: Double {
+        engine?.inputNode.outputFormat(forBus: 0).sampleRate ?? 0
+    }
+
+    /// Reads the hardware flag after the engine is running. A failed or bypassed canceller must not barge in.
+    func refreshVoiceProcessing() {
+        guard let engine else {
+            voiceProcessingEnabled = false
+            return
+        }
+        voiceProcessingEnabled = engine.inputNode.isVoiceProcessingEnabled && !engine.inputNode.isVoiceProcessingBypassed
+    }
     private(set) var lastCaptureFailure: String?
     private var playbackPlayer: AVAudioPlayerNode?
     var speechBandRatio: Double { gate.speechBandRatio }
@@ -95,6 +107,8 @@ final class SpeechListener {
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.addsPunctuation = true
+        // Search-style recognition finalises on a short pause and drops the rest of the sentence.
+        request.taskHint = .dictation
         let forcedOnDevice = !allowServerRecognition && recognizer.supportsOnDeviceRecognition
         if forcedOnDevice {
             request.requiresOnDeviceRecognition = true
@@ -219,6 +233,7 @@ final class SpeechListener {
             engine.prepare()
             try engine.start()
         }
+        refreshVoiceProcessing()
     }
 
     func applyVoicePolicy() {
@@ -258,8 +273,8 @@ final class SpeechListener {
             try engine.inputNode.setVoiceProcessingEnabled(true)
             engine.inputNode.isVoiceProcessingAGCEnabled = true
             engine.inputNode.isVoiceProcessingBypassed = false
-            voiceProcessingEnabled = true
-            LatencyLog.noteVoiceProcessing(true)
+            voiceProcessingEnabled = engine.inputNode.isVoiceProcessingEnabled && !engine.inputNode.isVoiceProcessingBypassed
+            LatencyLog.noteVoiceProcessing(voiceProcessingEnabled)
         } catch {
             voiceProcessingEnabled = false
             LatencyLog.noteVoiceProcessing(false)

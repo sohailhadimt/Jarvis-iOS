@@ -41,6 +41,7 @@ import {
 } from "./http";
 import { markPersonaDraft, routePersona } from "./personas";
 import { lastSmsErrors, pairResponse, recordSmsError, saveBusy } from "./sms-desk";
+import { readVoiceDebug, saveVoiceDebug } from "./voice-debug";
 import { optionalSourceUrls } from "./sources";
 import { isPipelineStage, parseMrr, toolsForNames } from "./tools";
 import type {
@@ -78,6 +79,8 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     ctx.waitUntil(rememberOrigin(env, url.origin));
     if (request.method === "GET" && path === "/debug/last-calls") return lastCallDebug(env);
     if (request.method === "GET" && path === "/debug/last-sms-errors") return lastSmsErrors(env);
+    if (request.method === "POST" && path === "/debug/voice") return saveVoiceDebug(request, env);
+    if (request.method === "GET" && path === "/debug/voice") return json({ events: await readVoiceDebug(env) });
     if (request.method === "POST" && path === "/debug/sms-probe") {
       const report = await probeSmsChat(env, toolsForNames(["web_search", "draft_document", "request_approval"]));
       await recordSmsError(env, "probe", JSON.stringify(report)).catch(() => undefined);

@@ -35,7 +35,7 @@ struct VoiceTimingView: View {
             } header: {
                 Text("Simulator fixtures")
             } footer: {
-                Text("Before this meter: an energy gate, 800 ms of speech, 1.75 s of silence, and barge-in at 250 ms. These checks use synthetic frames. A real iPhone still has to confirm echo cancellation, Voice ID against a television, and the time from the end of speech to the first spoken word. The simulator often leaves voice processing off.")
+                Text("Before this meter: an energy gate, 800 ms of speech, 1.75 s of silence, and barge-in at 250 ms with no echo-cancellation gate. These checks use synthetic frames. A real iPhone still has to confirm echo cancellation, Voice ID against a television, and the time from the end of speech to the first spoken word. The simulator often leaves voice processing off.")
             }
         }
         .navigationTitle("Voice timing")

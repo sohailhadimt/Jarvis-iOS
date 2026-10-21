@@ -609,6 +609,18 @@ struct CloudClient: Sendable {
         try await decode(path: "/briefing")
     }
 
+    /// Turn and barge-in notes. A failure stays on the phone for one more try.
+    func postVoiceDebug(events: [[String: String]]) async -> Bool {
+        guard !events.isEmpty else { return true }
+        do {
+            let body = try JSONSerialization.data(withJSONObject: ["events": events])
+            let (_, status) = try await raw(method: "POST", path: "/debug/voice", authorize: true, body: body, query: [])
+            return (200..<300).contains(status)
+        } catch {
+            return false
+        }
+    }
+
     func approvals(status: String? = nil) async throws -> [CloudApproval] {
         try await list(\.approvals, path: "/approvals", query: query(status: status, limit: 50))
     }
