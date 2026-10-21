@@ -14,7 +14,7 @@ on:
 
 jobs:
   sms_log:
-    # Reads Twilio status on a manual run or a pull request. It does not send a text.
+    # Reads Twilio status on a manual run or a pull request.
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     defaults:
