@@ -871,8 +871,9 @@ struct CloudClient: Sendable {
         return payload
     }
 
-    func outboundCall(id: String) async throws -> PhoneCallRecord {
-        let envelope: CallEnvelope = try await sendNoBody(method: "GET", path: "/calls/\(Self.path(id))")
+    func outboundCall(id: String, refresh: Bool = true) async throws -> PhoneCallRecord {
+        let query = refresh ? [] : [URLQueryItem(name: "refresh", value: "0")]
+        let envelope: CallEnvelope = try await sendNoBody(method: "GET", path: "/calls/\(Self.path(id))", query: query)
         return envelope.call
     }
 

@@ -1118,13 +1118,14 @@ final class AssistantEngine {
 
     /// Home text chat. The worker stores the line and the assistant replies through the webhook.
     private func deliverAgentChat(userText: String) async {
-        let fallback = "I'm still with you, sir. That one is taking longer than it should. Ask me again in a moment."
         statusLine = "JARVIS is thinking…"
         phase = .thinking
         errorMessage = nil
         pushActivity()
         guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else {
-            await finishAgentLine(fallback, userText: userText)
+            grokConnected = false
+            statusLine = "The Grok assistant isn't connected. I'll answer from here, Sir."
+            await answerFromHere(userText)
             return
         }
         do {
@@ -1151,14 +1152,19 @@ final class AssistantEngine {
             if Self.webhookMissing(error) {
                 grokConnected = false
                 statusLine = "The Grok assistant isn't connected. I'll answer from here, Sir."
-                let facts = JarvisStore.allFacts()
-                let system = AppSettings.shared.voicePrompt(facts: facts, question: userText)
-                await deliverCloudOrFallback(userText: userText, system: system, history: conversation, user: userText)
+                await answerFromHere(userText)
                 return
             }
         }
         guard !Task.isCancelled else { return }
-        await finishAgentLine(fallback, userText: userText)
+        await answerFromHere(userText)
+    }
+
+    /// Home chat when the Grok webhook is absent. The worker answers, then a key saved on this iPhone.
+    private func answerFromHere(_ userText: String) async {
+        let facts = JarvisStore.allFacts()
+        let system = AppSettings.shared.voicePrompt(facts: facts, question: userText)
+        await deliverCloudOrFallback(userText: userText, system: system, history: conversation, user: userText)
     }
 
     private static func webhookMissing(_ error: Error) -> Bool {
@@ -1236,6 +1242,22 @@ final class AssistantEngine {
                 errorMessage = nil
                 await speakLine(line, userText: userText)
                 return
+            }
+        }
+        if let endpoint = try? AppSettings.shared.resolvedEndpoint() {
+            var chat: [ChatMessage] = [ChatMessage(role: "system", content: system)]
+            for turn in messages.dropFirst() {
+                let role = turn["role"] ?? "user"
+                let content = turn["content"] ?? ""
+                if !content.isEmpty { chat.append(ChatMessage(role: role, content: content)) }
+            }
+            if let line = try? await LLMClient.complete(messages: chat, endpoint: endpoint) {
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    errorMessage = nil
+                    await speakLine(trimmed, userText: userText)
+                    return
+                }
             }
         }
         errorMessage = nil
@@ -1786,10 +1808,15 @@ final class AssistantEngine {
         let rows = CallLogStore.entries().filter { call in
             let stage = CallDeskStage.of(call)
             if stage != .ended { return true }
-            if call.delegationStatus == "awaiting_decision" { return true }
+            if call.delegationStatus == "awaiting_decision" || call.callbackNeeded == true { return true }
             return now.timeIntervalSince(call.updatedAt) < 60 * 60
         }
-        deskCalls = Array(rows.prefix(2))
+        let live = rows.filter { CallDeskStage.of($0) != .ended }
+        let held = rows.filter { CallDeskStage.of($0) == .ended && ($0.callbackNeeded == true || $0.delegationStatus == "awaiting_decision") }
+        let recent = rows.filter { call in
+            CallDeskStage.of(call) == .ended && call.callbackNeeded != true && call.delegationStatus != "awaiting_decision"
+        }
+        deskCalls = Array((live + held + recent).prefix(3))
         VoiceMeter.shared.interceptor = interceptor
     }
 
@@ -1887,8 +1914,12 @@ final class AssistantEngine {
         } else {
             pendingQuestion = nil
         }
-        for row in questions where row.status == "timed_out" && !remindedQuestions.contains(row.id) {
-            if await remindFollowUp(row.question) {
+        for row in questions where row.status == "timed_out" {
+            let known = CallLogStore.entries().first { $0.id == row.callId }
+            if known?.callbackNeeded != true, let record = try? await client.outboundCall(id: row.callId, refresh: false) {
+                absorb(record, announce: false)
+            }
+            if !remindedQuestions.contains(row.id), await remindFollowUp(row.question) {
                 remindedQuestions.insert(row.id)
             }
         }
