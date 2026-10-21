@@ -84,6 +84,23 @@ struct CloudChatReply: Decodable, Sendable {
     var reply: String
 }
 
+struct LiveTicket: Decodable, Sendable {
+    var ok: Bool
+    var token: String
+    var model: String
+    var websocketURL: String
+
+    enum CodingKeys: String, CodingKey {
+        case ok, token, model
+        case websocketURL = "websocket_url"
+    }
+}
+
+enum LiveTicketResult: Sendable {
+    case ready(LiveTicket)
+    case unavailable(String)
+}
+
 struct CloudHealth: Decodable, Sendable {
     var ok: Bool
     var service: String
@@ -607,6 +624,25 @@ struct CloudClient: Sendable {
 
     func briefing() async throws -> CloudBriefing {
         try await decode(path: "/briefing")
+    }
+
+    /// A short-lived Gemini Live token. The API key stays on the worker.
+    func liveTicket() async -> LiveTicketResult {
+        do {
+            let body = Data("{}".utf8)
+            let (data, status) = try await raw(method: "POST", path: "/voice/live-token", authorize: true, body: body, query: [])
+            if status == 429 { return .unavailable("quota") }
+            guard (200..<300).contains(status),
+                  let ticket = try? JSONDecoder().decode(LiveTicket.self, from: data),
+                  ticket.ok,
+                  ticket.websocketURL.hasPrefix("wss://"),
+                  !ticket.token.isEmpty else {
+                return .unavailable("unavailable")
+            }
+            return .ready(ticket)
+        } catch {
+            return .unavailable("unavailable")
+        }
     }
 
     /// Turn and barge-in notes. A failure stays on the phone for one more try.

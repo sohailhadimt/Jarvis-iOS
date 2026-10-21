@@ -62,6 +62,7 @@ final class SpeechListener {
     private var tapInstalled = false
     private var voiceProcessingAttempted = false
     private var bargeMonitor = false
+    private var liveFeed = false
     private(set) var voiceProcessingEnabled = false
     var inputSampleRate: Double {
         engine?.inputNode.outputFormat(forBus: 0).sampleRate ?? 0
@@ -161,13 +162,25 @@ final class SpeechListener {
         park()
     }
 
+    /// Raw microphone for Gemini Live. Voice processing stays on. The samples are not gated.
+    func startLiveFeed(_ onPCM: @escaping @Sendable (Data) -> Void) throws {
+        endRecognition()
+        discardWriter()
+        bargeMonitor = false
+        try installTap(AudioTaps.liveFeedTap(onPCM: onPCM, level: listeningLevel()), bufferSize: 480)
+        liveFeed = true
+        refreshVoiceProcessing()
+    }
+
     func stop() {
         bargeMonitor = false
+        liveFeed = false
         _ = park()
     }
 
     /// While speech is playing, the held engine reports mic level so the user can interrupt.
     func setBargeMonitor(_ enabled: Bool) {
+        if liveFeed { return }
         guard enabled != bargeMonitor else { return }
         bargeMonitor = enabled
         guard holdEngine, request == nil, writer == nil else { return }

@@ -251,6 +251,8 @@ export const LIMITS = {
 export const SERVICE = "jarvis-backend";
 export const VERSION = "1.0.0";
 export const GEMINI_MODEL = "gemini-3.8-flash";
+/** Current Gemini Live model. Native audio; text for George comes from output transcription when TEXT is refused. */
+export const GEMINI_LIVE_MODEL = "gemini-3.8-live";
 export const GROQ_MODEL = "openai/gpt-oss-120b";
 export const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
 export const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";

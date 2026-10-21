@@ -43,6 +43,30 @@ enum AudioTaps {
         }
     }
 
+    /// Every mic buffer, converted to 16 kHz PCM. Nothing is dropped or replaced with silence.
+    nonisolated static func liveFeedTap(onPCM: @escaping @Sendable (Data) -> Void,
+                                        level: @escaping @Sendable (Float) -> Void)
+        -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
+        return { buffer, _ in
+            let pcm = LivePCM.int16(floatSamples(buffer), sourceRate: buffer.format.sampleRate)
+            if !pcm.isEmpty { onPCM(pcm) }
+            level(rms(buffer))
+        }
+    }
+
+    nonisolated static func floatSamples(_ buffer: AVAudioPCMBuffer) -> [Float] {
+        let frames = Int(buffer.frameLength)
+        guard frames > 0 else { return [] }
+        if let channels = buffer.floatChannelData {
+            return Array(UnsafeBufferPointer(start: channels[0], count: frames))
+        }
+        if let channels = buffer.int16ChannelData {
+            let source = UnsafeBufferPointer(start: channels[0], count: frames)
+            return source.map { Float($0) / 32_768 }
+        }
+        return []
+    }
+
     /// Mic level during playback. Also feeds the voice gate so barge-in can require the enrolled speaker.
     nonisolated static func bargeTap(gate: SpeakerGate, level: @escaping @Sendable (Float) -> Void)
         -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {

@@ -424,6 +424,9 @@ final class SpeechOutput: NSObject {
         if !loggedFirstAudio {
             loggedFirstAudio = true
             LatencyLog.event("tts-first-audio")
+            if let ms = LatencyLog.snapshot().lastFirstAudioMs {
+                VoiceDebugLog.note("first-audio", "\(ms) ms")
+            }
         }
         if fillerActive { stopFiller() }
     }
