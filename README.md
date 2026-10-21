@@ -177,6 +177,16 @@ If a future SDK adds these, they could be adopted.
 - **Tools don't work with the Custom agent endpoint**: that service must support OpenAI-style function calling. Otherwise set routing to *Chat only*.
 - **App won't open after a week**: this is free signing. Connect the phone and press Run again.
 
+## Start-up sequence
+
+JARVIS plays an original sequence when the app opens, and again after it has been in the background for more than five minutes. It is on by default. Settings > This iPhone has **Start-up sequence** and **Short version**. Tap anywhere to skip. Reduce Motion uses a short fade instead of the rings.
+
+The phases are a boot line and loading bar, a collapse to a centre dot, concentric rings with “J.A.R.V.I.S.”, then a power-up that shrinks onto the home orb. Sounds are generated synth tones in `JARVIS/Resources/Startup`. Spoken lines use the George voice. `scripts/bundle-startup-voice.mjs` writes them into the app when `ELEVENLABS_API_KEY` is set at build time. Otherwise the first launch that has a saved ElevenLabs key caches them, and later opens play the cache. The sequence does not call ElevenLabs on every open.
+
+Startup chime turns the synth effects on or off. Spoken lines and effects follow the iPhone silent switch. The sequence waits until Face ID unlock, and it stays off when a voice session is already starting, a briefing is due, or a call-message notification is opening a card.
+
+The next Codemagic `ios-testflight` archive on this branch includes the sequence. GitHub Actions job **iOS compile** builds the app for the simulator without signing, which checks that the Swift compiles. It does not upload a TestFlight build.
+
 ## Project layout
 
 - `project.yml`: the XcodeGen spec (2 targets: the JARVIS app and the JARVISWidgets extension).

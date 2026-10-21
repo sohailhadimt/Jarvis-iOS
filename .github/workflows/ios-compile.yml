@@ -1,0 +1,43 @@
+name: iOS compile
+
+on:
+  push:
+    branches:
+      - cursor/inbound-call-screening-afd7
+      - main
+    paths:
+      - "JARVIS/**"
+      - "JARVISWidgets/**"
+      - "Shared/**"
+      - "project.yml"
+      - ".github/workflows/ios-compile.yml"
+  workflow_dispatch:
+
+jobs:
+  compile:
+    name: Compile JARVIS
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain || true
+
+      - name: Compile for the iOS Simulator
+        run: |
+          xcodebuild \
+            -project JARVIS.xcodeproj \
+            -scheme JARVIS \
+            -destination 'generic/platform=iOS Simulator' \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build

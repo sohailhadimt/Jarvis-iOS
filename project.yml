@@ -28,6 +28,7 @@ targets:
           - "**/*.metal"
           - "Assets.xcassets"
           - "Assets.xcassets/**"
+          - "Resources/Startup/**"
       - path: Shared
     settings:
       base:

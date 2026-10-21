@@ -64,6 +64,10 @@ struct SettingsView: View {
             }
             Section {
                 Toggle("Lock with Face ID", isOn: $settings.privacyLock)
+                Toggle("Start-up sequence", isOn: $settings.startupSequence)
+                if settings.startupSequence {
+                    Toggle("Short version", isOn: $settings.startupShort)
+                }
                 Toggle("Startup chime", isOn: $settings.bootChime)
                 Toggle("Haptics", isOn: $settings.hapticsEnabled)
                 Toggle("Weather and agenda", isOn: $settings.glanceEnabled)
@@ -82,7 +86,7 @@ struct SettingsView: View {
             } header: {
                 Text("This iPhone")
             } footer: {
-                Text("Face ID uses your passcode if Face ID is unavailable. The briefing reminder is on this iPhone. The worker's own routine stays in Agents and starts off.")
+                Text("The start-up sequence plays when JARVIS opens, and again after it has been in the background for more than five minutes. Tap anywhere to skip. Short version keeps the same phases in about three seconds. Reduce Motion uses a fade. Startup chime keeps the sequence sounds. Spoken lines follow the silent switch. Face ID uses your passcode if Face ID is unavailable. The briefing reminder is on this iPhone. The worker's own routine stays in Agents and starts off.")
             }
             .onChange(of: settings.briefingEnabled) { _, _ in BriefingClock.schedule() }
             .onChange(of: settings.briefingHour) { _, _ in BriefingClock.schedule() }

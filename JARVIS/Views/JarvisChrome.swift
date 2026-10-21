@@ -31,9 +31,17 @@ struct HomeScreen: View {
                 .overlay {
                     GeometryReader { geo in
                         let side = geo.size.width * 0.65
+                        let host = geo.frame(in: .named("jarvisRoot"))
+                        let ring = CGRect(
+                            x: host.midX - (side + 56) / 2,
+                            y: host.midY - (side + 56) / 2,
+                            width: side + 56,
+                            height: side + 56
+                        )
                         JarvisRingHost(paused: ringPaused || scenePhase != .active || keyboardVisible)
                             .frame(width: side + 56, height: side + 56)
                             .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                            .preference(key: OrbAnchorKey.self, value: ring)
                     }
                 }
             greeting

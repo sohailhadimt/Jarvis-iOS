@@ -101,6 +101,7 @@ struct JarvisShell: View {
     @Environment(AssistantEngine.self) private var engine
     @Environment(\.scenePhase) private var scenePhase
     var openStandBy: () -> Void
+    var startupCover: Bool = false
 
     @State private var log = ConversationLog.shared
     @State private var drawer = DrawerModel()
@@ -130,7 +131,7 @@ struct JarvisShell: View {
                 GeometryReader { geo in
                     let drawerW = geo.size.width * 0.70
                     ZStack(alignment: .leading) {
-                        HomeScreen(ringPaused: scenePhase != .active || route != nil) {
+                        HomeScreen(ringPaused: scenePhase != .active || route != nil || startupCover) {
                             drawer.setOpen(true)
                         }
                         DrawerScrim(model: drawer)

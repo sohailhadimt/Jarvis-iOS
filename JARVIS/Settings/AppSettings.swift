@@ -252,6 +252,10 @@ final class AppSettings {
     /// Face ID or the device passcode covers the home screen after leaving the app.
     var privacyLock: Bool { didSet { d.set(privacyLock, forKey: "privacyLock") } }
     var bootChime: Bool { didSet { d.set(bootChime, forKey: "bootChime") } }
+    /// Cinematic open sequence. On for a fresh install.
+    var startupSequence: Bool { didSet { d.set(startupSequence, forKey: "startupSequence") } }
+    /// Same phases, about three seconds.
+    var startupShort: Bool { didSet { d.set(startupShort, forKey: "startupShort") } }
     var hapticsEnabled: Bool { didSet { d.set(hapticsEnabled, forKey: "hapticsEnabled") } }
     var glanceEnabled: Bool { didSet { d.set(glanceEnabled, forKey: "glanceEnabled") } }
     /// Local reminder. The worker's own routine stays off until it is enabled in Agents.
@@ -350,6 +354,8 @@ final class AppSettings {
         onboarded = d.object(forKey: "onboarded") as? Bool ?? false
         privacyLock = d.object(forKey: "privacyLock") as? Bool ?? false
         bootChime = d.object(forKey: "bootChime") as? Bool ?? true
+        startupSequence = d.object(forKey: "startupSequence") as? Bool ?? true
+        startupShort = d.object(forKey: "startupShort") as? Bool ?? false
         hapticsEnabled = d.object(forKey: "hapticsEnabled") as? Bool ?? true
         glanceEnabled = d.object(forKey: "glanceEnabled") as? Bool ?? true
         briefingEnabled = d.object(forKey: "briefingEnabled") as? Bool ?? true

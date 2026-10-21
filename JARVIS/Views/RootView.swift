@@ -10,6 +10,7 @@ struct RootView: View {
     @State private var forceStandBy = false
     @State private var offerVoiceMatch = false
     @State private var showBoot = false
+    @State private var orbAnchor: CGRect = .zero
     @State private var unlocked = !UserDefaults.standard.bool(forKey: "privacyLock")
     @State private var recoveryNote: String?
 
@@ -21,12 +22,16 @@ struct RootView: View {
                     if forceStandBy || (settings.autoStandBy && isCharging && landscape) {
                         StandByView(onExit: { forceStandBy = false })
                     } else {
-                        HomeView(openStandBy: { forceStandBy = true })
+                        HomeView(openStandBy: { forceStandBy = true }, startupCover: showBoot)
                     }
                 }
                 .frame(width: geo.size.width, height: geo.size.height)
                 if showBoot {
-                    BootOverlay { showBoot = false }
+                    StartupSequenceView(dock: orbAnchor) {
+                        var transaction = Transaction()
+                        transaction.disablesAnimations = true
+                        withTransaction(transaction) { showBoot = false }
+                    }
                 }
                 if settings.privacyLock, !unlocked {
                     PrivacyCover { Task { unlocked = await PrivacyGate.unlock() } }
@@ -47,6 +52,14 @@ struct RootView: View {
         }
         .background(Color(hex: "#05080F").ignoresSafeArea())
         .preferredColorScheme(.dark)
+        .coordinateSpace(name: "jarvisRoot")
+        .onPreferenceChange(OrbAnchorKey.self) { next in
+            guard next.width > 1, next.height > 1 else { return }
+            let moved = abs(next.minX - orbAnchor.minX) > 0.5
+                || abs(next.minY - orbAnchor.minY) > 0.5
+                || abs(next.width - orbAnchor.width) > 0.5
+            if moved || orbAnchor.width < 1 { orbAnchor = next }
+        }
         .onAppear {
             UIDevice.current.isBatteryMonitoringEnabled = true
             refreshBattery()
@@ -59,10 +72,13 @@ struct RootView: View {
                     recoveryNote = nil
                 }
             }
-            let listeningNow = JarvisStartListening.isPending
-            if settings.onboarded, !settings.startWithVoice, !listeningNow, !BootGate.shown, !BriefingClock.due() {
-                BootGate.shown = true
-                showBoot = true
+            considerStartup()
+            if settings.onboarded, settings.startupSequence {
+                StartupVoiceCache.warmOnce(
+                    voiceID: settings.voiceID,
+                    stability: settings.stability,
+                    similarity: settings.similarity
+                )
             }
             // Referencing the provider keeps it in the binary and refreshes the Action Button list.
             JarvisShortcuts.updateAppShortcutParameters()
@@ -114,8 +130,11 @@ struct RootView: View {
             if phase == .background {
                 LaunchGuard.markClean()
                 if settings.privacyLock { unlocked = false }
+                showBoot = false
+                StartupSchedule.noteBackground()
             }
             if phase == .active {
+                considerStartup()
                 startListeningIfRequested()
                 if settings.privacyLock, !unlocked {
                     Task { unlocked = await PrivacyGate.unlock() }
@@ -126,9 +145,21 @@ struct RootView: View {
         }
         .onChange(of: unlocked) { _, isUnlocked in
             if isUnlocked {
+                considerStartup()
                 openPendingCallMessage()
                 deliverCallMessagesIfReady()
             }
+        }
+        .onChange(of: settings.onboarded) { _, onboarded in
+            if onboarded { considerStartup() }
+        }
+        .onChange(of: settings.startupSequence) { _, enabled in
+            guard enabled else { return }
+            StartupVoiceCache.warmOnce(
+                voiceID: settings.voiceID,
+                stability: settings.stability,
+                similarity: settings.similarity
+            )
         }
         .onReceive(NotificationCenter.default.publisher(for: .jarvisDeliverBriefing)) { _ in
             deliverBriefingIfDue(force: true)
@@ -182,6 +213,23 @@ struct RootView: View {
         }
     }
 
+    /// Plays on a cold open, and again after more than five minutes in the background.
+    /// A live session, an immediate voice start, a due briefing, or a tapped call message skips it.
+    private func considerStartup() {
+        guard settings.onboarded else { return }
+        guard !showBoot else { return }
+        let blocked = !settings.startupSequence
+            || settings.startWithVoice
+            || JarvisStartListening.isPending
+            || BriefingClock.due()
+            || engine.isSessionActive
+            || CallMessageLink.pendingID != nil
+        if settings.privacyLock, !unlocked, !blocked { return }
+        guard StartupSchedule.claim() else { return }
+        guard !blocked else { return }
+        showBoot = true
+    }
+
     private func refreshBattery() {
         let state = UIDevice.current.batteryState
         isCharging = state == .charging || state == .full
@@ -217,7 +265,3 @@ struct RootView: View {
     }
 }
 
-/// Once per process. Returning from the background does not play the boot sequence again.
-enum BootGate {
-    static var shown = false
-}

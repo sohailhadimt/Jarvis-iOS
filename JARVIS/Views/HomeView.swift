@@ -2,9 +2,10 @@ import SwiftUI
 
 struct HomeView: View {
     var openStandBy: () -> Void
+    var startupCover: Bool = false
 
     var body: some View {
-        JarvisShell(openStandBy: openStandBy)
+        JarvisShell(openStandBy: openStandBy, startupCover: startupCover)
     }
 }
 

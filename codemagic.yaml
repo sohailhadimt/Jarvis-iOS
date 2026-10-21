@@ -85,6 +85,13 @@ workflows:
             fi
             echo "$PLIST CFBundleVersion=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST")"
           done
+      - name: Bundle startup voice when a key is present
+        script: |
+          if [ -n "${ELEVENLABS_API_KEY:-}" ]; then
+            node scripts/bundle-startup-voice.mjs
+          else
+            echo "ELEVENLABS_API_KEY is not set. Startup speech caches on the first launch that has a saved ElevenLabs key."
+          fi
       - name: Build ipa for distribution
         script: |
           xcode-project build-ipa \
