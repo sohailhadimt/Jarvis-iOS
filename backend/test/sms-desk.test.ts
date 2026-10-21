@@ -254,6 +254,7 @@ describe("text desk", () => {
     env.ELEVENLABS_API_KEY = "elevenlabs-key-example-value";
     env.ELEVENLABS_AGENT_ID = "agent_example";
     const calls: string[] = [];
+    const redirects: string[] = [];
     const texts: string[] = [];
     const models: string[] = [];
     const original = globalThis.fetch;
@@ -266,6 +267,7 @@ describe("text desk", () => {
       }
       if (url.includes("/Calls.json") && method === "POST") {
         calls.push(String(init?.body ?? ""));
+        redirects.push(String(init?.redirect ?? ""));
         return new Response(JSON.stringify({ sid: "CA1234567890abcdef1234567890abcd" }), { status: 201 });
       }
       if (url.includes("/Messages.json") && method === "POST") {
@@ -331,6 +333,7 @@ describe("text desk", () => {
       texts.length = 0;
       await post("YES");
       expect(calls).toHaveLength(1);
+      expect(redirects).toEqual(["manual"]);
       expect(new URLSearchParams(calls[0] ?? "").get("To")).toBe("+447700900123");
       expect(models).toHaveLength(0);
 

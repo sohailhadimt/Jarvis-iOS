@@ -648,7 +648,7 @@ async function twilioPost(account: string, token: string, path: string, form: UR
   try {
     const response = await fetch(`https://api.twilio.com${path}`, {
       method: "POST",
-      redirect: "error",
+      redirect: "manual",
       signal: AbortSignal.timeout(20_000),
       headers: {
         authorization: `Basic ${btoa(`${account}:${token}`)}`,
@@ -673,7 +673,7 @@ async function startCallRecording(env: Env, callSid: string, id: string): Promis
       `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls/${encodeURIComponent(callSid)}/Recordings.json`,
       {
         method: "POST",
-        redirect: "error",
+        redirect: "manual",
         signal: AbortSignal.timeout(8_000),
         headers: {
           authorization: `Basic ${btoa(`${account}:${token}`)}`,

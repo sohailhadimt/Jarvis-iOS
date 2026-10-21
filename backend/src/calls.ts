@@ -515,7 +515,7 @@ async function createCall(request: Request, env: Env, approvedRoute = false): Pr
   try {
     const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Calls.json`, {
       method: "POST",
-      redirect: "error",
+      redirect: "manual",
       signal: AbortSignal.timeout(20_000),
       headers: {
         authorization: `Basic ${btoa(`${sid}:${token}`)}`,
@@ -733,7 +733,7 @@ async function refreshFromElevenLabs(env: Env, row: StoredCall): Promise<StoredC
     const response = await fetch(
       `https://api.elevenlabs.io/v1/convai/conversations/${encodeURIComponent(row.conversation_id)}`,
       {
-        redirect: "error",
+        redirect: "manual",
         signal: AbortSignal.timeout(20_000),
         headers: { "xi-api-key": key },
       },
@@ -1149,7 +1149,7 @@ export async function dialConfirm(env: Env, contact: string, to: string, brief: 
   try {
     const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Calls.json`, {
       method: "POST",
-      redirect: "error",
+      redirect: "manual",
       signal: AbortSignal.timeout(20_000),
       headers: {
         authorization: `Basic ${btoa(`${sid}:${token}`)}`,

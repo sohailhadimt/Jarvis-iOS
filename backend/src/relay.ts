@@ -182,7 +182,7 @@ async function redirectCall(env: Env, callSid: string, url: string): Promise<boo
       `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls/${encodeURIComponent(callSid)}.json`,
       {
         method: "POST",
-        redirect: "error",
+        redirect: "manual",
         signal: AbortSignal.timeout(20_000),
         headers: {
           authorization: `Basic ${btoa(`${account}:${token}`)}`,

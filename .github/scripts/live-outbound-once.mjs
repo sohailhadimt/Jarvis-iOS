@@ -346,10 +346,16 @@ async function main() {
     process.exit(1);
   }
 
-  const flag = await readFlag();
+  let flag = await readFlag();
   if (flag === "failed") {
-    log(`already failed ${JSON.stringify(await readResult())}`);
-    process.exit(0);
+    const stored = await readResult();
+    if (stored.twilio_sid) {
+      log(`already failed ${JSON.stringify(stored)}`);
+      process.exit(0);
+    }
+    log("previous attempt never reached Twilio; dialling once");
+    await setFlag("retry");
+    flag = "retry";
   }
   if (flag === "sent") {
     const stored = await readResult();
@@ -389,7 +395,7 @@ async function main() {
       await watch(existing, Date.now() - 2 * 60 * 60 * 1000);
       return;
     }
-    if (existing) {
+    if (existing && existing.status !== "failed") {
       await setFlag("failed");
       await writeResult({ call_id: existing.id, error: existing.error || "no sid", db_status: existing.status });
       log(`dial rejected ${existing.status} ${existing.error}`);

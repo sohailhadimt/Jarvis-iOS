@@ -342,7 +342,7 @@ async function placeOwnerCall(env: Env, settings: CallSettings, alertId: string,
   try {
     const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls.json`, {
       method: "POST",
-      redirect: "error",
+      redirect: "manual",
       signal: AbortSignal.timeout(20_000),
       headers: {
         authorization: `Basic ${btoa(`${account}:${token}`)}`,
@@ -413,7 +413,7 @@ async function textOwner(env: Env, body: string): Promise<boolean> {
   try {
     const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Messages.json`, {
       method: "POST",
-      redirect: "error",
+      redirect: "manual",
       signal: AbortSignal.timeout(15_000),
       headers: {
         authorization: `Basic ${btoa(`${account}:${token}`)}`,
