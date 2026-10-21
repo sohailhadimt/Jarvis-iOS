@@ -193,6 +193,11 @@ async function callProvider(
     max_tokens: maxTokens,
   };
   if (tools && tools.length > 0) body.tools = provider === "gemini" ? geminiTools(tools) : tools;
+  if (provider === "groq") {
+    body.reasoning_effort = "low";
+    body.include_reasoning = false;
+    body.max_completion_tokens = maxTokens;
+  }
   try {
     const response = await fetch(url, {
       method: "POST",
@@ -234,7 +239,9 @@ async function callProvider(
       return { ok: false, code: "upstream", message: `${provider} returned a body that was not JSON.` };
     }
     const message = readAssistantMessage(parsed);
-    if (!message) return { ok: false, code: "upstream", message: `${provider} returned no assistant message.` };
+    if (!message) {
+      return { ok: false, code: "upstream", message: `${provider} returned no assistant message (${finishReason(parsed)}).` };
+    }
     return { ok: true, provider, model, message };
   } catch (err) {
     const name = err instanceof Error ? err.name : "";
@@ -289,7 +296,7 @@ export async function probeSmsChat(env: Env, tools: LlmTool[]): Promise<SmsProbe
     legacyToolPost(env, "gemini", GEMINI_URL, env.GEMINI_API_KEY, GEMINI_MODEL, messages, tools),
     legacyToolPost(env, "groq", GROQ_URL, env.GROQ_API_KEY, GROQ_MODEL, messages, tools),
   ]);
-  const chat = await completeChat(env, messages, tools, { timeoutMs: 8_000, maxTokens: 40 });
+  const chat = await completeChat(env, messages, tools, { timeoutMs: 8_000, maxTokens: 200 });
   return {
     legacy_gemini: legacyGemini,
     legacy_groq: legacyGroq,
@@ -319,7 +326,10 @@ async function legacyToolPost(
         model,
         messages: messages.map(toWireMessage),
         temperature: 0.2,
-        max_tokens: 40,
+        max_tokens: 200,
+        max_completion_tokens: 200,
+        reasoning_effort: provider === "groq" ? "low" : undefined,
+        include_reasoning: provider === "groq" ? false : undefined,
         tools,
       }),
       signal: AbortSignal.timeout(8_000),
@@ -351,6 +361,14 @@ function toWireMessage(message: ChatMessage): Record<string, unknown> {
   if (message.tool_call_id) wire.tool_call_id = message.tool_call_id;
   if (message.name) wire.name = message.name;
   return wire;
+}
+
+function finishReason(payload: unknown): string {
+  if (!payload || typeof payload !== "object") return "unreadable";
+  const choices = (payload as { choices?: unknown }).choices;
+  if (!Array.isArray(choices) || !choices[0] || typeof choices[0] !== "object") return "no choices";
+  const reason = (choices[0] as { finish_reason?: unknown }).finish_reason;
+  return typeof reason === "string" && reason ? reason : "no finish";
 }
 
 function readAssistantMessage(payload: unknown): ChatMessage | null {

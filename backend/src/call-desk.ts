@@ -327,7 +327,9 @@ async function groqLine(key: string, prompt: string): Promise<string | null> {
     body: JSON.stringify({
       model: GROQ_MODEL,
       messages: [{ role: "user", content: prompt }],
-      max_tokens: 80,
+      max_completion_tokens: 80,
+      reasoning_effort: "low",
+      include_reasoning: false,
     }),
   });
   if (!response.ok) return null;

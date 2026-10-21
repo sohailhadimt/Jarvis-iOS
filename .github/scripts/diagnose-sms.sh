@@ -171,6 +171,29 @@ console.log(JSON.stringify({
   account_status: accountBody.status || "",
   account_type: accountBody.type || "",
 }));
+const voiceReads = [
+  ["dialing_gb", "https://voice.twilio.com/v1/DialingPermissions/Countries/GB"],
+  ["dialing_settings", "https://voice.twilio.com/v1/DialingPermissions/Settings"],
+  ["trust_products", "https://trusthub.twilio.com/v1/TrustProducts?PageSize=20"],
+  ["number", `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/IncomingPhoneNumbers/PN66046ff3fcdfc8f9aa8ed11811dd9d5d.json`],
+];
+for (const [name, url] of voiceReads) {
+  const response = await fetch(url, { headers: { authorization: auth } });
+  const payload = await response.json().catch(() => ({}));
+  const results = Array.isArray(payload.results) ? payload.results : [];
+  console.log(JSON.stringify({
+    voice_check: name,
+    http: response.status,
+    code: payload.code || null,
+    message: redact(payload.message || ""),
+    status: payload.status || "",
+    low_risk_numbers_enabled: payload.low_risk_numbers_enabled ?? null,
+    high_risk_special_numbers_enabled: payload.high_risk_special_numbers_enabled ?? null,
+    voice_capability: payload.capabilities ? Boolean(payload.capabilities.voice) : null,
+    sms_capability: payload.capabilities ? Boolean(payload.capabilities.sms) : null,
+    products: results.slice(0, 8).map((item) => ({ sid: item.sid || "", status: item.status || "", type: item.trust_product_type || item.friendly_name || "" })),
+  }));
+}
 const profiles = await fetch("https://trusthub.twilio.com/v1/CustomerProfiles?PageSize=20", { headers: { authorization: auth } });
 const profileBody = await profiles.json().catch(() => ({}));
 console.log(JSON.stringify({
