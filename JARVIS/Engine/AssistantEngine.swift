@@ -2009,10 +2009,10 @@ final class AssistantEngine {
             heardCallMessageIDs.remove(id)
             return
         }
-        let loaded = (try? await client.callMessage(id: id))
-            ?? callMessages.first(where: { $0.id == id })
-            ?? (try? await client.recentCallMessages())?.first(where: { $0.id == id })
-        guard let message = loaded else {
+        let direct = try? await client.callMessage(id: id)
+        let cached = callMessages.first(where: { $0.id == id })
+        let recent = (try? await client.recentCallMessages())?.first(where: { $0.id == id })
+        guard let message = direct ?? cached ?? recent else {
             heardCallMessageIDs.remove(id)
             return
         }

@@ -14,7 +14,7 @@ struct CallTaskStrip: View {
             ForEach(cards) { call in
                 CallTaskCard(call: call) {
                     withAnimation(.spring(duration: 0.42, bounce: 0.05)) {
-                        hidden.insert(call.id)
+                        _ = hidden.insert(call.id)
                     }
                 }
                 .transition(.move(edge: .top).combined(with: .opacity))
@@ -91,9 +91,9 @@ private struct CallTaskCard: View {
     private var line: String {
         switch stage {
         case .dialing:
-            "Ringing now, Sir."
+            return "Ringing now, Sir."
         case .live:
-            "On the call now, I'll report back, Sir."
+            return "On the call now, I'll report back, Sir."
         case .ended:
             if let summary = call.delegationSummary, !summary.isEmpty { return summary }
             if !call.summary.isEmpty { return call.summary }
