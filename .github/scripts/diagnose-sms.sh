@@ -227,22 +227,6 @@ if (profileSid) {
     }
   }
 }
-const from = normalise(process.env.TWILIO_FROM_NUMBER || "");
-const text = "Sir, Me rang at 00:59. Um, tell me a joke.";
-const form = new URLSearchParams({ From: from, To: owner, Body: text });
-const sent = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Messages.json`, {
-  method: "POST",
-  headers: { authorization: auth, "content-type": "application/x-www-form-urlencoded" },
-  body: form.toString(),
-});
-const sentBody = await sent.json().catch(() => ({}));
-console.log(JSON.stringify({
-  send_http: sent.status,
-  sid: sentBody.sid || "",
-  status: sentBody.status || "",
-  error_code: sentBody.code || null,
-  error: redact(sentBody.message || ""),
-}));
 const services = await fetch("https://messaging.twilio.com/v1/Services?PageSize=20", { headers: { authorization: auth } });
 const serviceBody = await services.json().catch(() => ({}));
 console.log(JSON.stringify({

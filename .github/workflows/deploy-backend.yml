@@ -40,6 +40,11 @@ jobs:
       - name: Twilio messages and call rows
         run: bash ../.github/scripts/diagnose-sms.sh
 
+      - name: Start TestFlight build
+        env:
+          CODEMAGIC_API_TOKEN: ${{ secrets.CODEMAGIC_API_TOKEN }}
+        run: bash ../.github/scripts/start-testflight.sh
+
   deploy:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
