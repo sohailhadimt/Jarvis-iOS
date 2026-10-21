@@ -8,7 +8,7 @@ import { routeRelay } from "./relay";
 import { handleScreenWebhook, inboundFallbackResponse, isScreenWebhook, routeScreeningApi } from "./screening";
 import { handleCallStream, lastCallDebug } from "./stream";
 import { buildBriefing } from "./briefing";
-import { chatResponse } from "./llm";
+import { chatResponse, probeSmsChat } from "./llm";
 import { computeNextRun, parseCron } from "./cron";
 import {
   dbAll,
@@ -40,9 +40,9 @@ import {
   readJson,
 } from "./http";
 import { markPersonaDraft, routePersona } from "./personas";
-import { pairResponse, saveBusy } from "./sms-desk";
+import { lastSmsErrors, pairResponse, recordSmsError, saveBusy } from "./sms-desk";
 import { optionalSourceUrls } from "./sources";
-import { isPipelineStage, parseMrr } from "./tools";
+import { isPipelineStage, parseMrr, toolsForNames } from "./tools";
 import type {
   ActivityRow,
   ApprovalRow,
@@ -77,6 +77,12 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (!auth.ok) return auth.response;
     ctx.waitUntil(rememberOrigin(env, url.origin));
     if (request.method === "GET" && path === "/debug/last-calls") return lastCallDebug(env);
+    if (request.method === "GET" && path === "/debug/last-sms-errors") return lastSmsErrors(env);
+    if (request.method === "POST" && path === "/debug/sms-probe") {
+      const report = await probeSmsChat(env, toolsForNames(["web_search", "draft_document", "request_approval"]));
+      await recordSmsError(env, "probe", JSON.stringify(report)).catch(() => undefined);
+      return json(report);
+    }
 
     const parts = path.split("/").filter(Boolean);
     if (request.method === "POST" && path === "/chat") return chatResponse(request, env);

@@ -37,6 +37,41 @@ jobs:
       - name: Install
         run: npm ci
 
+      - name: Recent worker errors
+        run: |
+          set +e
+          node --input-type=module <<'NODE'
+          const account = process.env.CLOUDFLARE_ACCOUNT_ID || "";
+          const token = process.env.CLOUDFLARE_API_TOKEN || "";
+          if (!account || !token) {
+            console.log("worker logs skipped");
+            process.exit(0);
+          }
+          const now = Date.now();
+          const body = {
+            queryId: "sms-errors",
+            timeframe: { from: now - 6 * 60 * 60 * 1000, to: now },
+            view: "events",
+            limit: 30,
+            parameters: {
+              datasets: ["cloudflare-workers"],
+              needle: { value: "sms", isRegex: false },
+            },
+          };
+          const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/workers/observability/telemetry/query`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          const text = await response.text();
+          const redacted = text
+            .replace(/\+\d[\d\s().-]{6,}/g, "[number]")
+            .replace(/\b0\d{9,10}\b/g, "[number]")
+            .replace(/[A-Za-z0-9+/=_-]{24,}/g, "[redacted]");
+          console.log(`worker logs HTTP ${response.status}`);
+          console.log(redacted.slice(0, 4000));
+          NODE
+
       - name: Twilio messages and call rows
         run: bash ../.github/scripts/diagnose-sms.sh
 

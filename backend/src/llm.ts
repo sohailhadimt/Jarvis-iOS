@@ -192,7 +192,7 @@ async function callProvider(
     temperature: 0.2,
     max_tokens: maxTokens,
   };
-  if (tools && tools.length > 0) body.tools = tools;
+  if (tools && tools.length > 0) body.tools = provider === "gemini" ? geminiTools(tools) : tools;
   try {
     const response = await fetch(url, {
       method: "POST",
@@ -223,7 +223,7 @@ async function callProvider(
       return {
         ok: false,
         code: "upstream",
-        message: `${provider} could not answer (HTTP ${response.status}).`,
+        message: `${provider} could not answer (HTTP ${response.status}): ${providerError(text)}`,
         status: response.status,
       };
     }
@@ -245,6 +245,101 @@ async function callProvider(
       message: `${provider} request failed: ${err instanceof Error ? err.message : "unknown error"}`,
     };
   }
+}
+
+/** Gemini's OpenAI endpoint rejects additionalProperties inside tool schemas. */
+export function geminiTools(tools: LlmTool[]): LlmTool[] {
+  return tools.map((tool) => ({
+    type: "function",
+    function: {
+      name: tool.function.name,
+      description: tool.function.description,
+      parameters: geminiSchema(tool.function.parameters) as Record<string, unknown>,
+    },
+  }));
+}
+
+function geminiSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => geminiSchema(item));
+  if (!value || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (key === "additionalProperties" || key === "$schema" || key === "strict") continue;
+    out[key] = geminiSchema(item);
+  }
+  if (out.type === "object" && (out.properties == null || typeof out.properties !== "object")) out.properties = {};
+  return out;
+}
+
+export interface SmsProbe {
+  legacy_gemini: string;
+  legacy_groq: string;
+  chat_ok: boolean;
+  chat_code: string;
+  chat_error: string;
+}
+
+/** One raw tool call, with additionalProperties left in, plus the path SMS chat now uses. */
+export async function probeSmsChat(env: Env, tools: LlmTool[]): Promise<SmsProbe> {
+  const messages: ChatMessage[] = [
+    { role: "system", content: "Reply in one short sentence." },
+    { role: "user", content: "Say hello in five words." },
+  ];
+  const [legacyGemini, legacyGroq] = await Promise.all([
+    legacyToolPost(env, "gemini", GEMINI_URL, env.GEMINI_API_KEY, GEMINI_MODEL, messages, tools),
+    legacyToolPost(env, "groq", GROQ_URL, env.GROQ_API_KEY, GROQ_MODEL, messages, tools),
+  ]);
+  const chat = await completeChat(env, messages, tools, { timeoutMs: 8_000, maxTokens: 40 });
+  return {
+    legacy_gemini: legacyGemini,
+    legacy_groq: legacyGroq,
+    chat_ok: chat.ok,
+    chat_code: chat.ok ? "ok" : chat.code,
+    chat_error: chat.ok ? "" : providerError(chat.message),
+  };
+}
+
+async function legacyToolPost(
+  env: Env,
+  provider: string,
+  url: string,
+  apiKey: string | undefined,
+  model: string,
+  messages: ChatMessage[],
+  tools: LlmTool[],
+): Promise<string> {
+  void env;
+  const key = (apiKey ?? "").trim();
+  if (!key) return "not_configured";
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model,
+        messages: messages.map(toWireMessage),
+        temperature: 0.2,
+        max_tokens: 40,
+        tools,
+      }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    const text = await response.text();
+    if (response.ok) return `ok ${response.status}`;
+    return `${provider} HTTP ${response.status}: ${providerError(text)}`;
+  } catch (err) {
+    return `${provider} request failed: ${providerError(err instanceof Error ? err.message : "unknown error")}`;
+  }
+}
+
+function providerError(text: string): string {
+  const clean = text
+    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/[A-Za-z0-9+/=_-]{24,}/g, "[redacted]")
+    .replace(/\+\d[\d\s().-]{6,}/g, "[number]")
+    .replace(/\s+/g, " ")
+    .trim();
+  return clean.slice(0, 280);
 }
 
 function toWireMessage(message: ChatMessage): Record<string, unknown> {

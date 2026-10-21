@@ -174,19 +174,35 @@ export function callChoice(text: string): "dial" | "number" | null {
 }
 
 /** The owner asked for a new call. Nothing is dialled until he replies YES. */
-export function outboundAsk(text: string): { name: string; phone: string; purpose: string } | null {
+export function outboundAsk(text: string): { name: string; phone: string; purpose: string; verb: "ask" | "tell" } | null {
   const trimmed = text.replace(/\s+/g, " ").trim();
   if (!trimmed || callChoice(trimmed)) return null;
   if (!/^(?:please\s+)?(?:call|ring|phone)\b/i.test(trimmed)) return null;
   const phone = parsePhones(trimmed, 1)[0] ?? "";
   if (!phone) return null;
-  const asked = /\b(?:and\s+|to\s+)?ask\s+(?:him\s+|her\s+|them\s+)?(.+)$/i.exec(trimmed);
-  const purpose = (asked?.[1] ?? "").replace(/[.?!]+$/g, "").replace(/\s+/g, " ").trim();
+  const asked = /\b(?:and\s+|to\s+)?(ask|tell)\s+(?:him\s+|her\s+|them\s+)?(?:i said\s+)?(.+)$/i.exec(trimmed);
+  const purpose = (asked?.[2] ?? "").replace(/[.?!]+$/g, "").replace(/\s+/g, " ").trim();
   if (!purpose) return null;
+  const verb = asked?.[1]?.toLowerCase() === "tell" ? "tell" : "ask";
   const named = /^(?:please\s+)?(?:call|ring|phone)\s+([A-Za-z][A-Za-z' .-]{1,40}?)\s+(?:on|at)\s+/i.exec(trimmed);
   const rawName = named?.[1]?.trim() ?? "";
   const name = rawName && !/^(him|her|them|me|the)$/i.test(rawName) ? rawName : "";
-  return { name, phone, purpose };
+  return { name, phone, purpose, verb };
+}
+
+/**
+ * A follow-up that uses the number already waiting for YES.
+ * "Tell them I said hello" and "Call the number and tell them hello" both land here.
+ */
+export function pendingRevision(text: string): { verb: "ask" | "tell"; purpose: string } | null {
+  const trimmed = text.replace(/\s+/g, " ").trim();
+  if (!trimmed || callChoice(trimmed)) return null;
+  const match = /^(?:please\s+)?(?:and\s+)?(?:call(?:\s+the\s+number)?\s+and\s+)?(tell|ask|say to)\s+(?:him|her|them)\s+(.+)$/i.exec(trimmed);
+  if (!match?.[2]) return null;
+  let purpose = match[2].replace(/[.?!]+$/g, "").replace(/\s+/g, " ").trim().replace(/^i said\s+/i, "").trim();
+  if (!purpose) return null;
+  const verb = match[1]?.toLowerCase() === "ask" ? "ask" : "tell";
+  return { verb, purpose: purpose.slice(0, 240) };
 }
 
 export function displayNumber(e164: string): string {
@@ -346,8 +362,9 @@ export async function handleInboundSms(env: Env, from: string, body: string): Pr
     await sendSms(env, sender, screenStranger());
     if (owner) await sendSms(env, owner, `Text from ${sender}: ${clip(text, 240)}`);
   } catch (err) {
-    const detail = safeError(err instanceof Error ? err.message : "sms").replace(/\+\d{8,15}/g, "[redacted]");
-    console.error("sms desk failed", detail);
+    const detail = err instanceof Error ? err.message : "sms";
+    await recordSmsError(env, "handler", detail).catch(() => undefined);
+    if (sender) await sendSms(env, sender, CHAT_FALLBACK).catch(() => undefined);
   }
 }
 
@@ -542,6 +559,11 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
     await reply(env, phone, await offerOutbound(env, asked));
     return;
   }
+  const revision = pendingRevision(text);
+  if (revision) {
+    await reply(env, phone, await revisePendingOutbound(env, revision));
+    return;
+  }
   const choice = menuChoice(text);
   if (choice) {
     await sendBubbles(env, phone, menuBubbles(choice));
@@ -580,7 +602,12 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
     return;
   }
   if (follow === "detail") {
-    await reply(env, phone, await describeLatestCall(env));
+    try {
+      await reply(env, phone, await describeLatestCall(env));
+    } catch (err) {
+      await recordSmsError(env, "notes", err instanceof Error ? err.message : "notes");
+      await reply(env, phone, CHAT_FALLBACK);
+    }
     return;
   }
   await reply(env, phone, await chatReply(env, phone));
@@ -626,36 +653,85 @@ async function describeLatestCall(env: Env): Promise<string> {
   return line;
 }
 
-async function offerOutbound(env: Env, asked: { name: string; phone: string; purpose: string }): Promise<string> {
-  const who = asked.name || "them";
-  const shown = displayNumber(asked.phone);
-  await setState(
-    env,
-    OUTBOUND_KEY,
-    JSON.stringify({
-      name: who,
-      phone: asked.phone,
-      purpose: asked.purpose,
-      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-    }),
-  ).catch(() => undefined);
-  await queueApproval(env, "outbound_call", `Ring ${who} to ask ${asked.purpose}. Nothing is dialled until he replies YES.`, "approval_required", {
+interface PendingCall {
+  name: string;
+  phone: string;
+  purpose: string;
+  verb: "ask" | "tell";
+  expires_at: string;
+}
+
+function confirmOutbound(pending: PendingCall): string {
+  const shown = displayNumber(pending.phone);
+  const action = pending.verb === "tell" ? `tell them ${pending.purpose}` : `ask ${pending.purpose}`;
+  return `Shall I ring ${shown} to ${action}? Reply YES to confirm.`;
+}
+
+function readPending(raw: string | null): PendingCall | null {
+  if (!raw?.trim()) return null;
+  try {
+    const parsed = JSON.parse(raw) as { name?: unknown; phone?: unknown; purpose?: unknown; verb?: unknown; expires_at?: unknown };
+    const phone = typeof parsed.phone === "string" ? parsed.phone : "";
+    const purpose = typeof parsed.purpose === "string" ? parsed.purpose.trim() : "";
+    if (!toE164(phone) || !purpose) return null;
+    const name = typeof parsed.name === "string" && parsed.name.trim() ? parsed.name.trim() : "them";
+    return {
+      name,
+      phone,
+      purpose,
+      verb: parsed.verb === "tell" ? "tell" : "ask",
+      expires_at: typeof parsed.expires_at === "string" ? parsed.expires_at : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function offerOutbound(env: Env, asked: { name: string; phone: string; purpose: string; verb?: "ask" | "tell" }): Promise<string> {
+  const pending: PendingCall = {
+    name: asked.name || "them",
+    phone: asked.phone,
     purpose: asked.purpose,
-  }).catch(() => undefined);
-  return `Shall I ring ${shown} to ask ${asked.purpose}? Reply YES to confirm.`;
+    verb: asked.verb === "tell" ? "tell" : "ask",
+    expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+  };
+  await setState(env, OUTBOUND_KEY, JSON.stringify(pending)).catch(() => undefined);
+  await queueApproval(
+    env,
+    "outbound_call",
+    `Ring ${pending.name} to ${pending.verb} ${pending.purpose}. Nothing is dialled until he replies YES.`,
+    "approval_required",
+    { purpose: asked.purpose },
+  ).catch(() => undefined);
+  return confirmOutbound(pending);
+}
+
+async function revisePendingOutbound(env: Env, revision: { verb: "ask" | "tell"; purpose: string }): Promise<string> {
+  const pending = readPending(await getState(env, OUTBOUND_KEY).catch(() => null));
+  if (!pending) return "Which number should I ring, Sir? Tell me the number and what to say. Nothing has been dialled.";
+  const next: PendingCall = {
+    name: pending.name,
+    phone: pending.phone,
+    purpose: revision.purpose,
+    verb: revision.verb,
+    expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+  };
+  await setState(env, OUTBOUND_KEY, JSON.stringify(next)).catch(() => undefined);
+  return confirmOutbound(next);
 }
 
 async function placeApprovedOutbound(env: Env, owner: string): Promise<string | null> {
   const raw = await getState(env, OUTBOUND_KEY).catch(() => null);
   if (!raw?.trim()) return null;
-  let pending: { name?: unknown; phone?: unknown; purpose?: unknown; expires_at?: unknown };
+  let pending: { name?: unknown; phone?: unknown; purpose?: unknown; verb?: unknown; expires_at?: unknown };
   try {
-    pending = JSON.parse(raw) as { name?: unknown; phone?: unknown; purpose?: unknown; expires_at?: unknown };
+    pending = JSON.parse(raw) as { name?: unknown; phone?: unknown; purpose?: unknown; verb?: unknown; expires_at?: unknown };
   } catch {
     return null;
   }
   const phone = typeof pending.phone === "string" ? pending.phone : "";
   const purpose = typeof pending.purpose === "string" ? pending.purpose.trim() : "";
+  const verb = pending.verb === "tell" ? "tell" : "ask";
   if (!toE164(phone) || !purpose) return null;
   const expires = typeof pending.expires_at === "string" ? Date.parse(pending.expires_at) : 0;
   if (!Number.isFinite(expires) || expires < Date.now()) {
@@ -669,7 +745,8 @@ async function placeApprovedOutbound(env: Env, owner: string): Promise<string | 
   ]);
   if (changes !== 1) return null;
   const name = typeof pending.name === "string" && pending.name.trim() ? pending.name.trim() : "them";
-  const placed = await dialConfirm(env, name, phone, purpose);
+  const brief = verb === "tell" ? `Tell them ${purpose}.` : purpose;
+  const placed = await dialConfirm(env, name, phone, brief);
   if (!placed) return "I couldn't place that call, Sir. Nothing was dialled.";
   await rememberSmsOutcome(env, placed, owner, name);
   return `I'm ringing ${name === "them" ? displayNumber(phone) : name} now, Sir. I'll text you what they say.`;
@@ -910,6 +987,41 @@ async function draftSchedule(env: Env, goal: string): Promise<string> {
   return `I've drafted the email for your approval, Sir. Nothing has been sent. ${slots.map((slot) => slot.label).join("; ")}.`;
 }
 
+const SMS_ERROR_KEY = "sms_last_errors";
+
+export async function recordSmsError(env: Env, where: string, detail: string): Promise<void> {
+  const error = redactSmsDetail(detail);
+  console.error("sms assistant failed", where, error);
+  try {
+    const raw = await getState(env, SMS_ERROR_KEY).catch(() => null);
+    const prior = raw ? (JSON.parse(raw) as unknown) : [];
+    const rows = Array.isArray(prior) ? prior.slice(0, 7) : [];
+    rows.unshift({ at: new Date().toISOString(), where, error });
+    await setState(env, SMS_ERROR_KEY, JSON.stringify(rows));
+  } catch (err) {
+    console.error("sms error log failed", err instanceof Error ? err.message : "log");
+  }
+}
+
+export async function lastSmsErrors(env: Env): Promise<Response> {
+  const raw = await getState(env, SMS_ERROR_KEY).catch(() => null);
+  let errors: unknown[] = [];
+  try {
+    const parsed = raw ? (JSON.parse(raw) as unknown) : [];
+    errors = Array.isArray(parsed) ? parsed : [];
+  } catch {
+    errors = [];
+  }
+  return json({ errors });
+}
+
+function redactSmsDetail(text: string): string {
+  return safeError(text)
+    .replace(/\+\d[\d\s().-]{6,}/g, "[number]")
+    .replace(/\b0\d{9,10}\b/g, "[number]")
+    .slice(0, 400);
+}
+
 async function chatReply(env: Env, phone: string): Promise<string> {
   const facts = await dbAll<{ detail: string }>(env, "SELECT detail FROM owner_facts ORDER BY created_at DESC LIMIT 12").catch(() => []);
   const turns = await dbAll<{ role: string; body: string }>(
@@ -937,7 +1049,10 @@ async function chatReply(env: Env, phone: string): Promise<string> {
   }
   const tools = toolsForNames(["web_search", "draft_document", "request_approval"]);
   const first = await completeChat(env, messages, tools);
-  if (!first.ok) return CHAT_FALLBACK;
+  if (!first.ok) {
+    await recordSmsError(env, "chat", `${first.code}: ${first.message}`);
+    return CHAT_FALLBACK;
+  }
   const calls = first.message.tool_calls ?? [];
   if (calls.length === 0) return guardCallDenial(spokenAnswer(first.message.content ?? "") ?? "I've noted that, Sir.");
   messages.push(first.message);
@@ -946,7 +1061,10 @@ async function chatReply(env: Env, phone: string): Promise<string> {
     messages.push({ role: "tool", content: JSON.stringify(result).slice(0, 1500), tool_call_id: call.id, name: call.function.name });
   }
   const second = await completeChat(env, messages, null);
-  if (!second.ok) return "I've noted that, Sir.";
+  if (!second.ok) {
+    await recordSmsError(env, "chat", `${second.code}: ${second.message}`);
+    return "I've noted that, Sir.";
+  }
   return guardCallDenial(spokenAnswer(second.message.content ?? "") ?? "I've noted that, Sir.");
 }
 

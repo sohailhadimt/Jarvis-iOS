@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { twilioSignature } from "../src/calls";
 import { bookingAllowed, extractQuote } from "../src/hunt";
+import { route } from "../src/routes";
 import {
   asksCapabilities,
   birthdayNudge,
@@ -14,6 +16,7 @@ import {
   pairingDigits,
   parsePhones,
   paymentAsk,
+  pendingRevision,
   proposeSlots,
   rememberSmsOutcome,
   scheduleEmail,
@@ -236,6 +239,141 @@ describe("text desk", () => {
       await noteSmsOutcome(env, "call_smsout", "He is free tomorrow morning.", "completed");
       await noteSmsOutcome(env, "call_smsout", "He is free tomorrow morning.", "completed");
       expect(texts).toEqual(["Sir, He is free tomorrow morning."]);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("keeps the pending number so a follow-up becomes the YES confirmation", async () => {
+    expect(pendingRevision("Tell them I said hello")).toEqual({ verb: "tell", purpose: "hello" });
+    expect(pendingRevision("Call the number and tell them hello")).toEqual({ verb: "tell", purpose: "hello" });
+    expect(pendingRevision("What did he say")).toBeNull();
+
+    const env = deskEnv(new Map());
+    env.GEMINI_API_KEY = "gemini-test-key";
+    env.ELEVENLABS_API_KEY = "elevenlabs-key-example-value";
+    env.ELEVENLABS_AGENT_ID = "agent_example";
+    const calls: string[] = [];
+    const texts: string[] = [];
+    const models: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url.includes("generativelanguage") || url.includes("groq.com")) {
+        models.push(url);
+        return new Response("{}", { status: 500 });
+      }
+      if (url.includes("/Calls.json") && method === "POST") {
+        calls.push(String(init?.body ?? ""));
+        return new Response(JSON.stringify({ sid: "CA1234567890abcdef1234567890abcd" }), { status: 201 });
+      }
+      if (url.includes("/Messages.json") && method === "POST") {
+        texts.push(new URLSearchParams(String(init?.body ?? "")).get("Body") ?? "");
+        return new Response(JSON.stringify({ sid: "SMnote", status: "queued" }), { status: 201 });
+      }
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+    const pending: Promise<unknown>[] = [];
+    const context = {
+      waitUntil(promise: Promise<unknown>) {
+        pending.push(promise);
+      },
+      passThroughOnException() {
+        return undefined;
+      },
+      props: {},
+      async flush() {
+        await Promise.all(pending.splice(0));
+      },
+    };
+    const post = async (body: string) => {
+      const url = "https://jarvis.test/calls/sms";
+      const params = {
+        From: "+15557654321",
+        To: "+15551230001",
+        Body: body,
+        MessageSid: "SM1234567890abcdef1234567890abcd",
+      };
+      const signature = await twilioSignature(url, params, "twilio-token");
+      const response = await route(
+        new Request(url, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded", "X-Twilio-Signature": signature },
+          body: new URLSearchParams(params).toString(),
+        }),
+        env,
+        context as unknown as ExecutionContext,
+      );
+      expect(response.status).toBe(200);
+      await context.flush();
+    };
+    try {
+      await post("Call 07700 900123 and ask him if he is free tomorrow");
+      expect(texts.join(" ")).toContain("Shall I ring 07700 900123");
+      expect(texts.join(" ")).toContain("Reply YES");
+      expect(calls).toHaveLength(0);
+      expect(models).toHaveLength(0);
+
+      texts.length = 0;
+      await post("Tell them I said hello");
+      expect(texts.join(" ")).toContain("Shall I ring 07700 900123 to tell them hello");
+      expect(texts.join(" ")).toContain("Reply YES");
+      expect(texts.join(" ")).not.toContain("couldn't reach my notes");
+      expect(calls).toHaveLength(0);
+      expect(models).toHaveLength(0);
+
+      texts.length = 0;
+      await post("Call the number and tell them hello");
+      expect(texts.join(" ")).toContain("to tell them hello");
+      expect(calls).toHaveLength(0);
+
+      texts.length = 0;
+      await post("YES");
+      expect(calls).toHaveLength(1);
+      expect(new URLSearchParams(calls[0] ?? "").get("To")).toBe("+447700900123");
+      expect(models).toHaveLength(0);
+
+      texts.length = 0;
+      await post("What did he say");
+      expect(texts.join(" ")).not.toContain("couldn't reach my notes");
+      expect(texts.join(" ").toLowerCase()).toContain("boiler");
+      expect(models).toHaveLength(0);
+    } finally {
+      globalThis.fetch = original;
+    }
+  }, 20_000);
+
+  it("logs the model error when the fallback is sent", async () => {
+    const kv = new Map<string, string>();
+    const env = deskEnv(kv);
+    env.GEMINI_API_KEY = "gemini-test-key";
+    const texts: string[] = [];
+    let sentSchema = "";
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("generativelanguage")) {
+        sentSchema = String(init?.body ?? "");
+        return new Response(
+          JSON.stringify({ error: { message: 'Invalid JSON payload received. Unknown name "additionalProperties"' } }),
+          { status: 400 },
+        );
+      }
+      if (url.includes("/Messages.json") && (init?.method ?? "GET") === "POST") {
+        texts.push(new URLSearchParams(String(init?.body ?? "")).get("Body") ?? "");
+        return new Response(JSON.stringify({ sid: "SMfail", status: "queued" }), { status: 201 });
+      }
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+    try {
+      await handleInboundSms(env, "+15557654321", "What is the weather in Paris");
+      expect(sentSchema).not.toContain("additionalProperties");
+      expect(texts.join(" ")).toContain("couldn't reach my notes");
+      const logged = JSON.parse(kv.get("sms_last_errors") ?? "[]") as Array<{ where: string; error: string }>;
+      expect(logged[0]?.where).toBe("chat");
+      expect(logged[0]?.error).toContain("additionalProperties");
+      expect(logged[0]?.error).not.toContain("gemini-test-key");
     } finally {
       globalThis.fetch = original;
     }

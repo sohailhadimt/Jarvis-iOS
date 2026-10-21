@@ -37,6 +37,8 @@ hit config GET /calls/config "" yes
 hit messages GET "/calls/messages?unread=1" "" yes
 hit outbound POST /calls/outbound '{"to":"+15557654321","purpose":"qa live check","contact_name":"QA","approved":false}' yes
 hit device POST /calls/device '{"token":"not-hex"}' yes
+hit sms_probe POST /debug/sms-probe '{}' yes
+hit sms_errors GET /debug/last-sms-errors "" yes
 
 node --input-type=module <<'NODE'
 import { readFileSync } from "node:fs";
@@ -62,6 +64,14 @@ if (/\+\d{8,}/.test(text)) {
   process.exit(1);
 }
 console.log(text);
+const probe = read("sms_probe");
+const errors = read("sms_errors");
+const debug = JSON.stringify({ probe, errors });
+if (/\+\d{8,}/.test(debug) || /sk-|AIza|Bearer\s+\S{8,}/i.test(debug)) {
+  console.error("sms debug leaked a secret");
+  process.exit(1);
+}
+console.log(`sms_debug ${debug}`);
 NODE
 
 outbound_code=$(node -e 'const b=require("/tmp/live-outbound.json"); process.stdout.write(String((b.error&&b.error.code)||""))' 2>/dev/null || true)

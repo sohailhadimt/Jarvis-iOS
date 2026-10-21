@@ -16,6 +16,10 @@ database_id = "432f8531-b090-4df4-ad1d-efe720693d86"
 [triggers]
 crons = ["*/5 * * * *"]
 
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 [vars]
 ENVIRONMENT = "production"
 ELEVENLABS_FORCE_POLLY = "false"
