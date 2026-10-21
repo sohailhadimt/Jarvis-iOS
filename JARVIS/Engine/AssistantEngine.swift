@@ -2213,7 +2213,7 @@ final class AssistantEngine {
     private func shopContacts(_ goal: String) -> [[String: String]] {
         var rows: [[String: String]] = []
         for hit in ContactDirectory.shared.hits(matching: goal).prefix(5) {
-            guard let phone = hit.bestPhone, !phone.isEmpty, !LocalCall.isEmergency(phone) else { continue }
+            guard let phone = hit.bestPhone, !phone.isEmpty, !BriefedCall.isEmergency(phone) else { continue }
             rows.append(["business": hit.name, "phone": phone])
             if rows.count >= 5 { break }
         }

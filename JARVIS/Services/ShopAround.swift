@@ -35,7 +35,7 @@ enum ShopAround {
         for match in expression.matches(in: text, range: range) {
             guard let slice = Range(match.range, in: text) else { continue }
             let phone = String(text[slice])
-            if LocalCall.isEmergency(phone) || found.contains(phone) { continue }
+            if BriefedCall.isEmergency(phone) || found.contains(phone) { continue }
             found.append(phone)
             if found.count >= 5 { break }
         }
