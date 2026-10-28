@@ -214,6 +214,39 @@ export function directOutbound(text: string): { name: string; phone: string; pur
  * A follow-up that uses the number already waiting for YES.
  * "Tell them I said hello" and "Call the number and tell them hello" both land here.
  */
+/**
+ * A call that names a number and a purpose, even when it does not say ask or tell.
+ * "Call 07700 900123 with a greeting and a brief" waits for YES. It does not dial.
+ */
+export function looseCall(text: string): { name: string; phone: string; purpose: string; verb: "ask" | "tell" } | null {
+  if (outboundAsk(text) || directOutbound(text) || callChoice(text)) return null;
+  const trimmed = text.replace(/\s+/g, " ").trim();
+  if (!/^(?:please\s+)?(?:can you\s+|could you\s+)?(?:call|ring|phone|dial)\b/i.test(trimmed)) return null;
+  const phone = parsePhones(trimmed, 1)[0] ?? "";
+  if (!phone) return null;
+  const purpose = trimmed
+    .replace(/\+?\d[\d\s().-]{6,}\d/g, " ")
+    .replace(/\b0\d(?:[\s.-]?\d){8,10}\b/g, " ")
+    .replace(/^(?:please\s+)?(?:can you\s+|could you\s+)?(?:call|ring|phone|dial)\b/i, " ")
+    .replace(/\b(?:him|her|them|me|please)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s,.:;-]+/, "")
+    .replace(/[.?!]+$/g, "")
+    .trim()
+    .slice(0, 240);
+  if (purpose.length < 3) return null;
+  const verb = /\bask\b/i.test(trimmed) ? "ask" : "tell";
+  return { name: "", phone, purpose, verb };
+}
+
+/** A correction such as "the number is wrong, it's 07700 900123". It does not dial. */
+export function numberCorrection(text: string): string | null {
+  const trimmed = text.replace(/\s+/g, " ").trim();
+  if (!trimmed || outboundAsk(trimmed) || directOutbound(trimmed) || looseCall(trimmed)) return null;
+  if (!/\b(?:wrong|correct(?:ed|ion)?|instead|number|its|it's|it is)\b/i.test(trimmed)) return null;
+  return parsePhones(trimmed, 1)[0] ?? null;
+}
+
 export function pendingRevision(text: string): { verb: "ask" | "tell"; purpose: string } | null {
   const trimmed = text.replace(/\s+/g, " ").trim();
   if (!trimmed || callChoice(trimmed)) return null;
@@ -306,7 +339,7 @@ export function birthdayLine(subject: string, whenLabel: string): string {
 
 export function parsePhones(text: string, max = 5): string[] {
   const pattern =
-    /\+\d{8,15}|\+\d{1,3}(?:[\s.-]\d{2,4}){2,3}|\b0\d{4}[\s.-]\d{6}\b|\b0\d{3}[\s.-]\d{3}[\s.-]\d{4}\b|\b0\d{2}[\s.-]\d{4}[\s.-]\d{4}\b|\b0\d{9,10}\b/g;
+    /\+\d{8,15}|\+\d{1,3}(?:[\s.-]\d{2,4}){2,3}|\b0\d{4}[\s.-]\d{3}[\s.-]\d{3}\b|\b0\d{4}[\s.-]\d{6}\b|\b0\d{3}[\s.-]\d{3}[\s.-]\d{4}\b|\b0\d{2}[\s.-]\d{4}[\s.-]\d{4}\b|\b0\d{9,10}\b/g;
   const found: string[] = [];
   for (const match of text.matchAll(pattern)) {
     const phone = toE164(match[0] ?? "");
@@ -495,12 +528,17 @@ export async function sendSmsResult(env: Env, to: string, body: string): Promise
     if (!response.ok) {
       const error = publicSmsError(parsed.message || "Twilio rejected the text.");
       console.error("owner sms rejected", parsed.code || response.status, error);
-      return { ok: false, sid: parsed.sid, status: parsed.status, errorCode: parsed.code || String(response.status), error };
+      const failed = { ok: false, sid: parsed.sid, status: parsed.status, errorCode: parsed.code || String(response.status), error };
+      await noteSmsLog(env, { direction: "out", status: failed.status || "failed", errorCode: failed.errorCode, brain: "twilio", detail: error, sid: failed.sid });
+      return failed;
     }
-    return { ok: true, sid: parsed.sid, status: parsed.status || "queued", errorCode: "", error: "" };
+    const accepted = { ok: true, sid: parsed.sid, status: parsed.status || "queued", errorCode: "", error: "" };
+    await noteSmsLog(env, { direction: "out", status: accepted.status, errorCode: "", brain: "twilio", detail: message, sid: accepted.sid });
+    return accepted;
   } catch (err) {
     const error = publicSmsError(err instanceof Error ? err.message : "Twilio could not be reached.");
     console.error("owner sms failed", error);
+    await noteSmsLog(env, { direction: "out", status: "failed", errorCode: "", brain: "twilio", detail: error, sid: "" });
     return { ok: false, sid: "", status: "", errorCode: "", error };
   }
 }
@@ -581,18 +619,32 @@ function publicSmsError(text: string): string {
 
 async function answerOwner(env: Env, phone: string, text: string): Promise<void> {
   await rememberTurn(env, phone, "user", text);
+  await noteSmsLog(env, { direction: "in", status: "received", errorCode: "", brain: "inbound", detail: text, sid: "" });
   if (confirmsYes(text)) {
     const placed = await placeApprovedOutbound(env, phone);
     if (placed) {
-      await reply(env, phone, placed);
+      await reply(env, phone, placed, "yes");
       return;
     }
     const { confirmDraftHunt } = await import("./hunt");
     const started = await confirmDraftHunt(env);
     if (started) {
-      await reply(env, phone, started.message);
+      await reply(env, phone, started.message, "yes-hunt");
       return;
     }
+    await reply(env, phone, "Nothing is waiting to be dialled, Sir. Nothing was dialled.", "yes-empty");
+    return;
+  }
+  const corrected = numberCorrection(text);
+  if (corrected) {
+    const line = await correctPendingNumber(env, corrected);
+    await reply(
+      env,
+      phone,
+      line ?? "Nothing is waiting to be dialled, Sir. Tell me the number and what to say. Nothing has been dialled.",
+      line ? "correction" : "correction-empty",
+    );
+    return;
   }
   const choiceReply = callChoice(text);
   const numbered = text.trim() === "1" || text.trim() === "2";
@@ -600,9 +652,9 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
     await reply(env, phone, choiceReply === "dial" ? await placeLatestCallback(env, phone) : await sendCallerNumber(env));
     return;
   }
-  const asked = outboundAsk(text);
+  const asked = outboundAsk(text) ?? looseCall(text);
   if (asked) {
-    await reply(env, phone, await offerOutbound(env, asked));
+    await reply(env, phone, await offerOutbound(env, asked), "offer");
     return;
   }
   const direct = directOutbound(text);
@@ -772,6 +824,20 @@ async function offerOutbound(env: Env, asked: { name: string; phone: string; pur
     { purpose: asked.purpose },
   ).catch(() => undefined);
   return confirmOutbound(pending);
+}
+
+async function correctPendingNumber(env: Env, phone: string): Promise<string | null> {
+  const pending = readPending(await getState(env, OUTBOUND_KEY).catch(() => null));
+  if (!pending) return null;
+  const next: PendingCall = {
+    name: pending.name,
+    phone,
+    purpose: pending.purpose,
+    verb: pending.verb,
+    expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+  };
+  await setState(env, OUTBOUND_KEY, JSON.stringify(next)).catch(() => undefined);
+  return confirmOutbound(next);
 }
 
 async function revisePendingOutbound(env: Env, revision: { verb: "ask" | "tell"; purpose: string }): Promise<string> {
@@ -989,7 +1055,13 @@ function callerLines(raw: string): string {
   }
 }
 
-async function reply(env: Env, phone: string, text: string): Promise<void> {
+async function reply(env: Env, phone: string, text: string, brain = "reply"): Promise<void> {
+  await noteSmsLog(env, { direction: "out", status: "reply", errorCode: "", brain, detail: text, sid: "" });
+  const lines = smsCapture.get(env);
+  if (lines) {
+    lines.push(text);
+    return;
+  }
   await sendBubbles(env, phone, smsBubbles(text));
 }
 
@@ -1097,6 +1169,62 @@ export async function recordSmsError(env: Env, where: string, detail: string): P
   }
 }
 
+const SMS_LOG_KEY = "sms_last_log";
+const smsCapture = new WeakMap<Env, string[]>();
+
+export async function noteSmsLog(
+  env: Env,
+  row: { direction: "in" | "out"; status: string; errorCode: string; brain: string; detail: string; sid: string },
+): Promise<void> {
+  const entry = {
+    at: new Date().toISOString(),
+    direction: row.direction,
+    status: row.status.slice(0, 40),
+    errorCode: row.errorCode.slice(0, 20),
+    brain: row.brain.slice(0, 40),
+    detail: redactSmsDetail(row.detail),
+    sid: /^[A-Z]{2}[0-9a-f]{32}$/i.test(row.sid) ? row.sid : "",
+  };
+  try {
+    const raw = await getState(env, SMS_LOG_KEY).catch(() => null);
+    const prior = raw ? (JSON.parse(raw) as unknown) : [];
+    const rows = Array.isArray(prior) ? prior.slice(0, 19) : [];
+    rows.unshift(entry);
+    await setState(env, SMS_LOG_KEY, JSON.stringify(rows));
+  } catch (err) {
+    console.error("sms log failed", err instanceof Error ? err.message : "log");
+  }
+}
+
+export async function lastSmsLog(env: Env): Promise<Response> {
+  const raw = await getState(env, SMS_LOG_KEY).catch(() => null);
+  let messages: unknown[] = [];
+  try {
+    const parsed = raw ? (JSON.parse(raw) as unknown) : [];
+    messages = Array.isArray(parsed) ? parsed : [];
+  } catch {
+    messages = [];
+  }
+  return json({ messages });
+}
+
+/** Runs the owner SMS brain without sending a text. YES still uses the outbound call path. */
+export async function simulateSmsRoute(request: Request, env: Env): Promise<Response> {
+  const body = await readJson(request);
+  if (!body.ok) return body.response;
+  if (!isRecord(body.value)) return apiError(400, "bad_request", "text is required.");
+  const text = asString(body.value.text, 500);
+  if (!text) return apiError(400, "bad_request", "text is required.");
+  const lines: string[] = [];
+  smsCapture.set(env, lines);
+  try {
+    await answerOwner(env, "+447700900000", text);
+  } finally {
+    smsCapture.delete(env);
+  }
+  return json({ ok: true, reply: lines.join(" ") });
+}
+
 export async function lastSmsErrors(env: Env): Promise<Response> {
   const raw = await getState(env, SMS_ERROR_KEY).catch(() => null);
   let errors: unknown[] = [];
@@ -1112,6 +1240,8 @@ export async function lastSmsErrors(env: Env): Promise<Response> {
 function redactSmsDetail(text: string): string {
   return safeError(text)
     .replace(/\+\d[\d\s().-]{6,}/g, "[number]")
+    .replace(/\b0\d{4}\s+\d{3}\s+\d{3}\b/g, "[number]")
+    .replace(/\b0\d{4}\s+\d{6}\b/g, "[number]")
     .replace(/\b0\d{9,10}\b/g, "[number]")
     .slice(0, 400);
 }

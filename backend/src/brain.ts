@@ -393,7 +393,10 @@ function unplacedClaim(text: string): boolean {
   const lower = text.toLowerCase();
   if (/\b(?:calling|ringing)\b/.test(lower) && /\bnow\b/.test(lower)) return true;
   if (/\bi(?:'m| am) (?:calling|ringing|dialling|dialing)\b/.test(lower)) return true;
-  if (/\bi(?:'ve| have) (?:just )?(?:called|rung|dialled|dialed)\b/.test(lower)) return true;
+  if (/\bi(?:'ve| have) (?:just )?(?:called|rung|dialled|dialed|placed)\b/.test(lower)) return true;
+  if (/\b(?:has been|was|is being) (?:placed|initiated|dialled|dialed)\b/.test(lower)) return true;
+  if (/\bcall is being initiated\b/.test(lower)) return true;
+  if (/\b(?:placed|initiated) (?:the |a )?call\b/.test(lower)) return true;
   return false;
 }
 

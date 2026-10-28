@@ -40,7 +40,7 @@ import {
   readJson,
 } from "./http";
 import { markPersonaDraft, routePersona } from "./personas";
-import { lastSmsErrors, pairResponse, recordSmsError, saveBusy, sendOwnerSmsRoute } from "./sms-desk";
+import { lastSmsErrors, lastSmsLog, pairResponse, recordSmsError, saveBusy, sendOwnerSmsRoute, simulateSmsRoute } from "./sms-desk";
 import { historyResponse, lineResponse, personaResponse, reminderResponse, sayResponse } from "./brain";
 import { liveTokenResponse } from "./live-token";
 import { readVoiceDebug, saveVoiceDebug, VOICE_DEBUG_REVISION } from "./voice-debug";
@@ -81,6 +81,8 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     ctx.waitUntil(rememberOrigin(env, url.origin));
     if (request.method === "GET" && path === "/debug/last-calls") return lastCallDebug(env);
     if (request.method === "GET" && path === "/debug/last-sms-errors") return lastSmsErrors(env);
+    if (request.method === "GET" && path === "/debug/last-sms") return lastSmsLog(env);
+    if (request.method === "POST" && path === "/debug/sms-simulate") return simulateSmsRoute(request, env);
     if (request.method === "POST" && path === "/debug/voice") return saveVoiceDebug(request, env);
     if (request.method === "POST" && path === "/voice/live-token") return liveTokenResponse(env);
     if (request.method === "POST" && path === "/messages/sms") return sendOwnerSmsRoute(request, env);

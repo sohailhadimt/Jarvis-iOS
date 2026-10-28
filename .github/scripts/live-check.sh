@@ -43,6 +43,10 @@ hit voice_post POST /debug/voice '{"events":[{"kind":"live-check","detail":"work
 hit voice_get GET /debug/voice "" yes
 hit brain_line POST /brain/line '{"source":"sms","role":"user","text":"The boiler quote was four hundred."}' yes
 hit brain_history GET /brain/history "" yes
+hit sms_sim_offer POST /debug/sms-simulate '{"text":"Call 07700 900123 with a greeting and a Modern Warfare brief"}' yes
+hit sms_sim_fix POST /debug/sms-simulate '{"text":"No you got the number wrong its 07700 900 456"}' yes
+hit sms_sim_yes POST /debug/sms-simulate '{"text":"YES"}' yes
+hit sms_log GET /debug/last-sms "" yes
 
 node --input-type=module <<'NODE'
 import { readFileSync } from "node:fs";
@@ -89,6 +93,29 @@ const found = turns.some((turn) => turn && turn.body === "The boiler quote was f
 console.log(`brain_recall found=${found ? "true" : "false"} revision=${history.revision || ""} turns=${turns.length}`);
 if (!found || history.revision !== "brain-1" || history.voice !== "George") {
   console.error("phone line was not in the app history");
+  process.exit(1);
+}
+const offer = read("sms_sim_offer") || {};
+const fix = read("sms_sim_fix") || {};
+const yes = read("sms_sim_yes") || {};
+const smsLog = read("sms_log") || {};
+const brains = Array.isArray(smsLog.messages) ? smsLog.messages.map((row) => row && row.brain).filter(Boolean) : [];
+const yesReply = String(yes.reply || "");
+const calling = /\bcalling\b/i.test(yesReply);
+const honest = /nothing was dialled/i.test(yesReply);
+const claimed = /has been placed|being initiated/i.test(yesReply);
+console.log(`sms_yes brains=${[...new Set(brains)].join(",")} calling=${calling} honest=${honest} claimed=${claimed}`);
+if (!String(offer.reply || "").includes("Reply YES") || !String(fix.reply || "").includes("Reply YES")) {
+  console.error("sms simulate did not wait for YES");
+  process.exit(1);
+}
+if (claimed || (calling && honest) || (!calling && !honest)) {
+  console.error("sms YES did not follow the call SID rule");
+  process.exit(1);
+}
+const smsDump = JSON.stringify({ brains, calling, honest, claimed });
+if (/\+\d{8,}/.test(smsDump) || /07771/.test(smsDump)) {
+  console.error("sms simulate leaked a phone number");
   process.exit(1);
 }
 const shared = JSON.stringify({ voice: { revision: voice.revision, kinds }, brain: { revision: history.revision, found } });

@@ -10,6 +10,8 @@ import {
   capabilityBubbles,
   directOutbound,
   handleInboundSms,
+  looseCall,
+  numberCorrection,
   learnFacts,
   menuChoice,
   noteSmsOutcome,
@@ -27,6 +29,7 @@ import {
   wantsSchedule,
   welcomeBubbles,
 } from "../src/sms-desk";
+import { guardUnplacedCall } from "../src/brain";
 import { CHAT_FALLBACK } from "../src/llm";
 import type { Env } from "../src/types";
 
@@ -384,6 +387,140 @@ describe("text desk", () => {
       globalThis.fetch = original;
     }
   });
+
+  it("keeps a corrected number pending until YES, and only then dials", async () => {
+    expect(parsePhones("07700 900 123")).toEqual(["+447700900123"]);
+    expect(looseCall("Call 07700 900123 with a greeting and a Modern Warfare brief")).toMatchObject({
+      phone: "+447700900123",
+      verb: "tell",
+    });
+    expect(numberCorrection("No you got the number wrong its 07700 900 456")).toBe("+447700900456");
+    expect(guardUnplacedCall("The call is being initiated.")).toBe("I have not placed a call, Sir. Nothing was dialled.");
+    expect(guardUnplacedCall("Sir, the call has been placed with your greeting.")).toBe(
+      "I have not placed a call, Sir. Nothing was dialled.",
+    );
+
+    const env = deskEnv(new Map());
+    env.GEMINI_API_KEY = "gemini-test-key";
+    env.ELEVENLABS_API_KEY = "elevenlabs-key-example-value";
+    env.ELEVENLABS_AGENT_ID = "agent_example";
+    const calls: string[] = [];
+    const texts: string[] = [];
+    const models: string[] = [];
+    let mode: "sid" | "nosid" = "sid";
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url.includes("generativelanguage") || url.includes("groq.com")) {
+        models.push(url);
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "The call is being initiated. Sir, the call has been placed." } }],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("/Calls.json") && method === "POST") {
+        calls.push(String(init?.body ?? ""));
+        if (mode === "nosid") return new Response(JSON.stringify({ status: "queued" }), { status: 201 });
+        return new Response(JSON.stringify({ sid: "CA1234567890abcdef1234567890abcdef" }), { status: 201 });
+      }
+      if (url.includes("/Messages.json") && method === "POST") {
+        texts.push(new URLSearchParams(String(init?.body ?? "")).get("Body") ?? "");
+        return new Response(JSON.stringify({ sid: "SM1234567890abcdef1234567890abcdef", status: "queued" }), { status: 201 });
+      }
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+    const pending: Promise<unknown>[] = [];
+    const context = {
+      waitUntil(promise: Promise<unknown>) {
+        pending.push(promise);
+      },
+      passThroughOnException() {
+        return undefined;
+      },
+      props: {},
+      async flush() {
+        await Promise.all(pending.splice(0));
+      },
+    };
+    const post = async (body: string) => {
+      const url = "https://jarvis.test/calls/sms";
+      const params = {
+        From: "+15557654321",
+        To: "+15551230001",
+        Body: body,
+        MessageSid: "SM1234567890abcdef1234567890abcd",
+      };
+      const signature = await twilioSignature(url, params, "twilio-token");
+      const response = await route(
+        new Request(url, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded", "X-Twilio-Signature": signature },
+          body: new URLSearchParams(params).toString(),
+        }),
+        env,
+        context as unknown as ExecutionContext,
+      );
+      expect(response.status).toBe(200);
+      await context.flush();
+    };
+    try {
+      await post("Call 07700 900123 with a greeting and a Modern Warfare brief");
+      expect(texts.join(" ")).toContain("Shall I ring 07700 900123");
+      expect(texts.join(" ")).toContain("Modern Warfare");
+      expect(texts.join(" ")).toContain("Reply YES");
+      expect(texts.join(" ").toLowerCase()).not.toContain("initiated");
+      expect(texts.join(" ").toLowerCase()).not.toContain("placed");
+      expect(calls).toHaveLength(0);
+      expect(models).toHaveLength(0);
+
+      texts.length = 0;
+      await post("No you got the number wrong its 07700 900 456");
+      expect(texts.join(" ")).toContain("07700 900456");
+      expect(texts.join(" ")).toContain("Reply YES");
+      expect(texts.join(" ")).toContain("Modern Warfare");
+      expect(calls).toHaveLength(0);
+      expect(models).toHaveLength(0);
+
+      texts.length = 0;
+      await post("YES");
+      expect(models).toHaveLength(0);
+      expect(calls).toHaveLength(1);
+      const form = new URLSearchParams(calls[0] ?? "");
+      expect(form.get("To")).toBe("+447700900456");
+      expect(form.get("Url") ?? "").toContain("/calls/voice/");
+      expect(texts.join(" ")).toContain("Calling 07700 900456 now");
+      expect(texts.join(" ").toLowerCase()).not.toContain("has been placed");
+
+      texts.length = 0;
+      await post("It's not ringing him");
+      expect(models.length).toBeGreaterThan(0);
+      expect(calls).toHaveLength(1);
+      expect(texts.join(" ")).toContain("Nothing was dialled");
+      expect(texts.join(" ").toLowerCase()).not.toContain("initiated");
+      expect(texts.join(" ").toLowerCase()).not.toContain("has been placed");
+
+      calls.length = 0;
+      texts.length = 0;
+      models.length = 0;
+      mode = "nosid";
+      await post("Call 07700 900123 with a greeting and a Modern Warfare brief");
+      texts.length = 0;
+      await post("YES");
+      expect(calls).toHaveLength(1);
+      expect(models).toHaveLength(0);
+      const missed = texts.join(" ");
+      expect(missed).toContain("Twilio did not return a call SID");
+      expect(missed).toContain("Nothing was dialled");
+      expect(missed.toLowerCase()).not.toMatch(/\bcalling\b/);
+      expect(missed.toLowerCase()).not.toContain("has been placed");
+      expect(missed.toLowerCase()).not.toContain("initiated");
+    } finally {
+      globalThis.fetch = original;
+    }
+  }, 20_000);
 
   it("dials a number-first tell, including the owner's own number, and only says calling now after a Call SID", async () => {
     expect(directOutbound("07700 900123, and tell him I said wake up")).toEqual({
