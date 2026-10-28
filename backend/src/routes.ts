@@ -31,6 +31,7 @@ import {
   nowIso,
   readJson,
 } from "./http";
+import { handleHq, recordHqEvent } from "./hq";
 import { markPersonaDraft, routePersona } from "./personas";
 import { optionalSourceUrls } from "./sources";
 import { isPipelineStage, parseMrr } from "./tools";
@@ -89,6 +90,8 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (callResponse) return callResponse;
     const persona = await routePersona(request, env, path, parts);
     if (persona) return persona;
+    const hq = await handleHq(request, env, path, parts);
+    if (hq) return hq;
     return apiError(404, "not_found", `No route for ${request.method} ${path}.`);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Request failed.";
@@ -267,6 +270,14 @@ async function decideApproval(
     now,
     id,
   ]);
+  if (status === "approved") {
+    const kind = /\b(post|posts|posted|publish|published|publishing|instagram|linkedin|tiktok|facebook)\b/i.test(
+      `${row.action} ${row.summary}`,
+    )
+      ? "post_approved"
+      : "approval_approved";
+    await recordHqEvent(env, { kind, source: id, summary: row.summary, bot: null });
+  }
   if (row.action === "persona_external" && row.payload_json) {
     try {
       const payload = JSON.parse(row.payload_json) as { persona_task_id?: unknown };

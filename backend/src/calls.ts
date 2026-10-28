@@ -1,4 +1,5 @@
 import { dbAll, dbFirst, dbRun } from "./db";
+import { recordHqEvent } from "./hq";
 import { apiError, asString, isRecord, json, newId, nowIso } from "./http";
 import type { Env } from "./types";
 
@@ -298,6 +299,12 @@ async function createCall(request: Request, env: Env): Promise<Response> {
   }
   record.twilio_sid = twilioSid || null;
   if (twilioSid) await updateCall(env, id, { twilio_sid: twilioSid });
+  await recordHqEvent(env, {
+    kind: "call_booked",
+    source: id,
+    summary: `Call booked with ${contact}`,
+    bot: null,
+  });
   return json({ configured: true, call: publicCall(record) }, 201);
 }
 

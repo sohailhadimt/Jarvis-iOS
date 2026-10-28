@@ -1,6 +1,7 @@
 import { agentSystemPrompt, plannerSystemPrompt, plannerUserPrompt } from "./agents";
 import { computeNextRun, cronMatches, parseCron } from "./cron";
 import { dbAll, dbFirst, dbRun, logActivity, logProgress } from "./db";
+import { recordHqEvent } from "./hq";
 import { clip, newId, nowIso, parseStringArray } from "./http";
 import type { ChatMessage, LlmFailure } from "./llm";
 import { completeChat } from "./llm";
@@ -534,6 +535,12 @@ export async function recomputeTaskStatus(env: Env, taskId: string): Promise<voi
     [summary, now, now, taskId],
   );
   await logActivity(env, "orchestrator", "task.completed", taskId, { qc_pass: verdict });
+  await recordHqEvent(env, {
+    kind: "task_completed",
+    source: taskId,
+    summary: summary || "Task completed",
+    bot: null,
+  });
 }
 
 function readMessages(raw: string | null): ChatMessage[] | null {
