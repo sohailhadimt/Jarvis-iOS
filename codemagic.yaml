@@ -92,3 +92,95 @@ workflows:
       app_store_connect:
         auth: integration
         submit_to_testflight: true
+
+  # Separate from JARVIS. Internal TestFlight only: the IPA is marked
+  # testFlightInternalTestingOnly, so Apple will not accept it for external
+  # testing or App Store distribution. Do not add beta_groups, copyright,
+  # release_type, or submit_to_app_store: true.
+  asghq-testflight:
+    name: ASG HQ iOS - TestFlight internal only
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    integrations:
+      app_store_connect: CODEMAGIC_ASC_KEY
+    environment:
+      groups:
+        - signing
+      vars:
+        XCODE_PROJECT: "ASG-HQ/ASGHQ.xcodeproj"
+        XCODE_SCHEME: "ASGHQ"
+        BUNDLE_ID: "com.sohail.asghq"
+        XCODE_PROJECT_CUSTOM_EXPORT_OPTIONS: '{"testFlightInternalTestingOnly": true}'
+      xcode: latest
+    scripts:
+      - name: Install XcodeGen
+        script: brew install xcodegen
+      - name: Generate Xcode project
+        script: |
+          cd "$CM_BUILD_DIR/ASG-HQ"
+          xcodegen generate
+      - name: Set up keychain to be used for code signing using Codemagic CLI 'keychain' command
+        script: keychain initialize
+      - name: Fetch signing files
+        script: |
+          if [ -z "${CERTIFICATE_PRIVATE_KEY:-}" ]; then
+            echo "CERTIFICATE_PRIVATE_KEY is not set. Add the PEM RSA private key to the Codemagic variable group 'signing'."
+            exit 1
+          fi
+          app-store-connect fetch-signing-files "com.sohail.asghq" \
+            --type IOS_APP_STORE \
+            --create \
+            --certificate-key=@env:CERTIFICATE_PRIVATE_KEY
+      - name: Set up signing certificate
+        script: keychain add-certificates
+      - name: Set up code signing settings on Xcode project
+        script: |
+          xcode-project use-profiles \
+            --project "$CM_BUILD_DIR/ASG-HQ/ASGHQ.xcodeproj" \
+            --custom-export-options='{"testFlightInternalTestingOnly": true}'
+      - name: Increment build number
+        script: |
+          cd "$CM_BUILD_DIR/ASG-HQ"
+          APPLE_ID="${ASGHQ_APP_STORE_APPLE_ID:-}"
+          LATEST=0
+          if [ -n "$APPLE_ID" ]; then
+            LATEST=$(app-store-connect get-latest-testflight-build-number "$APPLE_ID" || echo 0)
+            LATEST=$(printf '%s' "$LATEST" | tr -dc '0-9')
+          else
+            echo "ASGHQ_APP_STORE_APPLE_ID is not set. Using Codemagic BUILD_NUMBER only."
+            echo "Create the App Store Connect record for com.sohail.asghq for internal TestFlight only. Do not submit it for App Review. Then add the numeric Apple ID to the signing group as ASGHQ_APP_STORE_APPLE_ID."
+          fi
+          if [ -z "$LATEST" ]; then
+            LATEST=0
+          fi
+          FLOOR=$((LATEST + 1))
+          COUNTER=${BUILD_NUMBER:-1}
+          if [ "$COUNTER" -gt "$FLOOR" ]; then
+            NEXT=$COUNTER
+          else
+            NEXT=$FLOOR
+          fi
+          echo "CFBundleVersion $NEXT (BUILD_NUMBER=$COUNTER, TestFlight latest=$LATEST, floor=$FLOOR)"
+          agvtool new-version -all "$NEXT"
+          PLIST="$CM_BUILD_DIR/ASG-HQ/ASGHQ/Info.plist"
+          if /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST" >/dev/null 2>&1; then
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NEXT" "$PLIST"
+          else
+            /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $NEXT" "$PLIST"
+          fi
+          echo "Info.plist CFBundleVersion=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST")"
+      - name: Build ipa for internal TestFlight
+        script: |
+          xcode-project build-ipa \
+            --project "$CM_BUILD_DIR/ASG-HQ/ASGHQ.xcodeproj" \
+            --scheme "ASGHQ"
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.app
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        submit_to_app_store: false

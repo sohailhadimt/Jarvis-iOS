@@ -561,6 +561,32 @@ Update a row. Omitted fields stay as they are. You cannot clear `source_urls`.
 
 `GET /group` and `POST /group` with `{ "author", "text" }` are the shared room.
 
+## ASG HQ
+
+These routes serve the separate ASG HQ iPhone game. They use the same bearer token. The game reads progress and posts a line of talk. It does not post events for itself, and it does not call, send, or publish.
+
+XP is the sum of rows in `hq_events`. The server assigns the points. A body field named `xp` is ignored.
+
+| Kind | XP | Written by |
+|---|---|---|
+| `task_completed` | 120 | A task reaching `completed` |
+| `task_done` | 80 | `POST /hq/events` from another system |
+| `approval_approved` | 40 | An approval decision that is not a post |
+| `post_approved` | 100 | An approved post or publish decision |
+| `call_booked` | 150 | A call Twilio accepted. The summary is the contact name only |
+
+The same `kind` and `source` are stored once. Phone-shaped numbers in a summary are replaced with `[number]`.
+
+`GET /hq/progress` returns `xp`, `level`, `xp_into_level`, `xp_to_next`, `perks`, `daily`, `events`, and cosmetic `state`. Level 1 starts at 0 XP. Level `n` then costs `800 * n` XP. Perks: `outfit_pack` at level 3, `corner_office` at level 5, `rooftop` at level 8. The daily challenge rotates by UTC date between booking a call, finishing a task, and approving a post. `task_done` counts toward finishing a task.
+
+`POST /hq/events` with `{ "kind", "source", "summary", "bot?" }` is how other systems add a row. `201` when the row is new, `200` with `awarded: false` when that source was already counted. `external_actions` is `false`.
+
+`POST /hq/talk` with `{ "bot": "jarvis|friday|ultron|edith", "text" }` stores a persona task for that bot and returns `{ "reply", "status", "task_id", "stored", "external_action_taken": false }`. `status` is `draft` or `needs_approval`. A request to send, publish, call, or spend becomes a `persona_external` approval. Approving it in JARVIS still does not send, publish, or pay. If the model is not configured, the reply says so and nothing is invented as a completed send.
+
+`POST /hq/state` saves `player_name`, `active_look`, `looks`, and `furniture`. Locked clothes and furniture are rejected with `403 perk_locked` until the level perk is real. This does not change XP.
+
+If `hq_events` is missing, progress and event writes return `503 hq_not_ready`. Apply `schema.sql` (the deploy workflow does this on main). A missing table does not fail task completion, approvals, or call booking.
+
 ## Outbound calls
 
 The iOS app never holds the Twilio auth token. These routes run on the worker. `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`, `ELEVENLABS_API_KEY`, and `ELEVENLABS_AGENT_ID` are wrangler secrets. Until every one of them is set, calling is not configured.

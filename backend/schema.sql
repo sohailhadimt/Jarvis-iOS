@@ -236,3 +236,27 @@ CREATE TABLE IF NOT EXISTS outbound_calls (
 );
 
 CREATE INDEX IF NOT EXISTS idx_outbound_calls_created ON outbound_calls (created_at);
+
+-- ASG HQ progression. XP is the sum of these rows. The game cannot invent them.
+CREATE TABLE IF NOT EXISTS hq_events (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  source TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  xp INTEGER NOT NULL,
+  bot TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hq_events_kind_source ON hq_events (kind, source);
+CREATE INDEX IF NOT EXISTS idx_hq_events_created ON hq_events (created_at);
+
+-- Cosmetic state only. Level and perks are derived from hq_events.
+CREATE TABLE IF NOT EXISTS hq_state (
+  id TEXT PRIMARY KEY,
+  player_name TEXT NOT NULL,
+  active_look_json TEXT NOT NULL,
+  looks_json TEXT NOT NULL,
+  furniture_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
