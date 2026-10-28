@@ -6,6 +6,7 @@ import {
   asksCapabilities,
   birthdayNudge,
   callChoice,
+  callbackPurpose,
   callFollowUp,
   capabilityBubbles,
   directOutbound,
@@ -198,10 +199,10 @@ describe("text desk", () => {
       expect(texts.join(" ")).toContain("Shall I ring 07700 900123");
       expect(texts.join(" ")).toContain("Reply YES");
       expect(calls).toHaveLength(beforeNumber);
-      const pending = kv.get("sms_outbound_yes") ?? "";
+      const pending = kv.get("sms_pending:+15557654321") ?? "";
       const expired = JSON.parse(pending) as { expires_at: string };
       expired.expires_at = new Date(Date.now() - 60_000).toISOString();
-      kv.set("sms_outbound_yes", JSON.stringify(expired));
+      kv.set("sms_pending:+15557654321", JSON.stringify(expired));
       texts.length = 0;
       await handleInboundSms(env, "+15557654321", "yes");
       expect(calls).toHaveLength(beforeNumber);
@@ -522,6 +523,141 @@ describe("text desk", () => {
     }
   }, 20_000);
 
+  it("stores a call-them-back proposal on the sender and dials it when he says yes", async () => {
+    expect(callbackPurpose("Call them back and tell them who they were talking to")).toBe(
+      "who they were talking to",
+    );
+    expect(callFollowUp("Call them back and tell them who they were talking to")).toBe("callback");
+
+    const kv = new Map<string, string>();
+    const inserts: unknown[][] = [];
+    const env = deskEnv(kv, inserts);
+    const calls: string[] = [];
+    const texts: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url.includes("/Calls.json") && method === "POST") {
+        calls.push(String(init?.body ?? ""));
+        return new Response(JSON.stringify({ sid: "CA1234567890abcdef1234567890abcdef" }), { status: 201 });
+      }
+      if (url.includes("/Messages.json") && method === "POST") {
+        texts.push(new URLSearchParams(String(init?.body ?? "")).get("Body") ?? "");
+        return new Response(JSON.stringify({ sid: "SM1234567890abcdef1234567890abcdef", status: "queued" }), { status: 201 });
+      }
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+    const ask = "Call them back and tell them who they were talking to";
+    try {
+      await handleInboundSms(env, "+15557654321", ask);
+      expect(calls).toHaveLength(0);
+      const offer = texts.join(" ");
+      expect(offer).toContain("Reply yes");
+      expect(offer.toLowerCase()).toContain("who they were talking to");
+      expect(offer).toContain("Nothing is dialled yet");
+      const raw = kv.get("sms_pending:+15557654321") ?? "";
+      const stored = JSON.parse(raw) as { phone: string; purpose: string; expires_at: string; brief: string };
+      expect(stored.phone).toBe("+15550001111");
+      expect(stored.purpose).toContain("who they were talking to");
+      expect(stored.brief).toContain("who they were talking to");
+      expect(Date.parse(stored.expires_at) - Date.now()).toBeGreaterThan(29 * 60 * 1000);
+
+      texts.length = 0;
+      await handleInboundSms(env, "+15557654321", "Yes");
+      expect(calls).toHaveLength(1);
+      expect(new URLSearchParams(calls[0] ?? "").get("To")).toBe("+15550001111");
+      expect(inserts[0]?.[3]).toContain("who they were talking to");
+      expect(texts.join(" ")).toContain("Calling");
+      expect(kv.get("sms_pending:+15557654321")).toBe("");
+
+      texts.length = 0;
+      await handleInboundSms(env, "+15557654321", "yes");
+      expect(calls).toHaveLength(1);
+      expect(texts.join(" ")).toContain("Nothing is waiting to be dialled");
+
+      texts.length = 0;
+      await handleInboundSms(env, "+15557654321", ask);
+      texts.length = 0;
+      await handleInboundSms(env, "+15557654321", "y");
+      expect(calls).toHaveLength(2);
+
+      texts.length = 0;
+      await handleInboundSms(env, "+15557654321", ask);
+      texts.length = 0;
+      await handleInboundSms(env, "+15557654321", "go");
+      expect(calls).toHaveLength(3);
+
+      texts.length = 0;
+      await handleInboundSms(env, "+15557654321", ask);
+      texts.length = 0;
+      await handleInboundSms(env, "+15557654321", "approve");
+      expect(calls).toHaveLength(4);
+      expect(new URLSearchParams(calls[3] ?? "").get("To")).toBe("+15550001111");
+
+      const quiet = deskEnv(new Map(), [], { calls: false });
+      const quietCalls: string[] = [];
+      const quietTexts: string[] = [];
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        if (url.includes("/Calls.json") && method === "POST") {
+          quietCalls.push(String(init?.body ?? ""));
+          return new Response(JSON.stringify({ sid: "CA1234567890abcdef1234567890abcdef" }), { status: 201 });
+        }
+        if (url.includes("/Messages.json") && method === "POST") {
+          quietTexts.push(new URLSearchParams(String(init?.body ?? "")).get("Body") ?? "");
+          return new Response(JSON.stringify({ sid: "SM1234567890abcdef1234567890abcdef", status: "queued" }), { status: 201 });
+        }
+        return new Response("{}", { status: 404 });
+      }) as typeof fetch;
+      await handleInboundSms(quiet, "+15557654321", ask);
+      const honest = quietTexts.join(" ");
+      expect(honest.toLowerCase()).not.toContain("reply yes");
+      expect(honest).toContain("don't have a recent call");
+      expect(honest).toContain("Nothing has been dialled");
+      expect(quietCalls).toHaveLength(0);
+      quietTexts.length = 0;
+      await handleInboundSms(quiet, "+15557654321", "Yes");
+      expect(quietCalls).toHaveLength(0);
+      expect(quietTexts.join(" ")).toContain("Nothing is waiting to be dialled");
+
+      const inboundKv = new Map<string, string>();
+      const inboundInserts: unknown[][] = [];
+      const inboundEnv = deskEnv(inboundKv, inboundInserts, {
+        inbound: {
+          call_id: "call_in",
+          caller_name: "them",
+          caller_phone: "+15550002222",
+          notified_at: "2026-10-28T12:00:00.000Z",
+        },
+      });
+      globalThis.fetch = original;
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        if (url.includes("/Calls.json") && method === "POST") {
+          calls.push(String(init?.body ?? ""));
+          return new Response(JSON.stringify({ sid: "CA1234567890abcdef1234567890abcdef" }), { status: 201 });
+        }
+        if (url.includes("/Messages.json") && method === "POST") {
+          texts.push(new URLSearchParams(String(init?.body ?? "")).get("Body") ?? "");
+          return new Response(JSON.stringify({ sid: "SM1234567890abcdef1234567890abcdef", status: "queued" }), { status: 201 });
+        }
+        return new Response("{}", { status: 404 });
+      }) as typeof fetch;
+      const before = calls.length;
+      await handleInboundSms(inboundEnv, "+15557654321", ask);
+      expect(calls).toHaveLength(before);
+      const storedInbound = JSON.parse(inboundKv.get("sms_pending:+15557654321") ?? "") as { phone: string };
+      expect(storedInbound.phone).toBe("+15550002222");
+      await handleInboundSms(inboundEnv, "+15557654321", "Yes");
+      expect(new URLSearchParams(calls[before] ?? "").get("To")).toBe("+15550002222");
+    } finally {
+      globalThis.fetch = original;
+    }
+  }, 20_000);
+
   it("dials a number-first tell, including the owner's own number, and only says calling now after a Call SID", async () => {
     expect(directOutbound("07700 900123, and tell him I said wake up")).toEqual({
       name: "",
@@ -619,7 +755,14 @@ describe("text desk", () => {
   }, 20_000);
 });
 
-function deskEnv(kv: Map<string, string>, inserts: unknown[][] = []): Env {
+function deskEnv(
+  kv: Map<string, string>,
+  inserts: unknown[][] = [],
+  extra?: {
+    calls?: boolean;
+    inbound?: { call_id: string; caller_name: string; caller_phone: string; notified_at: string } | null;
+  },
+): Env {
   const message = {
     call_id: "call_sohail",
     caller_name: "Sohail",
@@ -645,8 +788,10 @@ function deskEnv(kv: Map<string, string>, inserts: unknown[][] = []): Env {
             const value = kv.get(String(bound[0]));
             return value == null ? null : { value };
           }
-          if (sql.includes("call_messages")) return message;
+          if (sql.includes("call_messages")) return extra?.calls === false ? null : message;
           if (sql.includes("call_settings")) return null;
+          if (sql.includes("call_screen")) return extra?.inbound ?? null;
+          if (sql.includes("outbound_calls") && sql.includes("to_number")) return null;
           if (sql.includes("outbound_calls")) return { transcript_json: message.transcript_json, worker_origin: "" };
           return null;
         },
@@ -659,10 +804,12 @@ function deskEnv(kv: Map<string, string>, inserts: unknown[][] = []): Env {
             kv.set(String(bound[0]), String(bound[1]));
             return { success: true, meta: { changes: 1 } };
           }
-          if (sql.includes("UPDATE runtime_state") && sql.includes("sms_callback")) {
-            const current = kv.get("sms_callback") ?? "";
-            if (current && current === String(bound[2])) {
-              kv.set("sms_callback", "");
+          if (sql.includes("UPDATE runtime_state") && sql.includes("value = ''")) {
+            const key = String(bound[1] ?? "");
+            const expected = String(bound[2] ?? "");
+            const current = kv.get(key) ?? "";
+            if (current && current === expected) {
+              kv.set(key, "");
               return { success: true, meta: { changes: 1 } };
             }
             return { success: true, meta: { changes: 0 } };

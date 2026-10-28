@@ -132,6 +132,25 @@ export function smsBubbles(text: string): string[] {
 
 const CALLBACK_KEY = "sms_callback";
 const OUTBOUND_KEY = "sms_outbound_yes";
+/** One pending call per sender. Older global keys are still read so a proposal already saved can be approved. */
+const PENDING_MS = 30 * 60 * 1000;
+
+function pendingKey(owner: string): string {
+  const e164 = toE164(owner);
+  return `sms_pending:${e164 ?? owner}`;
+}
+
+function pendingExpiry(): string {
+  return new Date(Date.now() + PENDING_MS).toISOString();
+}
+
+/** What to say on a "call them back and tell them …" text. Empty when the text does not say. */
+export function callbackPurpose(text: string): string {
+  const trimmed = text.replace(/\s+/g, " ").trim();
+  const match = /\b(?:tell|ask)\s+(?:him|her|them)\s+(?:that\s+)?(.+)$/i.exec(trimmed);
+  const purpose = (match?.[1] ?? "").replace(/[.?!]+$/g, "").replace(/\s+/g, " ").trim();
+  return purpose.slice(0, 240);
+}
 
 /** A reply about the latest call. "callback" offers a call and does not dial. */
 export function callFollowUp(text: string): "detail" | "callback" | null {
@@ -266,8 +285,12 @@ export function displayNumber(e164: string): string {
   return e164;
 }
 
-function confirmsYes(text: string): boolean {
-  return text.trim().toLowerCase().replace(/[.!]+$/g, "") === "yes";
+/** yes and y and go approve a pending call. approve does too, and otherwise can still book a quote. */
+function approvalWord(text: string): "yes" | "approve" | null {
+  const clean = text.trim().toLowerCase().replace(/[.!]+$/g, "").replace(/\s+/g, " ");
+  if (clean === "yes" || clean === "y" || clean === "go") return "yes";
+  if (clean === "approve") return "approve";
+  return null;
 }
 
 function approvesPending(text: string): boolean {
@@ -620,24 +643,27 @@ function publicSmsError(text: string): string {
 async function answerOwner(env: Env, phone: string, text: string): Promise<void> {
   await rememberTurn(env, phone, "user", text);
   await noteSmsLog(env, { direction: "in", status: "received", errorCode: "", brain: "inbound", detail: text, sid: "" });
-  if (confirmsYes(text)) {
+  const approval = approvalWord(text);
+  if (approval) {
     const placed = await placeApprovedOutbound(env, phone);
     if (placed) {
       await reply(env, phone, placed, "yes");
       return;
     }
-    const { confirmDraftHunt } = await import("./hunt");
-    const started = await confirmDraftHunt(env);
-    if (started) {
-      await reply(env, phone, started.message, "yes-hunt");
+    if (approval === "yes") {
+      const { confirmDraftHunt } = await import("./hunt");
+      const started = await confirmDraftHunt(env);
+      if (started) {
+        await reply(env, phone, started.message, "yes-hunt");
+        return;
+      }
+      await reply(env, phone, "Nothing is waiting to be dialled, Sir. Nothing was dialled.", "yes-empty");
       return;
     }
-    await reply(env, phone, "Nothing is waiting to be dialled, Sir. Nothing was dialled.", "yes-empty");
-    return;
   }
   const corrected = numberCorrection(text);
   if (corrected) {
-    const line = await correctPendingNumber(env, corrected);
+    const line = await correctPendingNumber(env, phone, corrected);
     await reply(
       env,
       phone,
@@ -654,7 +680,7 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
   }
   const asked = outboundAsk(text) ?? looseCall(text);
   if (asked) {
-    await reply(env, phone, await offerOutbound(env, asked), "offer");
+    await reply(env, phone, await offerOutbound(env, phone, asked), "offer");
     return;
   }
   const direct = directOutbound(text);
@@ -664,7 +690,7 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
   }
   const revision = pendingRevision(text);
   if (revision) {
-    await reply(env, phone, await revisePendingOutbound(env, revision));
+    await reply(env, phone, await revisePendingOutbound(env, phone, revision));
     return;
   }
   const choice = menuChoice(text);
@@ -710,7 +736,7 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
     return;
   }
   if (approvesPending(text)) {
-    const placed = await placeApprovedCallback(env);
+    const placed = await placeApprovedOutbound(env, phone);
     if (placed) {
       await reply(env, phone, placed);
       return;
@@ -718,7 +744,7 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
   }
   const follow = callFollowUp(text);
   if (follow === "callback") {
-    await reply(env, phone, await offerCallback(env));
+    await reply(env, phone, await offerCallback(env, phone, text));
     return;
   }
   if (follow === "detail") {
@@ -779,6 +805,8 @@ interface PendingCall {
   purpose: string;
   verb: "ask" | "tell";
   expires_at: string;
+  /** Spoken brief when it should not be rebuilt from verb + purpose. */
+  brief: string;
 }
 
 function confirmOutbound(pending: PendingCall): string {
@@ -790,32 +818,68 @@ function confirmOutbound(pending: PendingCall): string {
 function readPending(raw: string | null): PendingCall | null {
   if (!raw?.trim()) return null;
   try {
-    const parsed = JSON.parse(raw) as { name?: unknown; phone?: unknown; purpose?: unknown; verb?: unknown; expires_at?: unknown };
+    const parsed = JSON.parse(raw) as {
+      name?: unknown;
+      phone?: unknown;
+      purpose?: unknown;
+      verb?: unknown;
+      expires_at?: unknown;
+      brief?: unknown;
+    };
     const phone = typeof parsed.phone === "string" ? parsed.phone : "";
-    const purpose = typeof parsed.purpose === "string" ? parsed.purpose.trim() : "";
+    const brief = typeof parsed.brief === "string" ? parsed.brief.trim() : "";
+    const purposeField = typeof parsed.purpose === "string" ? parsed.purpose.trim() : "";
+    const purpose = purposeField || brief;
     if (!toE164(phone) || !purpose) return null;
     const name = typeof parsed.name === "string" && parsed.name.trim() ? parsed.name.trim() : "them";
     return {
       name,
       phone,
       purpose,
-      verb: parsed.verb === "tell" ? "tell" : "ask",
+      verb: parsed.verb === "tell" ? "tell" : parsed.verb === "ask" ? "ask" : brief && !purposeField ? "tell" : "ask",
       expires_at: typeof parsed.expires_at === "string" ? parsed.expires_at : "",
+      brief,
     };
   } catch {
     return null;
   }
 }
 
-async function offerOutbound(env: Env, asked: { name: string; phone: string; purpose: string; verb?: "ask" | "tell" }): Promise<string> {
+async function savePending(env: Env, owner: string, pending: PendingCall): Promise<boolean> {
+  try {
+    await setState(env, pendingKey(owner), JSON.stringify(pending));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function loadPending(env: Env, owner: string): Promise<{ key: string; raw: string; pending: PendingCall } | null> {
+  const keys = [pendingKey(owner), OUTBOUND_KEY, CALLBACK_KEY];
+  for (const key of keys) {
+    const raw = await getState(env, key).catch(() => null);
+    const pending = readPending(raw);
+    if (!raw?.trim() || !pending) continue;
+    return { key, raw, pending };
+  }
+  return null;
+}
+
+async function offerOutbound(
+  env: Env,
+  owner: string,
+  asked: { name: string; phone: string; purpose: string; verb?: "ask" | "tell" },
+): Promise<string> {
   const pending: PendingCall = {
     name: asked.name || "them",
     phone: asked.phone,
     purpose: asked.purpose,
     verb: asked.verb === "tell" ? "tell" : "ask",
-    expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    expires_at: pendingExpiry(),
+    brief: "",
   };
-  await setState(env, OUTBOUND_KEY, JSON.stringify(pending)).catch(() => undefined);
+  const saved = await savePending(env, owner, pending);
+  if (!saved) return "I couldn't hold that call, Sir. Nothing was dialled.";
   await queueApproval(
     env,
     "outbound_call",
@@ -826,31 +890,39 @@ async function offerOutbound(env: Env, asked: { name: string; phone: string; pur
   return confirmOutbound(pending);
 }
 
-async function correctPendingNumber(env: Env, phone: string): Promise<string | null> {
-  const pending = readPending(await getState(env, OUTBOUND_KEY).catch(() => null));
-  if (!pending) return null;
+async function correctPendingNumber(env: Env, owner: string, phone: string): Promise<string | null> {
+  const found = await loadPending(env, owner);
+  if (!found) return null;
   const next: PendingCall = {
-    name: pending.name,
+    name: found.pending.name,
     phone,
-    purpose: pending.purpose,
-    verb: pending.verb,
-    expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    purpose: found.pending.purpose,
+    verb: found.pending.verb,
+    expires_at: pendingExpiry(),
+    brief: found.pending.brief,
   };
-  await setState(env, OUTBOUND_KEY, JSON.stringify(next)).catch(() => undefined);
+  const saved = await savePending(env, owner, next);
+  if (!saved) return "I couldn't hold that call, Sir. Nothing was dialled.";
   return confirmOutbound(next);
 }
 
-async function revisePendingOutbound(env: Env, revision: { verb: "ask" | "tell"; purpose: string }): Promise<string> {
-  const pending = readPending(await getState(env, OUTBOUND_KEY).catch(() => null));
-  if (!pending) return "Which number should I ring, Sir? Tell me the number and what to say. Nothing has been dialled.";
+async function revisePendingOutbound(
+  env: Env,
+  owner: string,
+  revision: { verb: "ask" | "tell"; purpose: string },
+): Promise<string> {
+  const found = await loadPending(env, owner);
+  if (!found) return "Which number should I ring, Sir? Tell me the number and what to say. Nothing has been dialled.";
   const next: PendingCall = {
-    name: pending.name,
-    phone: pending.phone,
+    name: found.pending.name,
+    phone: found.pending.phone,
     purpose: revision.purpose,
     verb: revision.verb,
-    expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    expires_at: pendingExpiry(),
+    brief: "",
   };
-  await setState(env, OUTBOUND_KEY, JSON.stringify(next)).catch(() => undefined);
+  const saved = await savePending(env, owner, next);
+  if (!saved) return "I couldn't hold that call, Sir. Nothing was dialled.";
   return confirmOutbound(next);
 }
 
@@ -881,49 +953,49 @@ function dialFailure(error: string): string {
 }
 
 async function placeApprovedOutbound(env: Env, owner: string): Promise<string | null> {
-  const raw = await getState(env, OUTBOUND_KEY).catch(() => null);
-  if (!raw?.trim()) return null;
-  let pending: { name?: unknown; phone?: unknown; purpose?: unknown; verb?: unknown; expires_at?: unknown };
-  try {
-    pending = JSON.parse(raw) as { name?: unknown; phone?: unknown; purpose?: unknown; verb?: unknown; expires_at?: unknown };
-  } catch {
-    return null;
-  }
-  const phone = typeof pending.phone === "string" ? pending.phone : "";
-  const purpose = typeof pending.purpose === "string" ? pending.purpose.trim() : "";
-  const verb = pending.verb === "tell" ? "tell" : "ask";
-  if (!toE164(phone) || !purpose) return null;
-  const expires = typeof pending.expires_at === "string" ? Date.parse(pending.expires_at) : 0;
-  if (!Number.isFinite(expires) || expires < Date.now()) {
-    await setState(env, OUTBOUND_KEY, "").catch(() => undefined);
-    return "That approval has expired, Sir. Ask me again if you still want the call.";
+  const found = await loadPending(env, owner);
+  if (!found) return null;
+  const pending = found.pending;
+  if (pending.expires_at) {
+    const expires = Date.parse(pending.expires_at);
+    if (!Number.isFinite(expires) || expires < Date.now()) {
+      await setState(env, found.key, "").catch(() => undefined);
+      return "That approval has expired, Sir. Ask me again if you still want the call.";
+    }
   }
   const changes = await dbRun(env, "UPDATE runtime_state SET value = '', updated_at = ? WHERE key = ? AND value = ?", [
     nowIso(),
-    OUTBOUND_KEY,
-    raw,
+    found.key,
+    found.raw,
   ]);
   if (changes !== 1) return null;
-  const name = typeof pending.name === "string" && pending.name.trim() ? pending.name.trim() : "them";
-  const brief = delegatedBrief(verb, purpose);
-  const placed = await placeOutboundCall(env, { contact: name, to: phone, brief });
+  for (const key of [pendingKey(owner), OUTBOUND_KEY, CALLBACK_KEY]) {
+    if (key !== found.key) await setState(env, key, "").catch(() => undefined);
+  }
+  const name = pending.name;
+  const brief = pending.brief.trim() || delegatedBrief(pending.verb, pending.purpose);
+  const placed = await placeOutboundCall(env, { contact: name, to: pending.phone, brief });
   if (!placed.ok) return dialFailure(placed.error);
   await rememberSmsOutcome(env, placed.id, owner, name);
-  return callingNow(name === "them" ? displayNumber(phone) : name);
+  return callingNow(name === "them" ? displayNumber(pending.phone) : name);
 }
 
 async function placeLatestCallback(env: Env, owner: string): Promise<string> {
+  const target = await resolveCallbackTarget(env);
+  if (!target) return "I don't have a recent call to ring back, Sir. Nothing has been dialled.";
   const row = await loadLatestCall(env);
-  if (!row) return "I don't have a recent call to ring back, Sir. Nothing has been dialled.";
-  const phone = callableNumber(env, row);
-  const who = row.caller_name && row.caller_name !== "an unknown caller" ? row.caller_name : "them";
-  if (!phone) return `I don't have a number for ${who}, Sir. Nothing has been dialled.`;
   const { substantiveSentences } = await import("./call-messages");
-  const message = substantiveSentences(`${row.summary} ${callerLines(row.transcript_json ?? "")}`, 1)[0] ?? "the message they left";
-  const placed = await placeOutboundCall(env, { contact: who, to: phone, brief: `I'm calling you back. ${message}` });
+  const message = row
+    ? (substantiveSentences(`${row.summary} ${callerLines(row.transcript_json ?? "")}`, 1)[0] ?? "the message they left")
+    : "the message they left";
+  const placed = await placeOutboundCall(env, {
+    contact: target.name,
+    to: target.phone,
+    brief: `I'm calling you back. ${message}`,
+  });
   if (!placed.ok) return dialFailure(placed.error);
-  await rememberSmsOutcome(env, placed.id, owner, who);
-  return `I'm calling ${who} back now, Sir. I'll text you what they say.`;
+  await rememberSmsOutcome(env, placed.id, owner, target.name);
+  return `I'm calling ${target.name} back now, Sir. I'll text you what they say.`;
 }
 
 async function sendCallerNumber(env: Env): Promise<string> {
@@ -980,47 +1052,95 @@ function callableNumber(env: Env, row: LatestCall): string | null {
   return phone;
 }
 
-async function offerCallback(env: Env): Promise<string> {
-  const row = await loadLatestCall(env);
-  if (!row) return "I don't have a recent call to ring back, Sir. Nothing has been dialled.";
-  const { substantiveSentences } = await import("./call-messages");
-  const phone = callbackPhone(env, row);
-  const who = row.caller_name && row.caller_name !== "an unknown caller" ? row.caller_name : "them";
-  if (!phone) return `I don't have a number for ${who}, Sir. Nothing has been dialled.`;
-  const reason = substantiveSentences(`${row.summary} ${callerLines(row.transcript_json ?? "")}`, 1)[0] ?? "Calling you back.";
-  await setState(
-    env,
-    CALLBACK_KEY,
-    JSON.stringify({ call_id: row.call_id, name: who, phone, brief: reason }),
-  ).catch(() => undefined);
-  await queueApproval(env, "call_back", `Call ${who} back. Nothing is dialled until he says yes.`, "approval_required", {
-    call_id: row.call_id,
-  }).catch(() => undefined);
-  return `I can call ${who} back, Sir. Reply yes to approve it. Nothing is dialled yet.`;
+interface CallbackTarget {
+  name: string;
+  phone: string;
+  at: string;
+  callId: string;
 }
 
-async function placeApprovedCallback(env: Env): Promise<string | null> {
-  const raw = await getState(env, CALLBACK_KEY).catch(() => null);
-  if (!raw?.trim()) return null;
-  let pending: { name?: unknown; phone?: unknown; brief?: unknown };
-  try {
-    pending = JSON.parse(raw) as { name?: unknown; phone?: unknown; brief?: unknown };
-  } catch {
-    return null;
+/** Last inbound caller, or the most recent call that still has a number. */
+async function resolveCallbackTarget(env: Env): Promise<CallbackTarget | null> {
+  const candidates: CallbackTarget[] = [];
+  const inbound = await dbFirst<{ call_id: string; caller_name: string; caller_phone: string; notified_at: string | null }>(
+    env,
+    `SELECT call_id, caller_name, caller_phone, notified_at
+     FROM call_screen
+     WHERE direction = 'inbound' AND caller_phone IS NOT NULL AND trim(caller_phone) != ''
+     ORDER BY COALESCE(notified_at, '') DESC
+     LIMIT 1`,
+  ).catch(() => null);
+  if (inbound) {
+    const phone = callableFrom(env, inbound.caller_phone);
+    if (phone) {
+      const who = inbound.caller_name && inbound.caller_name !== "an unknown caller" ? inbound.caller_name : "them";
+      candidates.push({ name: who, phone, at: inbound.notified_at ?? "", callId: inbound.call_id });
+    }
   }
-  const phone = typeof pending.phone === "string" ? pending.phone : "";
-  if (!toE164(phone)) return null;
-  const changes = await dbRun(env, "UPDATE runtime_state SET value = '', updated_at = ? WHERE key = ? AND value = ?", [
-    nowIso(),
-    CALLBACK_KEY,
-    raw,
-  ]);
-  if (changes !== 1) return null;
-  const name = typeof pending.name === "string" && pending.name.trim() ? pending.name.trim() : "them";
-  const brief = typeof pending.brief === "string" && pending.brief.trim() ? pending.brief.trim() : "Calling you back.";
-  const placed = await placeOutboundCall(env, { contact: name, to: phone, brief });
-  if (!placed.ok) return dialFailure(placed.error);
-  return `I'm calling ${name} back now, Sir.`;
+  const outbound = await dbFirst<{ id: string; contact_name: string; to_number: string; updated_at: string }>(
+    env,
+    "SELECT id, contact_name, to_number, updated_at FROM outbound_calls ORDER BY updated_at DESC LIMIT 1",
+  ).catch(() => null);
+  if (outbound?.to_number) {
+    const phone = callableFrom(env, outbound.to_number);
+    if (phone) {
+      candidates.push({
+        name: outbound.contact_name?.trim() || "them",
+        phone,
+        at: outbound.updated_at ?? "",
+        callId: outbound.id,
+      });
+    }
+  }
+  const row = await loadLatestCall(env);
+  if (row) {
+    const phone = callbackPhone(env, row);
+    if (phone) {
+      const who = row.caller_name && row.caller_name !== "an unknown caller" ? row.caller_name : "them";
+      candidates.push({ name: who, phone, at: row.called_at || "", callId: row.call_id });
+    }
+  }
+  candidates.sort((left, right) => (left.at < right.at ? 1 : left.at > right.at ? -1 : 0));
+  return candidates[0] ?? null;
+}
+
+function callableFrom(env: Env, raw: string | null): string | null {
+  const phone = raw ? toE164(raw) : null;
+  const ours = toE164(env.TWILIO_FROM_NUMBER ?? "");
+  if (!phone || phone === ours || isBlockedNumber(phone)) return null;
+  return phone;
+}
+
+async function offerCallback(env: Env, owner: string, text: string): Promise<string> {
+  const target = await resolveCallbackTarget(env);
+  if (!target) return "I don't have a recent call to ring back, Sir. Nothing has been dialled.";
+  const instruction = callbackPurpose(text);
+  const verb = /\bask\s+(?:him|her|them)\b/i.test(text) ? "ask" : "tell";
+  const { substantiveSentences } = await import("./call-messages");
+  const row = await loadLatestCall(env);
+  const reason = row
+    ? (substantiveSentences(`${row.summary} ${callerLines(row.transcript_json ?? "")}`, 1)[0] ?? "I'm calling you back.")
+    : "I'm calling you back.";
+  const purpose = instruction || "I'm calling you back.";
+  const brief = instruction ? delegatedBrief(verb, instruction) : `I'm calling you back. ${reason}`.replace(/\s+/g, " ").trim();
+  const pending: PendingCall = {
+    name: target.name,
+    phone: target.phone,
+    purpose,
+    verb,
+    expires_at: pendingExpiry(),
+    brief,
+  };
+  const saved = await savePending(env, owner, pending);
+  if (!saved) return "I couldn't hold that call, Sir. Nothing was dialled.";
+  await queueApproval(env, "call_back", `Call ${target.name} back. Nothing is dialled until he says yes.`, "approval_required", {
+    call_id: target.callId,
+  }).catch(() => undefined);
+  if (instruction) {
+    const action = verb === "ask" ? `ask them ${instruction}` : `tell them ${instruction}`;
+    return `I can call ${target.name} back and ${action}, Sir. Reply yes to approve it. Nothing is dialled yet.`;
+  }
+  return `I can call ${target.name} back, Sir. Reply yes to approve it. Nothing is dialled yet.`;
 }
 
 function callbackPhone(env: Env, row: LatestCall): string | null {
