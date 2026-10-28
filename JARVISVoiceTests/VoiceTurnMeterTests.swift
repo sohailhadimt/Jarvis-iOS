@@ -16,7 +16,7 @@ final class VoiceTurnMeterTests: XCTestCase {
 
         let finished = VoiceTurnMeter.endpointDelayMs(
             minSeconds: 0.65, eagerness: .medium, endProbability: finishedScore)
-        XCTAssertEqual(finished, 800)
+        XCTAssertEqual(finished, 650)
 
         let medium = VoiceTurnMeter.endpointDelayMs(
             minSeconds: 0.65, eagerness: .medium, endProbability: unfinishedScore)

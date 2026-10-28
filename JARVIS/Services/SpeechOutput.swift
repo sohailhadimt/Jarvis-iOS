@@ -6,6 +6,7 @@ import Foundation
 final class SpeechOutput: NSObject {
     var onLevel: ((Double) -> Void)?
     var onBargeIn: (() -> Void)?
+    var onFirstAudio: (() -> Void)?
 
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
@@ -87,6 +88,18 @@ final class SpeechOutput: NSObject {
         releasePrivateEngine()
     }
 
+    /// Opens TLS to ElevenLabs before the first spoken word. George stays the voice.
+    func warmGeorge(apiKey: String) {
+        let key = apiKey
+        Task {
+            var request = URLRequest(url: URL(string: "https://api.elevenlabs.io/v1/voices")!)
+            request.httpMethod = "HEAD"
+            request.timeoutInterval = 8
+            request.setValue(key, forHTTPHeaderField: "xi-api-key")
+            _ = try? await HTTPConnections.session.data(for: request)
+        }
+    }
+
     /// Opens the playback engine while listening so the first sentence does not pay startup cost.
     func prewarm() {
         if sharedPlayer?.engine?.isRunning == true {
@@ -133,7 +146,12 @@ final class SpeechOutput: NSObject {
         var primed = false
         var pending = Data()
         pending.reserveCapacity(Self.followBytes)
+        var notedByte = false
         for try await byte in bytes {
+            if !notedByte {
+                notedByte = true
+                LatencyLog.mark("tts")
+            }
             pending.append(byte)
             let needed: Int = primed ? Self.followBytes : Self.primeBytes
             if pending.count >= needed {
@@ -151,6 +169,7 @@ final class SpeechOutput: NSObject {
     }
 
     private func play(data: Data, player: AVAudioPlayerNode) async throws {
+        LatencyLog.mark("tts")
         var buffers: [AVAudioPCMBuffer] = []
         var offset: Int = 0
         var primed = false
@@ -423,10 +442,12 @@ final class SpeechOutput: NSObject {
     private func markReplyAudio() {
         if !loggedFirstAudio {
             loggedFirstAudio = true
+            LatencyLog.mark("play")
             LatencyLog.event("tts-first-audio")
             if let ms = LatencyLog.snapshot().lastFirstAudioMs {
                 VoiceDebugLog.note("first-audio", "\(ms) ms")
             }
+            onFirstAudio?()
         }
         if fillerActive { stopFiller() }
     }

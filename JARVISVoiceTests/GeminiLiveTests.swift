@@ -23,7 +23,7 @@ final class GeminiLiveTests: XCTestCase {
         XCTAssertTrue(text.contains("web_search"))
         XCTAssertTrue(text.contains("BLOCKING"))
         XCTAssertTrue(text.contains("silenceDurationMs"))
-        XCTAssertTrue(text.contains("800"))
+        XCTAssertTrue(text.contains("600"))
         XCTAssertTrue(text.contains("START_SENSITIVITY_HIGH"))
         XCTAssertTrue(text.contains("END_SENSITIVITY_LOW"))
         XCTAssertFalse(text.contains("END_SENSITIVITY_HIGH"))

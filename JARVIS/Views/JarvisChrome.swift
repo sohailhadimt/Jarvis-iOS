@@ -188,6 +188,21 @@ private struct LiveCaption: View {
     @Environment(AppSettings.self) private var settings
 
     var body: some View {
+        VStack(spacing: 4) {
+            spoken
+            if engine.isSessionActive, !engine.latencyLine.isEmpty {
+                Text(engine.latencyLine)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Color(hex: "#7EB6FF"))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .padding(.horizontal, 24)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var spoken: some View {
         if engine.voiceNeedsAttention, let link = engine.voiceLink {
             caption(link, color: Color(hex: "#FFB020"))
         } else if engine.isSessionActive, engine.phase == .listening {

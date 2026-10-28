@@ -194,10 +194,14 @@ final class AssistantEngine {
     @ObservationIgnored private var liveReopening = false
     /// "Gemini Live connected", "Connecting…", or a plain sentence when Live did not open.
     private(set) var voiceLink: String?
+    /// vad, stt, llm, tts, and play, in milliseconds from the end of speech.
+    private(set) var latencyLine = ""
     @ObservationIgnored private var lastLiveFailure: String?
     @ObservationIgnored private var debugClient: CloudClient?
     @ObservationIgnored private var sharedPersona = ""
     @ObservationIgnored private var brainVoiceID = "JBFqnCBsd6RMkjVDRZzb"
+    /// A greeting or the time was spoken locally. Gemini's reply for this turn is not played.
+    @ObservationIgnored private var suppressLiveSpeech = false
 
     /// Quiet after the latest words, only for the unused file-capture path. Live turns use the meter.
     private var endpointPause: Duration {
@@ -234,6 +238,7 @@ final class AssistantEngine {
         tools.onComposeMessage = { [weak self] draft in self?.messageDraft = draft }
         tools.onComposeMail = { [weak self] draft in self?.mailDraft = draft }
         output.bindVoiceGate(listener.gate)
+        output.onFirstAudio = { [weak self] in self?.publishLatency() }
         ContactDirectory.shared.warm()
         HTTPConnections.prewarm()
         Task { await self.mergeSharedHistory() }
@@ -340,6 +345,7 @@ final class AssistantEngine {
         let state = UIApplication.shared.applicationState
         sessionLog.info("startSession epoch=\(epoch) appState=\(state.rawValue) continuous=\(continuous)")
         let ticketTask = Task { await self.prepareLiveTicket() }
+        Task { await self.mergeSharedHistory() }
 
         // Persist ON before any reload. A control refresh that still reads off sends perform(false)
         // and tears the session down.
@@ -1160,6 +1166,9 @@ final class AssistantEngine {
         guard let connected = await connectLive(client: client, epoch: epoch, seeded: seeded) else { return false }
         let opened = installLive(connected.session, modality: connected.modality, window: connected.window, epoch: epoch)
         if opened {
+            if let key = KeychainStore.get(.elevenLabs) {
+                output.warmGeorge(apiKey: key)
+            }
             Task { await self.mergeSharedHistory() }
         }
         return opened
@@ -1188,6 +1197,7 @@ final class AssistantEngine {
         You can place a Twilio call with place_outbound_call, shop for quotes with shop_around, book a quote with book_quote, send an SMS with send_sms, create a reminder with reminder_create, and read the briefing with get_briefing.
         Calls, shop dialling, bookings, and texts wait for the Approve button. Never say a call is ringing or a text has been sent until the tool result says it happened.
         Calls you place speak for Master Hadi, never Sohail. Do not use the iPhone dialler.
+        Answer in one short spoken sentence. Begin with the first words at once. Do not think out loud.
         """
     }
 
@@ -1339,11 +1349,15 @@ final class AssistantEngine {
         case .ready:
             break
         case .speak(let text):
+            if suppressLiveSpeech { break }
+            LatencyLog.mark("llm")
+            publishLatency()
             enqueueLiveSpeech(text)
         case .interrupt:
             VoiceDebugLog.note("barge-in", "live")
             stopLivePlayback()
         case .speechStart:
+            suppressLiveSpeech = false
             userIsSpeaking = true
             stopLivePlayback()
             pushActivity()
@@ -1359,9 +1373,17 @@ final class AssistantEngine {
         case .userFinal(let text):
             transcript = text
             VoiceDebugLog.note("input-transcript", text)
+            LatencyLog.mark("stt")
+            publishLatency()
             _ = recordUser(text)
             let heard = text
             Task { await self.shareTurn(role: "user", text: heard) }
+            if let reflex = LiveReflex.line(for: heard) {
+                suppressLiveSpeech = true
+                LatencyLog.mark("llm")
+                publishLatency()
+                enqueueLiveSpeech(reflex)
+            }
             pushActivity()
         case .tool(let id, let name, let arguments):
             Task { await self.answerLiveTool(id: id, name: name, arguments: arguments) }
@@ -1500,6 +1522,11 @@ final class AssistantEngine {
                 turns.append(VoiceTurn(role: role, text: text))
             }
         }
+    }
+
+    private func publishLatency() {
+        let line = LatencyLog.line()
+        if !line.isEmpty { latencyLine = line }
     }
 
     private func shareTurn(role: String, text: String) async {

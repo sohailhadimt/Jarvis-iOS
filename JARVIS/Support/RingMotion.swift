@@ -14,11 +14,11 @@ final class RingMotion {
         let tau: Double
         switch phase {
         case .speaking:
-            target = 0.34 + clamped * 0.66
-            tau = 0.055
+            target = 0.22 + clamped * 0.78
+            tau = 0.04
         case .listening:
-            target = 0.18 + clamped * 0.28
-            tau = 0.14
+            target = 0.16 + 0.03 * (0.5 + 0.5 * sin(now * 0.7))
+            tau = 0.6
         case .thinking:
             target = 0.28 + 0.05 * (0.5 + 0.5 * sin(now * 2.2))
             tau = 0.18

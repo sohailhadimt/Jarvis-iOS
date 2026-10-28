@@ -18,6 +18,7 @@ enum LatencyLog {
     private static var lastFirstAudioMs: Int?
     private static var replyHeard = false
     private static var fillerCount = 0
+    private static var marks: [String: Int] = [:]
 
     static func beginTurn(_ name: String) {
         lock.lock()
@@ -31,7 +32,43 @@ enum LatencyLog {
         lock.lock()
         turnStart = Date()
         replyHeard = false
+        marks = ["vad": 0]
         lock.unlock()
+        log.info("vad +0ms")
+    }
+
+    /// One mark per turn, measured from the end of the user's speech.
+    static func mark(_ name: String) {
+        lock.lock()
+        let start = turnStart
+        if marks[name] != nil {
+            lock.unlock()
+            return
+        }
+        let rounded: Int
+        if let start {
+            rounded = Int((Date().timeIntervalSince(start) * 1000).rounded())
+            marks[name] = rounded
+        } else {
+            rounded = -1
+        }
+        lock.unlock()
+        if rounded >= 0 {
+            log.info("\(name, privacy: .public) +\(rounded)ms")
+        }
+    }
+
+    /// vad, stt, llm, tts, and play, in milliseconds from the end of speech.
+    static func line() -> String {
+        lock.lock()
+        let copy = marks
+        lock.unlock()
+        let order = ["vad", "stt", "llm", "tts", "play"]
+        let parts = order.compactMap { key -> String? in
+            guard let ms = copy[key] else { return nil }
+            return "\(key) \(ms)"
+        }
+        return parts.joined(separator: " · ")
     }
 
     static var replyAudioHeard: Bool {

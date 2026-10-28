@@ -43,8 +43,8 @@ enum LiveEffect: Equatable {
 
 enum LiveWire {
     /// Server VAD for a normal speaking voice. High start sensitivity hears a quiet first syllable.
-    /// Low end sensitivity and 800 ms of silence let a natural pause finish the turn.
-    static let silenceDurationMs = 800
+    /// 600 ms of silence ends the turn inside the 1.8 s reply budget.
+    static let silenceDurationMs = 600
 
     static func setup(instruction: String, declarations: [JSONValue], modality: LiveModality) -> String {
         var setup: [String: Any] = [
@@ -247,7 +247,7 @@ struct LiveSpeakBuffer {
     private func firstClause(_ text: String) -> String? {
         if let comma = text.firstIndex(where: { $0 == "," || $0 == ";" || $0 == ":" }) {
             let head = text[...comma]
-            if head.count >= 12, head.count < text.count { return String(head) }
+            if head.count >= 6, head.count < text.count { return String(head) }
         }
         var words = 0
         var index = text.startIndex
@@ -256,7 +256,7 @@ struct LiveSpeakBuffer {
             let character = text[index]
             if character == " " || character == "\n" {
                 if wordStart < index { words += 1 }
-                if words >= 8, index < text.endIndex { return String(text[..<index]) }
+                if words >= 6, index < text.endIndex { return String(text[..<index]) }
                 wordStart = text.index(after: index)
             }
             index = text.index(after: index)
@@ -269,6 +269,29 @@ struct LiveSpeakBuffer {
         let sentence = text[...end]
         guard sentence.count >= 2 else { return nil }
         return String(sentence)
+    }
+}
+
+/// A canned George line for a greeting, thanks, or the time. The live model does not also speak that turn.
+enum LiveReflex {
+    static func line(for text: String) -> String? {
+        let clean = text
+            .lowercased()
+            .replacingOccurrences(of: "[?!.,]", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean.isEmpty { return nil }
+        if ["hello", "hi", "hey", "good morning", "good afternoon", "good evening", "jarvis"].contains(clean) {
+            return "Hello, Sir."
+        }
+        if clean == "thanks" || clean == "thank you" || clean == "cheers" {
+            return "Of course, Sir."
+        }
+        if clean == "time" || clean.contains("what time") || clean.contains("what's the time") || clean.contains("whats the time") {
+            let clock = Date.now.formatted(date: .omitted, time: .shortened)
+            return "It's \(clock), Sir."
+        }
+        return nil
     }
 }
 

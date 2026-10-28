@@ -43,7 +43,7 @@ final class VoiceTurnMeter: @unchecked Sendable {
     static let bargeBand: Float = 0.55
     static let minimumBand: Float = 0.45
     /// A finished sentence still waits this long, so a breath is not the end of the turn.
-    static let minimumHangoverMs = 800
+    static let minimumHangoverMs = 600
 
     private let log = Logger(subsystem: "com.sohail.jarvis", category: "vad")
     private let lock = NSLock()
@@ -315,11 +315,11 @@ final class VoiceTurnMeter: @unchecked Sendable {
 
     /// Silence required before the turn ends.
     ///
-    /// A finished sentence still waits at least 800 ms. A missing transcript is unfinished,
+    /// A finished sentence still waits at least 600 ms. A missing transcript is unfinished,
     /// so a breath or a slow recogniser cannot close the turn. Below the eagerness threshold
     /// the wait stretches toward that setting's maximum: 2s high, 4s medium, 8s low.
     static func endpointDelayMs(minSeconds: Double, eagerness: TurnEagerness, endProbability: Float?) -> Int {
-        let requested = Int((min(1.2, max(0.8, minSeconds)) * 1000).rounded())
+        let requested = Int((min(1.2, max(0.55, minSeconds)) * 1000).rounded())
         let minMs = max(Self.minimumHangoverMs, requested)
         let probability = endProbability ?? 0.15
         if probability >= eagerness.unlikelyThreshold { return minMs }
