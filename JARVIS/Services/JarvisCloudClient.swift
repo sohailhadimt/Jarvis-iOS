@@ -687,15 +687,32 @@ struct CloudClient: Sendable {
                   ticket.ok,
                   ticket.websocketURL.hasPrefix("wss://"),
                   !ticket.token.isEmpty else {
-                return .unavailable(Self.liveFailure(data: data, status: status))
+                return .unavailable(Self.liveFailure(data: data, status: status, host: base.host))
             }
             return .ready(ticket)
         } catch {
-            return .unavailable("I can't reach the JARVIS server. Check that the phone is online, then try voice again.")
+            return .unavailable(Self.reachLine(error, host: base.host))
         }
     }
 
-    private static func liveFailure(data: Data, status: Int) -> String {
+    /// Host and URLError code, for example (-1003 jarvis-backend.jarvis-hadi.workers.dev).
+    private static func reachLine(_ error: Error, host: String?) -> String {
+        let name = host ?? "server"
+        guard let failure = error as? CloudFailure else {
+            let code = (error as NSError).code
+            return "I can't reach the JARVIS server (\(code) \(name))."
+        }
+        switch failure {
+        case .badURL:
+            return "The JARVIS server address could not be used (\(name))."
+        case .notConfigured:
+            return "Add the app token in Settings, JARVIS Cloud, then try voice again."
+        case .http(let code, _):
+            return "I can't reach the JARVIS server (\(code) \(name))."
+        }
+    }
+
+    private static func liveFailure(data: Data, status: Int, host: String?) -> String {
         if status == 401 || status == 403 {
             return "The app token was rejected. Open Settings, JARVIS Cloud, paste the worker app token, and tap Save token to Keychain."
         }
@@ -709,7 +726,7 @@ struct CloudClient: Sendable {
             return "Gemini is not set up on the JARVIS server."
         }
         if status == 0 {
-            return "I can't reach the JARVIS server. Check that the phone is online, then try voice again."
+            return "I can't reach the JARVIS server (0 \(host ?? "server"))."
         }
         if (200..<300).contains(status) {
             return "The JARVIS server sent a Live token the app could not read."
@@ -874,19 +891,29 @@ struct CloudClient: Sendable {
     private func raw(method: String, path: String, authorize: Bool, body: Data?, query: [URLQueryItem]) async throws -> (Data, Int) {
         guard var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else { throw CloudFailure.badURL }
         let suffix = path.hasPrefix("/") ? String(path.dropFirst()) : path
-        var root = components.path
-        if root == "/" { root = "" }
-        if !root.isEmpty && !root.hasSuffix("/") && !suffix.isEmpty { root += "/" }
-        components.path = root + suffix
-        if components.path.isEmpty { components.path = "/" + suffix }
+        var joined = components.path
+        if joined == "/" { joined = "" }
+        if suffix.isEmpty {
+            if joined.isEmpty { joined = "/" }
+        } else if joined.isEmpty {
+            joined = "/" + suffix
+        } else {
+            if !joined.hasPrefix("/") { joined = "/" + joined }
+            if joined.hasSuffix("/") { joined.removeLast() }
+            joined += "/" + suffix
+        }
+        // A path without a leading slash makes URLComponents.url nil, so the request never leaves the phone.
+        if !joined.hasPrefix("/") { joined = "/" + joined }
+        components.path = joined
         if !query.isEmpty { components.queryItems = query }
         guard let url = components.url else { throw CloudFailure.badURL }
         var request = URLRequest(url: url)
         request.httpMethod = method
-        request.timeoutInterval = 45
+        request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if authorize {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            let headerToken = token.replacingOccurrences(of: "\n", with: "").replacingOccurrences(of: "\r", with: "")
+            request.setValue("Bearer \(headerToken)", forHTTPHeaderField: "Authorization")
         }
         if let body {
             request.httpBody = body
@@ -897,7 +924,7 @@ struct CloudClient: Sendable {
         do {
             (data, response) = try await URLSession.shared.data(for: request)
         } catch {
-            throw CloudFailure.http(-1, error.localizedDescription)
+            throw CloudFailure.http((error as NSError).code, (url.host ?? "server"))
         }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         return (data, status)
@@ -1654,9 +1681,11 @@ enum JarvisCloudAPI {
     @MainActor
     static func client() throws -> CloudClient {
         guard let base = JarvisCloud.baseURL(AppSettings.shared.cloudBaseURL),
-              let token = KeychainStore.get(.jarvisCloud) else {
+              let stored = KeychainStore.get(.jarvisCloud) else {
             throw CloudFailure.notConfigured
         }
+        let token = stored.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { throw CloudFailure.notConfigured }
         return CloudClient(base: base, token: token)
     }
 

@@ -1101,12 +1101,13 @@ final class AssistantEngine {
 
     /// Asks for a Live token before the microphone session can interrupt the network.
     private func prepareLiveTicket() async -> (CloudClient, LiveTicketResult)? {
-        guard let token = KeychainStore.get(.jarvisCloud),
-              let saved = JarvisCloud.baseURL(AppSettings.shared.cloudBaseURL) else { return nil }
+        guard let rawToken = KeychainStore.get(.jarvisCloud) else { return nil }
+        let token = rawToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty, let saved = JarvisCloud.baseURL(AppSettings.shared.cloudBaseURL) else { return nil }
         let client = CloudClient(base: saved, token: token)
         let first = await client.liveTicket()
         if case .ready = first { return (client, first) }
-        guard Self.cantReachLive(first),
+        guard Self.shouldTryStandardHost(first),
               let standard = JarvisCloud.baseURL(AppSettings.defaultCloudBaseURL),
               standard.host?.lowercased() != saved.host?.lowercased() else {
             return (client, first)
@@ -1117,7 +1118,16 @@ final class AssistantEngine {
             AppSettings.shared.cloudBaseURL = AppSettings.defaultCloudBaseURL
             return (other, second)
         }
-        return (client, first)
+        return (other, second)
+    }
+
+    /// A dead or local saved URL should not hide the worker. A rejected token is the same on every host.
+    private static func shouldTryStandardHost(_ result: LiveTicketResult) -> Bool {
+        guard case .unavailable(let why) = result else { return false }
+        if why.contains("app token was rejected") { return false }
+        if why.contains("free quota") { return false }
+        if why.contains("not set up on the JARVIS server") { return false }
+        return true
     }
 
     private static func cantReachLive(_ result: LiveTicketResult) -> Bool {
