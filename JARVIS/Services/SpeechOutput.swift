@@ -1,11 +1,12 @@
 import AVFoundation
 import Foundation
 
-/// Speaks replies with ElevenLabs streaming PCM through AVAudioEngine. There is no system-voice fallback.
+/// Speaks replies with ElevenLabs streaming PCM. The British device voice is the fallback when that cannot start.
 @MainActor
 final class SpeechOutput: NSObject {
     var onLevel: ((Double) -> Void)?
     var onBargeIn: (() -> Void)?
+    var onFirstAudio: (() -> Void)?
 
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
@@ -22,6 +23,10 @@ final class SpeechOutput: NSObject {
     private var usingSharedPlayback = false
     private var sharedTapInstalled = false
     private var voiceGate: SpeakerGate?
+    private let levels = LevelCoalescer()
+    private let deviceSpeech = DeviceSpeech()
+    private var fillerActive = false
+    private var fillerGeneration = 0
     /// 50 ms at 24 kHz, 16-bit mono, so the first buffer starts as soon as speech arrives.
     private static let primeBytes: Int = 2_400
     /// 200 ms follow-on buffers.
@@ -77,6 +82,24 @@ final class SpeechOutput: NSObject {
         sharedPlayer = player
     }
 
+    /// Stops playback taps before the listener installs its own. The ring reads VoiceMeter and never taps the mic.
+    func yieldMicrophone() {
+        removeSharedLevelTap()
+        releasePrivateEngine()
+    }
+
+    /// Opens TLS to ElevenLabs before the first spoken word. George stays the voice.
+    func warmGeorge(apiKey: String) {
+        let key = apiKey
+        Task {
+            var request = URLRequest(url: URL(string: "https://api.elevenlabs.io/v1/voices")!)
+            request.httpMethod = "HEAD"
+            request.timeoutInterval = 8
+            request.setValue(key, forHTTPHeaderField: "xi-api-key")
+            _ = try? await HTTPConnections.session.data(for: request)
+        }
+    }
+
     /// Opens the playback engine while listening so the first sentence does not pay startup cost.
     func prewarm() {
         if sharedPlayer?.engine?.isRunning == true {
@@ -91,9 +114,6 @@ final class SpeechOutput: NSObject {
 
     func speakElevenLabs(text: String, voiceID: String, apiKey: String,
                          stability: Double, similarity: Double, monitorMicrophone: Bool) async throws {
-        playbackSignal?.fire()
-        playbackSignal = nil
-        player?.stop()
         preparePlayback()
         LatencyLog.event("tts-request")
         if let data = await takePrefetch(text) {
@@ -126,7 +146,12 @@ final class SpeechOutput: NSObject {
         var primed = false
         var pending = Data()
         pending.reserveCapacity(Self.followBytes)
+        var notedByte = false
         for try await byte in bytes {
+            if !notedByte {
+                notedByte = true
+                LatencyLog.mark("tts")
+            }
             pending.append(byte)
             let needed: Int = primed ? Self.followBytes : Self.primeBytes
             if pending.count >= needed {
@@ -144,6 +169,7 @@ final class SpeechOutput: NSObject {
     }
 
     private func play(data: Data, player: AVAudioPlayerNode) async throws {
+        LatencyLog.mark("tts")
         var buffers: [AVAudioPCMBuffer] = []
         var offset: Int = 0
         var primed = false
@@ -221,10 +247,7 @@ final class SpeechOutput: NSObject {
     private func track(_ buffer: AVAudioPCMBuffer) {
         if playbackAnchor == nil {
             playbackAnchor = Date()
-            if !loggedFirstAudio {
-                loggedFirstAudio = true
-                LatencyLog.event("tts-first-audio")
-            }
+            markReplyAudio()
         }
         scheduledFrames += Int(buffer.frameLength)
     }
@@ -237,27 +260,31 @@ final class SpeechOutput: NSObject {
         if monitorMicrophone {
             do {
                 try engine.inputNode.setVoiceProcessingEnabled(true)
+                engine.inputNode.isVoiceProcessingAGCEnabled = true
                 engine.inputNode.isVoiceProcessingBypassed = false
                 monitoring = true
+                LatencyLog.noteVoiceProcessing(true)
             } catch {
                 monitoring = false
+                LatencyLog.noteVoiceProcessing(false)
             }
         }
         let player = AVAudioPlayerNode()
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: pcmFormat)
+        let levels = self.levels
         let levelHandler: @Sendable (Float) -> Void = { [weak self] rms in
             let value = AudioTaps.normalized(rms)
+            VoiceMeter.shared.level = value
+            guard levels.allow() else { return }
             Task { @MainActor in self?.onLevel?(value) }
         }
         engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil,
                                         block: AudioTaps.levelTap(levelHandler))
         mixerTapInstalled = true
+        // Input tap is barge-in only, and only on this playback engine when the listener is not running.
         if monitoring {
-            let bargeHandler: @Sendable (Float) -> Void = { [weak self] rms in
-                let value = AudioTaps.normalized(rms)
-                Task { @MainActor in self?.noteBarge(value) }
-            }
+            let bargeHandler: @Sendable (Float) -> Void = { _ in }
             let format = engine.inputNode.outputFormat(forBus: 0)
             if format.sampleRate > 0, format.channelCount > 0 {
                 if let voiceGate {
@@ -310,8 +337,11 @@ final class SpeechOutput: NSObject {
 
     private func installSharedLevelTap() {
         guard !sharedTapInstalled, let mixer = sharedPlayer?.engine?.mainMixerNode else { return }
+        let levels = self.levels
         let levelHandler: @Sendable (Float) -> Void = { [weak self] rms in
             let value = AudioTaps.normalized(rms)
+            VoiceMeter.shared.level = value
+            guard levels.allow() else { return }
             Task { @MainActor in self?.onLevel?(value) }
         }
         mixer.installTap(onBus: 0, bufferSize: 1024, format: nil, block: AudioTaps.levelTap(levelHandler))
@@ -324,26 +354,21 @@ final class SpeechOutput: NSObject {
         sharedTapInstalled = false
     }
 
-    private func noteBarge(_ value: Double) {
-        guard player != nil else { return }
-        if let voiceGate, voiceGate.speechBandRatio < 0.30 {
-            bargeSince = nil
-            return
-        }
-        if let voiceGate, AppSettings.shared.voiceMatchEnabled, !voiceGate.allowsUtterance {
-            bargeSince = nil
-            return
-        }
-        if value > 0.36 {
-            let start = bargeSince ?? Date()
-            bargeSince = start
-            if Date().timeIntervalSince(start) >= 0.25 {
-                bargeSince = nil
-                onBargeIn?()
+    /// British device voice when ElevenLabs cannot start. Phone calls still fall back to Polly.
+    func speakDevice(_ text: String) async {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        preparePlayback()
+        LatencyLog.event("device-voice")
+        let signal = OnceSignal()
+        fillerGeneration += 1
+        fillerActive = false
+        deviceSpeech.play(trimmed, signal: signal) { [weak self] in
+            Task { @MainActor in
+                self?.markReplyAudio()
             }
-        } else if value < 0.18 {
-            bargeSince = nil
         }
+        await signal.wait()
     }
 
     /// Drops the fallback playback engine once TTS is playing on the capture engine.
@@ -392,7 +417,44 @@ final class SpeechOutput: NSObject {
         onLevel?(0)
     }
 
+    /// A short on-device acknowledgement. It does not count as the reply's first audio.
+    func speakFiller(_ text: String) async {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        fillerGeneration += 1
+        let generation = fillerGeneration
+        fillerActive = true
+        let signal = OnceSignal()
+        deviceSpeech.play(trimmed, signal: signal) { }
+        await signal.wait()
+        if fillerGeneration == generation {
+            fillerActive = false
+        }
+    }
+
+    func stopFiller() {
+        guard fillerActive else { return }
+        fillerGeneration += 1
+        fillerActive = false
+        deviceSpeech.stop()
+    }
+
+    private func markReplyAudio() {
+        if !loggedFirstAudio {
+            loggedFirstAudio = true
+            LatencyLog.mark("play")
+            LatencyLog.event("tts-first-audio")
+            if let ms = LatencyLog.snapshot().lastFirstAudioMs {
+                VoiceDebugLog.note("first-audio", "\(ms) ms")
+            }
+            onFirstAudio?()
+        }
+        if fillerActive { stopFiller() }
+    }
+
     func stop() {
+        fillerActive = false
+        deviceSpeech.stop()
         for task in prefetchTasks.values {
             task.cancel()
         }
@@ -408,5 +470,64 @@ final class SpeechOutput: NSObject {
             return
         }
         stopEngine()
+    }
+}
+
+/// On-device British speech. The synthesizer callbacks are not isolated to the main actor.
+final class DeviceSpeech: NSObject, AVSpeechSynthesizerDelegate, @unchecked Sendable {
+    private let synth = AVSpeechSynthesizer()
+    private let lock = NSLock()
+    private var signal: OnceSignal?
+    private var started: (@Sendable () -> Void)?
+
+    override init() {
+        super.init()
+        synth.delegate = self
+    }
+
+    func play(_ text: String, signal: OnceSignal, started: @escaping @Sendable () -> Void) {
+        lock.lock()
+        self.signal?.fire()
+        self.signal = signal
+        self.started = started
+        lock.unlock()
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = AVSpeechSynthesisVoice(language: "en-GB")
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        synth.speak(utterance)
+    }
+
+    func stop() {
+        synth.stopSpeaking(at: .immediate)
+        lock.lock()
+        let pending = signal
+        signal = nil
+        started = nil
+        lock.unlock()
+        pending?.fire()
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+        lock.lock()
+        let start = started
+        started = nil
+        lock.unlock()
+        start?()
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        finish()
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        finish()
+    }
+
+    private func finish() {
+        lock.lock()
+        let pending = signal
+        signal = nil
+        lock.unlock()
+        pending?.fire()
     }
 }

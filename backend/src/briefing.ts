@@ -116,6 +116,17 @@ export async function buildBriefing(env: Env) {
     completedCount: completed.length,
   });
 
+  let reminders: string[] = [];
+  try {
+    const rows = await dbAll<{ text: string }>(
+      env,
+      "SELECT text FROM brain_reminders WHERE status = 'open' ORDER BY created_at DESC LIMIT 12",
+    );
+    reminders = rows.map((row) => row.text).filter((text) => text.length > 0);
+  } catch {
+    reminders = [];
+  }
+
   return {
     generated_at: generatedAt,
     window_start: since,
@@ -143,5 +154,6 @@ export async function buildBriefing(env: Env) {
       },
     },
     recommendations,
+    reminders,
   };
 }

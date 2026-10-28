@@ -1,8 +1,9 @@
 import AVFoundation
 import Foundation
+import os
 import Speech
 
-enum ListenerError: LocalizedError {
+enum ListenerError: LocalizedError, Equatable {
     case unavailable, noInput, timedOut
     var errorDescription: String? {
         switch self {
@@ -13,15 +14,45 @@ enum ListenerError: LocalizedError {
     }
 }
 
+enum SpeechLocales {
+    /// First recogniser that can run: saved locale, British English, US English, then the phone locale.
+    nonisolated static func recognizer(preferred: String) -> SFSpeechRecognizer? {
+        var seen = Set<String>()
+        let identifiers = [preferred, "en-GB", "en-US", Locale.current.identifier]
+        for identifier in identifiers where seen.insert(identifier).inserted {
+            if let recognizer = SFSpeechRecognizer(locale: Locale(identifier: identifier)), recognizer.isAvailable {
+                return recognizer
+            }
+        }
+        if let recognizer = SFSpeechRecognizer(), recognizer.isAvailable {
+            return recognizer
+        }
+        return nil
+    }
+
+    /// True when an on-device model is missing or rejected. "No speech" stays on device.
+    nonisolated static func shouldLeaveOnDevice(_ error: any Error) -> Bool {
+        let ns = error as NSError
+        if ns.code == 1110 || ns.code == 203 { return false }
+        let lower = ns.localizedDescription.lowercased()
+        if lower.contains("no speech") || lower.contains("cancel") { return false }
+        return true
+    }
+}
+
 /// Microphone capture + Apple Speech recognition (on-device when the device supports it).
 @MainActor
 final class SpeechListener {
     var onLevel: ((Double) -> Void)?
     var onBargeLevel: ((Double) -> Void)?
+    var onTurn: ((VoiceTurnEvent) -> Void)?
     var onTranscript: ((String, Bool) -> Void)?
     var onError: ((any Error) -> Void)?
 
     let gate = SpeakerGate()
+    private let log = Logger(subsystem: "com.sohail.jarvis", category: "speech")
+    private let levels = LevelCoalescer()
+    private var allowServerRecognition = false
     private var recognizer: SFSpeechRecognizer? = SFSpeechRecognizer(locale: Locale(identifier: "en-GB")) ?? SFSpeechRecognizer()
     private var engine: AVAudioEngine?
     private var request: SFSpeechAudioBufferRecognitionRequest?
@@ -31,7 +62,20 @@ final class SpeechListener {
     private var tapInstalled = false
     private var voiceProcessingAttempted = false
     private var bargeMonitor = false
+    private var liveFeed = false
     private(set) var voiceProcessingEnabled = false
+    var inputSampleRate: Double {
+        engine?.inputNode.outputFormat(forBus: 0).sampleRate ?? 0
+    }
+
+    /// Reads the hardware flag after the engine is running. A failed or bypassed canceller must not barge in.
+    func refreshVoiceProcessing() {
+        guard let engine else {
+            voiceProcessingEnabled = false
+            return
+        }
+        voiceProcessingEnabled = engine.inputNode.isVoiceProcessingEnabled && !engine.inputNode.isVoiceProcessingBypassed
+    }
     private(set) var lastCaptureFailure: String?
     private var playbackPlayer: AVAudioPlayerNode?
     var speechBandRatio: Double { gate.speechBandRatio }
@@ -49,25 +93,29 @@ final class SpeechListener {
         try installTap(AudioTaps.silentTap(), bufferSize: 1024)
     }
 
+    /// Next listen tries the on-device model again. A failed model stays on the server for this session.
+    func resetOnDevicePreference() {
+        allowServerRecognition = false
+    }
+
     func start() throws {
         endRecognition()
         discardWriter()
         lastCaptureFailure = nil
-        let locale = Locale(identifier: AppSettings.shared.speechLocale)
-        recognizer = SFSpeechRecognizer(locale: locale) ?? SFSpeechRecognizer()
-        guard let recognizer, recognizer.isAvailable else { throw ListenerError.unavailable }
+        recognizer = SpeechLocales.recognizer(preferred: AppSettings.shared.speechLocale)
+        guard let recognizer else { throw ListenerError.unavailable }
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.addsPunctuation = true
-        if recognizer.supportsOnDeviceRecognition {
+        // Search-style recognition finalises on a short pause and drops the rest of the sentence.
+        request.taskHint = .dictation
+        let forcedOnDevice = !allowServerRecognition && recognizer.supportsOnDeviceRecognition
+        if forcedOnDevice {
             request.requiresOnDeviceRecognition = true
         }
 
-        let levelHandler: @Sendable (Float) -> Void = { [weak self] rms in
-            let value = AudioTaps.normalized(rms)
-            Task { @MainActor in self?.onLevel?(value) }
-        }
+        let levelHandler = listeningLevel()
         applyVoicePolicy()
         try installTap(AudioTaps.recognitionTap(request: request, gate: gate, level: levelHandler), bufferSize: 1024)
 
@@ -76,6 +124,10 @@ final class SpeechListener {
         let handler: @Sendable (String?, Bool, (any Error)?) -> Void = { [weak self] text, isFinal, error in
             Task { @MainActor in
                 guard let self, self.generation == gen else { return }
+                if let error, text == nil, forcedOnDevice, SpeechLocales.shouldLeaveOnDevice(error) {
+                    self.allowServerRecognition = true
+                    self.log.error("on-device speech failed; leaving it for this session")
+                }
                 if let text { self.onTranscript?(text, isFinal) }
                 if let error, text == nil { self.onError?(error) }
             }
@@ -94,10 +146,7 @@ final class SpeechListener {
         let format = engine.inputNode.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { throw ListenerError.noInput }
         let writer = try PCMFileWriter(source: format, url: url)
-        let levelHandler: @Sendable (Float) -> Void = { [weak self] rms in
-            let value = AudioTaps.normalized(rms)
-            Task { @MainActor in self?.onLevel?(value) }
-        }
+        let levelHandler = listeningLevel()
         do {
             applyVoicePolicy()
             try installTap(AudioTaps.fileTap(writer: writer, gate: gate, level: levelHandler), bufferSize: 4096)
@@ -113,21 +162,30 @@ final class SpeechListener {
         park()
     }
 
+    /// Raw microphone for Gemini Live. Voice processing stays on. The samples are not gated.
+    func startLiveFeed(_ onPCM: @escaping @Sendable (Data) -> Void) throws {
+        endRecognition()
+        discardWriter()
+        bargeMonitor = false
+        try installTap(AudioTaps.liveFeedTap(onPCM: onPCM, level: listeningLevel()), bufferSize: 480)
+        liveFeed = true
+        refreshVoiceProcessing()
+    }
+
     func stop() {
         bargeMonitor = false
+        liveFeed = false
         _ = park()
     }
 
     /// While speech is playing, the held engine reports mic level so the user can interrupt.
     func setBargeMonitor(_ enabled: Bool) {
+        if liveFeed { return }
         guard enabled != bargeMonitor else { return }
         bargeMonitor = enabled
         guard holdEngine, request == nil, writer == nil else { return }
         if enabled {
-            let handler: @Sendable (Float) -> Void = { [weak self] rms in
-                let value = AudioTaps.normalized(rms)
-                Task { @MainActor in self?.onBargeLevel?(value) }
-            }
+            let handler: @Sendable (Float) -> Void = { _ in }
             try? installTap(AudioTaps.bargeTap(gate: gate, level: handler), bufferSize: 1024)
         } else {
             try? installTap(AudioTaps.silentTap(), bufferSize: 1024)
@@ -155,6 +213,16 @@ final class SpeechListener {
         task = nil
     }
 
+    private func listeningLevel() -> @Sendable (Float) -> Void {
+        let levels = self.levels
+        return { [weak self] rms in
+            let value = AudioTaps.normalized(rms)
+            VoiceMeter.shared.level = value
+            guard levels.allow() else { return }
+            Task { @MainActor in self?.onLevel?(value) }
+        }
+    }
+
     private func makeEngine() throws -> AVAudioEngine {
         if let engine { return engine }
         let engine = AVAudioEngine()
@@ -178,6 +246,7 @@ final class SpeechListener {
             engine.prepare()
             try engine.start()
         }
+        refreshVoiceProcessing()
     }
 
     func applyVoicePolicy() {
@@ -215,10 +284,13 @@ final class SpeechListener {
         voiceProcessingAttempted = true
         do {
             try engine.inputNode.setVoiceProcessingEnabled(true)
+            engine.inputNode.isVoiceProcessingAGCEnabled = true
             engine.inputNode.isVoiceProcessingBypassed = false
-            voiceProcessingEnabled = true
+            voiceProcessingEnabled = engine.inputNode.isVoiceProcessingEnabled && !engine.inputNode.isVoiceProcessingBypassed
+            LatencyLog.noteVoiceProcessing(voiceProcessingEnabled)
         } catch {
             voiceProcessingEnabled = false
+            LatencyLog.noteVoiceProcessing(false)
         }
     }
 

@@ -205,7 +205,7 @@ struct APIKeysSettingsView: View {
             } header: {
                 Text("OpenAI")
             } footer: {
-                Text("Create a key at platform.openai.com > API keys. Default model: gpt-4o-mini. Web search uses the OpenAI search model in Integrations.")
+                Text("Create a key at platform.openai.com > API keys. Default model: gpt-4o-mini. Web search uses the OpenAI search model in Apps.")
             }
 
             Section {
@@ -278,7 +278,6 @@ struct VoicesSettingsView: View {
         @Bindable var settings = settings
         Form {
             Section {
-                Toggle("Separate full-screen mode", isOn: $settings.voiceSeparateMode)
                 Toggle("Start with voice", isOn: $settings.startWithVoice)
                 Toggle("Background conversations", isOn: $settings.backgroundConversations)
                 Toggle("Captions on", isOn: $settings.captionsDefault)
@@ -290,9 +289,23 @@ struct VoicesSettingsView: View {
                     Text("German").tag("de-DE")
                     Text("Spanish").tag("es-ES")
                 }
+                Picker("Eagerness", selection: $settings.turnEagerness) {
+                    ForEach(TurnEagerness.allCases) { value in
+                        Text(value.title).tag(value)
+                    }
+                }
+                VStack(alignment: .leading) {
+                    Text("Pause before I reply \(settings.endpointSilence, format: .number.precision(.fractionLength(2))) s")
+                    Slider(value: $settings.endpointSilence, in: 0.55...1.2, step: 0.05)
+                }
                 VStack(alignment: .leading) {
                     Text("VAD sensitivity \(settings.vadSensitivity, format: .number.precision(.fractionLength(2)))")
                     Slider(value: $settings.vadSensitivity, in: 0...1)
+                }
+                NavigationLink {
+                    VoiceTimingView()
+                } label: {
+                    Label("Voice timing", systemImage: "timer")
                 }
                 Picker("Orb style", selection: $settings.orbStyle) {
                     Text("ChatGPT").tag(OrbStyle.chatGPT)
@@ -301,7 +314,7 @@ struct VoicesSettingsView: View {
             } header: {
                 Text("Voice mode")
             } footer: {
-                Text("Full-screen voice is the default: a black screen, the sky orb, and the ask bar. Turn separate mode off for the in-chat composer. Tap the orb for the transcript. Captions are the two lines under the orb. VAD sensitivity changes how quickly silence ends your turn; higher is about 500ms and lower is about 700ms. The Action Button session is unaffected.")
+                Text("The home ring stays calm while listening and follows JARVIS's voice while speaking. Start with voice opens listening as soon as JARVIS is on screen. Pause before I reply is the wait after a finished sentence. The default is 0.65 seconds, and it cannot go under 0.55. Eagerness is how long an unfinished sentence may continue: low up to 8 seconds, medium up to 4, high up to 2. Playback stops only after 300 ms of your own voice, and only while echo cancellation is on. Voice timing shows the last reply delay and the turn-meter checks. The Action Button session uses the same listener.")
             }
             Section("Selected: \(settings.voiceName)") {
                 VStack(alignment: .leading) {
@@ -362,7 +375,7 @@ struct VoicesSettingsView: View {
             voices = try await ElevenLabsClient.voices(apiKey: key)
             error = nil
         } catch {
-            self.error = error.localizedDescription
+            self.error = JarvisLines.explain(error)
         }
     }
 }

@@ -20,7 +20,9 @@ targets:
   JARVIS:
     type: application
     platform: iOS
-    scheme: {}            # shared scheme so CI (Codemagic) can build it
+    scheme:               # shared scheme so CI (Codemagic) can build it
+      testTargets:
+        - JARVISVoiceTests
     sources:
       - path: JARVIS
         includes:
@@ -28,6 +30,7 @@ targets:
           - "**/*.metal"
           - "Assets.xcassets"
           - "Assets.xcassets/**"
+          - "Resources/Startup/**"
       - path: Shared
     settings:
       base:
@@ -38,13 +41,19 @@ targets:
         SWIFT_VERSION: "5.0"
         SWIFT_STRICT_CONCURRENCY: minimal
         TARGETED_DEVICE_FAMILY: "1"
+      configs:
+        Debug:
+          ENABLE_TESTABILITY: YES
     info:
       path: JARVIS/Info.plist
       properties:
         CFBundleDisplayName: JARVIS
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        # Filled at TestFlight time from the Codemagic variable JARVIS_APP_TOKEN. Empty in git.
+        JarvisAppToken: ""
         ITSAppUsesNonExemptEncryption: false
-        UILaunchScreen: {}
+        UILaunchScreen:
+          UIColorName: LaunchBackground
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations:
@@ -54,12 +63,16 @@ targets:
         UIRequiresFullScreen: true
         UIBackgroundModes:
           - audio
+          - remote-notification
+        NSFaceIDUsageDescription: "JARVIS uses Face ID to unlock the home screen."
         NSMicrophoneUsageDescription: "JARVIS listens to your voice so it can answer your questions."
         NSCameraUsageDescription: "JARVIS uses the camera when you ask what it sees."
         NSPhotoLibraryUsageDescription: "JARVIS attaches a photo when you ask about it."
         NSPhotoLibraryAddUsageDescription: "JARVIS saves pictures it makes into your photo library."
         NSSpeechRecognitionUsageDescription: "JARVIS converts your speech to text on your iPhone so it can understand you."
-        NSContactsUsageDescription: "JARVIS looks up contacts when you ask it to call, FaceTime or message someone."
+        NSLocationWhenInUseUsageDescription: "JARVIS uses your location while the app is open, so the weather and places near you are about where you actually are."
+        NSMotionUsageDescription: "JARVIS checks whether you are driving so a call from me stays short."
+        NSContactsUsageDescription: "JARVIS looks up contacts when you ask it to call, FaceTime or message someone, and adds its own contact card."
         NSCalendarsFullAccessUsageDescription: "JARVIS reads and edits your calendar events when you ask it to."
         NSRemindersFullAccessUsageDescription: "JARVIS reads, creates and completes reminders when you ask it to."
         NSAppleMusicUsageDescription: "JARVIS plays music from your library when you ask it to."
@@ -90,9 +103,25 @@ targets:
       properties:
         com.apple.security.application-groups:
           - group.com.sohail.jarvis
+        aps-environment: production   # TestFlight. The App ID needs the Push Notifications capability.
     dependencies:
       - target: JARVISWidgets
         embed: true
+  JARVISVoiceTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: JARVISVoiceTests
+    dependencies:
+      - target: JARVIS
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.sohail.jarvis.voice-tests
+        PRODUCT_NAME: JARVISVoiceTests
+        SWIFT_VERSION: "5.0"
+        SWIFT_STRICT_CONCURRENCY: minimal
+        TARGETED_DEVICE_FAMILY: "1"
   JARVISWidgets:
     type: app-extension
     platform: iOS

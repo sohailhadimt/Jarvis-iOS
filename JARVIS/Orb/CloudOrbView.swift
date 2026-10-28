@@ -29,7 +29,7 @@ struct CloudOrbView: View {
         if executing || phase == .thinking { return .thinking }
         switch phase {
         case .speaking: return .aiSpeaking
-        case .listening: return sessionActive ? .userSpeaking : .listening
+        case .listening: return .listening
         case .idle: return .listening
         case .thinking: return .thinking
         }
