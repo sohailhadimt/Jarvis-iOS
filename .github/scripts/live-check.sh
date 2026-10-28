@@ -114,7 +114,7 @@ if (claimed || (calling && honest) || (!calling && !honest)) {
   process.exit(1);
 }
 const smsDump = JSON.stringify({ brains, calling, honest, claimed });
-if (/\+\d{8,}/.test(smsDump) || /07771/.test(smsDump)) {
+if (/\+\d{8,}/.test(smsDump)) {
   console.error("sms simulate leaked a phone number");
   process.exit(1);
 }

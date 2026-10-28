@@ -1222,7 +1222,7 @@ export async function simulateSmsRoute(request: Request, env: Env): Promise<Resp
   } finally {
     smsCapture.delete(env);
   }
-  return json({ ok: true, reply: lines.join(" ") });
+  return json({ ok: true, reply: lines.join(" "), sent: false });
 }
 
 export async function lastSmsErrors(env: Env): Promise<Response> {
