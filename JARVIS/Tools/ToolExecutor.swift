@@ -178,7 +178,11 @@ final class ToolExecutor {
 
         case "reminder_create":
             guard let title = arg("title") else { throw ToolFailure("Need a title.") }
-            return .result(try await calendar.createReminder(title: title, due: DateParsing.parse(arg("due")), notes: arg("notes")))
+            let created = try await calendar.createReminder(title: title, due: DateParsing.parse(arg("due")), notes: arg("notes"))
+            if let client = try? JarvisCloudAPI.client() {
+                await client.brainReminder(text: title, due: arg("due"))
+            }
+            return .result(created)
 
         case "reminder_update":
             return .result(try await calendar.updateReminder(id: arg("reminder_id") ?? "", title: arg("title"),

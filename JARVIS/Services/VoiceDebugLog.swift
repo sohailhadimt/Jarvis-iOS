@@ -21,6 +21,23 @@ enum VoiceDebugLog {
         Task { await flush() }
     }
 
+    /// Posts the queued notes and returns the HTTP status. 0 means the request never left the phone. 204 means the queue was empty.
+    static func deliver(_ client: CloudClient) async -> Int {
+        lock.lock()
+        bound = client
+        lock.unlock()
+        var waits = 0
+        while waits < 20 {
+            lock.lock()
+            let busy = posting
+            lock.unlock()
+            if !busy { break }
+            waits += 1
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return await postPending(client)
+    }
+
     static func note(_ kind: String, _ detail: String) {
         let item: [String: String]
         lock.lock()
@@ -74,19 +91,27 @@ enum VoiceDebugLog {
     }
 
     private static func flush() async {
+        _ = await postPending(nil)
+    }
+
+    private static func postPending(_ preferred: CloudClient?) async -> Int {
         lock.lock()
         if posting || pending.isEmpty {
+            let empty = pending.isEmpty
             lock.unlock()
-            return
+            if empty { return 204 }
+            return -1
         }
         posting = true
         let batch = pending
-        let client = bound
+        let boundClient = bound
         pending.removeAll()
         lock.unlock()
         let active: CloudClient?
-        if let client {
-            active = client
+        if let preferred {
+            active = preferred
+        } else if let boundClient {
+            active = boundClient
         } else {
             active = await MainActor.run {
                 guard JarvisCloud.isConfigured else { return nil }
@@ -95,19 +120,20 @@ enum VoiceDebugLog {
         }
         guard let active else {
             requeue(batch, retry: true)
-            return
+            return 0
         }
-        let accepted = await active.postVoiceDebug(events: batch)
-        if !accepted {
+        let status = await active.postVoiceDebug(events: batch)
+        if !(200..<300).contains(status) {
             requeue(batch, retry: true)
-            return
+            return status
         }
         lock.lock()
         attempts = 0
         let more = !pending.isEmpty
         posting = false
         lock.unlock()
-        if more { await flush() }
+        if more { return await postPending(preferred) }
+        return status
     }
 
     private static func requeue(_ batch: [[String: String]], retry: Bool) {

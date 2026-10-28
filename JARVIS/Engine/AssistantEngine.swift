@@ -180,11 +180,17 @@ final class AssistantEngine {
     /// Enrolment owns the microphone. Wake and hands-free listening stay down until it finishes.
     @ObservationIgnored private var enrollmentHold = false
     @ObservationIgnored private var resumeSessionAfterEnrollment = false
-    /// Gemini Live owns VAD, turns, and tools. The Apple Speech pipeline is the fallback.
+    /// Gemini Live owns VAD, turns, and tools. A failed open stays on screen instead of pretending to listen.
     @ObservationIgnored private var usingGeminiLive = false
     @ObservationIgnored private var geminiLive: GeminiLiveSession?
     @ObservationIgnored private var liveReconnects = 0
     @ObservationIgnored private var liveReopening = false
+    /// Exactly "Gemini Live connected" or "Fallback: <error>" once a session has tried the live path.
+    private(set) var voiceLink: String?
+    @ObservationIgnored private var lastLiveFailure: String?
+    @ObservationIgnored private var debugClient: CloudClient?
+    @ObservationIgnored private var sharedPersona = ""
+    @ObservationIgnored private var brainVoiceID = "JBFqnCBsd6RMkjVDRZzb"
 
     /// Quiet after the latest words, only for the unused file-capture path. Live turns use the meter.
     private var endpointPause: Duration {
@@ -223,6 +229,7 @@ final class AssistantEngine {
         output.bindVoiceGate(listener.gate)
         ContactDirectory.shared.warm()
         HTTPConnections.prewarm()
+        Task { await self.mergeSharedHistory() }
     }
 
     // MARK: Session (Action Button / Live Activity)
@@ -381,10 +388,30 @@ final class AssistantEngine {
         listener.resetOnDevicePreference()
         interrupt()
         guard epoch == sessionEpoch, isSessionActive else { return .failed }
+        lastLiveFailure = nil
+        voiceLink = "Connecting…"
+        phase = .listening
+        pushActivity()
         if await beginGeminiLive(epoch: epoch) {
             voiceConnecting = false
+            voiceLink = "Gemini Live connected"
         } else if epoch == sessionEpoch, isSessionActive {
-            beginListening(manual: false)
+            let why = lastLiveFailure ?? "Gemini Live did not connect"
+            voiceLink = "Fallback: \(why)"
+            phase = .listening
+            voiceConnecting = false
+            try? listener.keepEngineAlive()
+        } else {
+            return .failed
+        }
+        if let debugClient {
+            let status = await VoiceDebugLog.deliver(debugClient)
+            annotateDebug(status)
+        }
+        if voiceLink?.hasPrefix("Fallback:") == true {
+            phase = .listening
+            pushActivity()
+            return .started
         }
         if !listener.isEngineRunning {
             try? listener.keepEngineAlive()
@@ -433,6 +460,10 @@ final class AssistantEngine {
         audioConfigured = false
         listener.resetOnDevicePreference()
         refreshWake()
+        if let debugClient {
+            let status = await VoiceDebugLog.deliver(debugClient)
+            annotateDebug(status)
+        }
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(160))
             VoiceSession.shared.exiting = false
@@ -1055,12 +1086,15 @@ final class AssistantEngine {
         return code == 401 || code == 403
     }
 
-    /// Gemini Live when the worker can mint a token. Otherwise the existing on-device pipeline runs.
+    /// Gemini Live when the worker can mint a token. A failure stays visible. It does not start Apple Speech.
     private func beginGeminiLive(epoch: Int) async -> Bool {
+        await mergeSharedHistory()
         guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else {
-            VoiceDebugLog.note("live-error", "cloud not configured")
+            debugClient = nil
+            noteLiveError("cloud not configured")
             return false
         }
+        debugClient = client
         VoiceDebugLog.use(client)
         liveReconnects = 0
         liveReopening = false
@@ -1069,9 +1103,22 @@ final class AssistantEngine {
     }
 
     private func liveInstruction() -> String {
-        let settings = AppSettings.shared
-        let facts = JarvisStore.allFacts()
-        return settings.systemPrompt(facts: facts) + """
+        let identity: String
+        if sharedPersona.isEmpty {
+            identity = AppSettings.shared.systemPrompt(facts: JarvisStore.allFacts())
+        } else {
+            identity = sharedPersona
+        }
+        var memory = ""
+        for turn in conversation.suffix(12) {
+            let text = turn.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            if text.isEmpty { continue }
+            let who = turn.role == "assistant" ? "JARVIS" : "Master Hadi"
+            if !memory.isEmpty { memory += "\n" }
+            memory += "\(who): \(text)"
+        }
+        let recent = memory.isEmpty ? "" : "\nRecent conversation, including texts and calls:\n\(memory)\n"
+        return identity + recent + """
 
         This is a live conversation. Speak in one to three short sentences. No markdown, lists, or emojis.
         The server hears normal speech and decides when the user has finished. Do not ask them to repeat unless the transcript is empty.
@@ -1100,17 +1147,17 @@ final class AssistantEngine {
             } else {
                 reason = "token"
             }
-            VoiceDebugLog.note("live-error", reason)
+            noteLiveError(reason)
             return nil
         }
         var modality = LiveModality.text
         var window = first.sessionExpiresAt ?? first.expiresAt ?? ""
         var opened = await openLive(session, url: textURL, instruction: instruction, tools: tools, modality: .text, client: client, epoch: epoch)
         if opened == .textRejected {
-            VoiceDebugLog.note("live-error", "text modality rejected")
+            noteLiveError("text modality rejected")
             let audioTicket = await client.liveTicket()
             guard epoch == sessionEpoch, case .ready(let second) = audioTicket, let audioURL = URL(string: second.websocketURL) else {
-                VoiceDebugLog.note("live-error", "audio token")
+                noteLiveError("audio token")
                 return nil
             }
             modality = .audioTranscript
@@ -1120,9 +1167,9 @@ final class AssistantEngine {
         guard opened == .ready, epoch == sessionEpoch, isSessionActive else {
             session.stop()
             if case .failed(let reason) = opened {
-                VoiceDebugLog.note("live-error", reason)
+                noteLiveError(reason)
             } else if opened == .textRejected {
-                VoiceDebugLog.note("live-error", "modality")
+                noteLiveError("modality")
             }
             return nil
         }
@@ -1141,7 +1188,7 @@ final class AssistantEngine {
     ) async -> LiveOpenResult {
         var opened = await session.open(url: url, instruction: instruction, tools: tools, modality: modality)
         if case .failed(let reason) = opened {
-            VoiceDebugLog.note("live-error", reason)
+            noteLiveError(reason)
             let retry = await client.liveTicket()
             guard epoch == sessionEpoch, case .ready(let ticket) = retry, let retryURL = URL(string: ticket.websocketURL) else {
                 return opened
@@ -1158,7 +1205,7 @@ final class AssistantEngine {
             }
         } catch {
             session.stop()
-            VoiceDebugLog.note("live-error", "microphone")
+            noteLiveError("microphone")
             noteCapturePath()
             return false
         }
@@ -1245,6 +1292,8 @@ final class AssistantEngine {
             transcript = text
             VoiceDebugLog.note("input-transcript", text)
             _ = recordUser(text)
+            let heard = text
+            Task { await self.shareTurn(role: "user", text: heard) }
             pushActivity()
         case .tool(let id, let name, let arguments):
             Task { await self.answerLiveTool(id: id, name: name, arguments: arguments) }
@@ -1253,7 +1302,7 @@ final class AssistantEngine {
             let recoverable = reason == "goaway" || reason == "socket" || reason == "audio send"
             if recoverable, liveReconnects < 1 {
                 liveReopening = true
-                VoiceDebugLog.note("live-error", reason)
+                noteLiveError(reason)
                 Task { await self.reopenLive() }
             } else {
                 fallBackFromLive(reason)
@@ -1268,6 +1317,9 @@ final class AssistantEngine {
         }
         let spoken = parsed.cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !spoken.isEmpty else { return }
+        recordAssistant(spoken)
+        let shared = spoken
+        Task { await self.shareTurn(role: "assistant", text: shared) }
         if spokenQueue == nil {
             spokenQueue = SpokenQueue(
                 speak: { [weak self] line in
@@ -1275,7 +1327,7 @@ final class AssistantEngine {
                     self.phase = .speaking
                     self.reply = line
                     self.pushActivity()
-                    await self.speak(line)
+                    await self.speak(line, voiceID: self.brainVoiceID)
                     if self.usingGeminiLive, self.phase == .speaking {
                         self.phase = .listening
                         self.pushActivity()
@@ -1285,7 +1337,7 @@ final class AssistantEngine {
                     guard let self else { return }
                     let settings = AppSettings.shared
                     guard let key = KeychainStore.get(.elevenLabs) else { return }
-                    self.output.prefetch(text: line, voiceID: settings.voiceID, apiKey: key,
+                    self.output.prefetch(text: line, voiceID: self.brainVoiceID, apiKey: key,
                                          stability: settings.stability, similarity: settings.similarity)
                 }
             )
@@ -1331,6 +1383,60 @@ final class AssistantEngine {
         pushActivity()
     }
 
+    private func noteLiveError(_ reason: String) {
+        let clean = VoiceDebugLog.safe(reason)
+        let short = clean.isEmpty ? "unavailable" : String(clean.prefix(80))
+        lastLiveFailure = short
+        VoiceDebugLog.note("live-error", short)
+    }
+
+    private func annotateDebug(_ status: Int) {
+        if status == -1 || status == 204 { return }
+        if (200..<300).contains(status) { return }
+        let suffix = status == 0 ? " · debug unreachable" : " · debug HTTP \(status)"
+        guard let link = voiceLink else { return }
+        if link.contains("debug ") { return }
+        voiceLink = String((link + suffix).prefix(140))
+    }
+
+    /// Pulls the phone line's persona and history into this conversation. Existing lines stay.
+    private func mergeSharedHistory() async {
+        guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else { return }
+        if let persona = await client.brainPersona() {
+            let text = persona.persona.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty { sharedPersona = text }
+            if persona.voiceID == "JBFqnCBsd6RMkjVDRZzb" {
+                brainVoiceID = "JBFqnCBsd6RMkjVDRZzb"
+            }
+        }
+        guard let history = await client.brainHistory() else { return }
+        for turn in history.turns {
+            let role = turn.role == "assistant" ? "assistant" : "user"
+            let text = turn.body.trimmingCharacters(in: .whitespacesAndNewlines)
+            if text.isEmpty { continue }
+            let known = conversation.contains { item in item.role == role && item.content == text }
+            if known { continue }
+            conversation.append(ChatMessage(role: role, content: text))
+            let shown = turns.contains { item in item.role == role && item.text == text }
+            if !shown {
+                turns.append(VoiceTurn(role: role, text: text))
+            }
+        }
+    }
+
+    private func shareTurn(role: String, text: String) async {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let client: CloudClient?
+        if let debugClient {
+            client = debugClient
+        } else {
+            client = try? JarvisCloudAPI.client()
+        }
+        guard let client else { return }
+        await client.brainLine(source: "app", role: role, text: trimmed)
+    }
+
     private func fallBackFromLive(_ reason: String) {
         guard usingGeminiLive else { return }
         liveReopening = false
@@ -1341,9 +1447,20 @@ final class AssistantEngine {
         spokenQueue = nil
         output.stop()
         listener.stop()
-        VoiceDebugLog.note("live-error", VoiceDebugLog.safe(reason))
+        noteLiveError(reason)
         VoiceDebugLog.note("live-close", "fallback")
-        beginListening(manual: false)
+        let why = lastLiveFailure ?? "unavailable"
+        voiceLink = "Fallback: \(why)"
+        phase = .listening
+        voiceConnecting = false
+        try? listener.keepEngineAlive()
+        pushActivity()
+        let client = debugClient
+        Task {
+            guard let client else { return }
+            let status = await VoiceDebugLog.deliver(client)
+            self.annotateDebug(status)
+        }
     }
 
     private func afterTurn() {
@@ -1514,86 +1631,45 @@ final class AssistantEngine {
         finishQuietly()
     }
 
-    private func speakLine(_ line: String, userText: String) async {
+    private func speakLine(_ line: String, userText: String, voiceID: String = "", share: Bool = true) async {
         reply = line
         recordAssistant(line)
         saveForWidget(transcript: userText, reply: line)
-        await say(ResponsesClient.spokenText(line))
+        await say(ResponsesClient.spokenText(line), voiceID: voiceID)
+        if share {
+            await shareTurn(role: "user", text: userText)
+            await shareTurn(role: "assistant", text: line)
+        }
     }
 
-    /// Home text chat. The worker stores the line and the assistant replies through the webhook.
+    /// Home text chat. The same brain as the phone line answers.
     private func deliverAgentChat(userText: String) async {
         statusLine = "JARVIS is thinking…"
         phase = .thinking
         errorMessage = nil
         pushActivity()
-        guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else {
-            grokConnected = false
-            statusLine = "The Grok assistant isn't connected. I'll answer from here, Sir."
-            await answerFromHere(userText)
-            return
-        }
-        do {
-            let pending = try await client.postAgentChat(message: userText, conversationId: agentConversationID)
-            grokConnected = true
-            let deadline = Date().addingTimeInterval(90)
-            while Date() < deadline {
-                try Task.checkCancellation()
-                let messages = try? await client.agentMessages(conversationId: agentConversationID, since: pending.messageId)
-                if let line = messages?.last(where: { message in
-                    message.role == "assistant"
-                        && message.replyTo == pending.messageId
-                        && !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                })?.text {
-                    await finishAgentLine(line, userText: userText)
-                    return
-                }
-                let remaining = deadline.timeIntervalSinceNow
-                if remaining <= 0 { break }
-                try await Task.sleep(for: .seconds(min(2, remaining)))
-            }
-        } catch {
-            if Task.isCancelled { return }
-            if Self.webhookMissing(error) {
-                grokConnected = false
-                statusLine = "The Grok assistant isn't connected. I'll answer from here, Sir."
-                await answerFromHere(userText)
-                return
-            }
-        }
-        guard !Task.isCancelled else { return }
         await answerFromHere(userText)
     }
 
-    /// Home chat when the Grok webhook is absent. The worker answers, then a key saved on this iPhone.
+    /// Home chat. The worker answers from the shared persona and history.
     private func answerFromHere(_ userText: String) async {
-        let facts = JarvisStore.allFacts()
-        let system = AppSettings.shared.voicePrompt(facts: facts, question: userText)
-        await deliverCloudOrFallback(userText: userText, system: system, history: conversation, user: userText)
-    }
-
-    private static func webhookMissing(_ error: Error) -> Bool {
-        let text = error.localizedDescription.lowercased()
-        return text.contains("webhook")
-    }
-
-    private func finishAgentLine(_ line: String, userText: String) async {
-        statusLine = nil
-        errorMessage = nil
-        await speakLine(line.trimmingCharacters(in: .whitespacesAndNewlines), userText: userText)
-        errorMessage = nil
-    }
-
-    /// One conversation for the home text chat. The id is not a phone number.
-    private var agentConversationID: String {
-        let key = "jarvis.agentConversation"
-        if let saved = UserDefaults.standard.string(forKey: key),
-           saved.range(of: #"^[A-Za-z0-9_-]{1,80}$"#, options: .regularExpression) != nil {
-            return saved
+        await mergeSharedHistory()
+        if JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() {
+            if let spoken = await client.brainSay(userText) {
+                if spoken.voiceID == "JBFqnCBsd6RMkjVDRZzb" {
+                    brainVoiceID = "JBFqnCBsd6RMkjVDRZzb"
+                }
+                errorMessage = nil
+                await speakLine(spoken.reply, userText: userText, voiceID: brainVoiceID, share: false)
+                return
+            }
         }
-        let made = "conv_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-        UserDefaults.standard.set(made, forKey: key)
-        return made
+        let facts = JarvisStore.allFacts()
+        var system = AppSettings.shared.voicePrompt(facts: facts, question: userText)
+        if !sharedPersona.isEmpty {
+            system = sharedPersona + "\n" + system
+        }
+        await deliverCloudOrFallback(userText: userText, system: system, history: conversation, user: userText)
     }
 
     /// Weather, news, facts and nearby questions are answered on the worker in one spoken line.
@@ -1601,8 +1677,11 @@ final class AssistantEngine {
         guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else { return false }
         let here = WebKnowledge.needsHere(userText) ? await DeviceLocation.shared.fix() : nil
         let facts = JarvisStore.allFacts()
-        let system = AppSettings.shared.voicePrompt(facts: facts, question: userText)
+        var system = AppSettings.shared.voicePrompt(facts: facts, question: userText)
             + " Answer in one or two spoken sentences. Give the fact itself. Do not say you will search or look it up. Do not read URLs or list links."
+        if !sharedPersona.isEmpty {
+            system = sharedPersona + "\n" + system
+        }
         var messages: [[String: String]] = [["role": "system", "content": system]]
         for turn in conversation.suffix(8) {
             let role = turn.role == "assistant" ? "assistant" : "user"
@@ -1614,7 +1693,7 @@ final class AssistantEngine {
         if Self.isSearchPromise(line) { return false }
         errorMessage = nil
         citations = []
-        await speakLine(line, userText: userText)
+        await speakLine(line, userText: userText, voiceID: brainVoiceID)
         guard !Task.isCancelled else { return true }
         afterTurn()
         return true
@@ -1681,6 +1760,7 @@ final class AssistantEngine {
     }
 
     private func respond(to text: String, agent: Bool = false) async {
+        await mergeSharedHistory()
         phase = .thinking
         statusLine = agent ? "JARVIS is thinking…" : nil
         errorMessage = nil
@@ -1802,7 +1882,10 @@ final class AssistantEngine {
         let facts = JarvisStore.allFacts()
         let prior = recordedUser ? Array(conversation.dropLast()) : conversation
         let history = Array(prior.suffix(16))
-        let cloudSystem = settings.voicePrompt(facts: facts, question: text)
+        var cloudSystem = settings.voicePrompt(facts: facts, question: text)
+        if !sharedPersona.isEmpty {
+            cloudSystem = sharedPersona + "\n" + cloudSystem
+        }
         do {
             let produced: Produced
             if let stagedFile {

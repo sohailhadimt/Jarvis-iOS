@@ -1,8 +1,7 @@
+import { GEORGE_VOICE_ID } from "./brain";
 import { dbAll, dbFirst, dbRun } from "./db";
 import { isRecord, json, newId, nowIso } from "./http";
 import type { Env } from "./types";
-
-const GEORGE_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb";
 const FALLBACK_GREETING =
   "Hello, you've reached Master Hadi's phone, this is JARVIS his personal assistant. This call may be handled by AI. Who's calling and how can I help?";
 

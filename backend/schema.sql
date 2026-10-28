@@ -528,6 +528,26 @@ CREATE TABLE IF NOT EXISTS reminders (
   created_at TEXT NOT NULL
 );
 
+-- One conversation for the phone line and the app. Phone numbers are not stored.
+CREATE TABLE IF NOT EXISTS brain_turns (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  role TEXT NOT NULL,
+  body TEXT NOT NULL,
+  ref TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_brain_turns_created ON brain_turns (created_at);
+
+CREATE TABLE IF NOT EXISTS brain_reminders (
+  id TEXT PRIMARY KEY,
+  text TEXT NOT NULL,
+  due_at TEXT,
+  status TEXT NOT NULL DEFAULT 'open',
+  created_at TEXT NOT NULL
+);
+
 INSERT INTO rooms (id, name, purpose, created_at)
 SELECT
   'room_project_money',

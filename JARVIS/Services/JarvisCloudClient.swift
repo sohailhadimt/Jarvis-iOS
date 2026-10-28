@@ -323,6 +323,7 @@ struct CloudBriefing: Decodable, Sendable {
     var separation: String
     var facts: Facts
     var recommendations: [Recommendation]
+    var reminders: [String]?
 
     struct Facts: Decodable, Sendable {
         var completedTasks: [CloudTask]
@@ -384,7 +385,7 @@ struct CloudBriefing: Decodable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case facts, recommendations, separation
+        case facts, recommendations, separation, reminders
         case generatedAt = "generated_at"
         case windowStart = "window_start"
     }
@@ -423,6 +424,9 @@ enum CloudSpeech {
             facts.append("No approvals are waiting.")
         } else {
             facts.append("Approvals waiting. " + joined(waiting.map(\.summary), count: waiting.count))
+        }
+        if let reminders = briefing.reminders, !reminders.isEmpty {
+            facts.append("Reminders. " + joined(reminders, count: reminders.count))
         }
         let findings = briefing.facts.results.findings
         if findings.isEmpty {
@@ -565,6 +569,49 @@ private struct ListEnvelope<Item: Decodable>: Decodable {
     var pipeline: [Item]?
 }
 
+struct BrainPersona: Decodable, Sendable {
+    var persona: String
+    var voice: String?
+    var voiceID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case persona, voice
+        case voiceID = "voice_id"
+    }
+}
+
+struct BrainTurn: Decodable, Sendable {
+    var role: String
+    var body: String
+    var source: String?
+}
+
+struct BrainHistory: Decodable, Sendable {
+    var revision: String?
+    var turns: [BrainTurn]
+    var reminders: [String]?
+    var voiceID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case revision, turns, reminders
+        case voiceID = "voice_id"
+    }
+}
+
+struct BrainSay: Decodable, Sendable {
+    var reply: String
+    var voiceID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case reply
+        case voiceID = "voice_id"
+    }
+}
+
+private struct BrainAck: Decodable {
+    var ok: Bool?
+}
+
 struct CloudClient: Sendable {
     var base: URL
     var token: String
@@ -649,16 +696,64 @@ struct CloudClient: Sendable {
         }
     }
 
-    /// Turn and barge-in notes. A failure stays on the phone for one more try.
-    func postVoiceDebug(events: [[String: String]]) async -> Bool {
-        guard !events.isEmpty else { return true }
+    /// Turn and barge-in notes. Returns the HTTP status, or 0 when the request never left the phone.
+    func postVoiceDebug(events: [[String: String]]) async -> Int {
+        guard !events.isEmpty else { return 204 }
         do {
             let body = try JSONSerialization.data(withJSONObject: ["events": events])
             let (_, status) = try await raw(method: "POST", path: "/debug/voice", authorize: true, body: body, query: [])
-            return (200..<300).contains(status)
+            return status
         } catch {
-            return false
+            return 0
         }
+    }
+
+    /// The one persona the phone line and the app share.
+    func brainPersona() async -> BrainPersona? {
+        do { return try await sendNoBody(method: "GET", path: "/brain/persona") } catch { return nil }
+    }
+
+    /// Texts, calls, and app lines in one history.
+    func brainHistory() async -> BrainHistory? {
+        do { return try await sendNoBody(method: "GET", path: "/brain/history") } catch { return nil }
+    }
+
+    /// Stores the line and answers with the same persona, memory, and tools as the phone line.
+    func brainSay(_ text: String) async -> BrainSay? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        do {
+            let spoken: BrainSay = try await sendJSON(method: "POST", path: "/brain", body: ["text": String(trimmed.prefix(1000))])
+            let reply = spoken.reply.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !reply.isEmpty else { return nil }
+            return BrainSay(reply: reply, voiceID: spoken.voiceID)
+        } catch {
+            return nil
+        }
+    }
+
+    /// The same write SMS uses, so a spoken app line is on the phone line's memory.
+    func brainLine(source: String, role: String, text: String) async {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        do {
+            let _: BrainAck = try await sendJSON(method: "POST", path: "/brain/line", body: [
+                "source": source,
+                "role": role,
+                "text": String(trimmed.prefix(1000)),
+            ])
+        } catch {}
+    }
+
+    /// A reminder both the phone line and the app can read back.
+    func brainReminder(text: String, due: String?) async {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var body: [String: Any] = ["text": String(trimmed.prefix(300))]
+        if let due, !due.isEmpty { body["due_at"] = String(due.prefix(40)) }
+        do {
+            let _: BrainAck = try await sendJSON(method: "POST", path: "/brain/reminders", body: body)
+        } catch {}
     }
 
     func approvals(status: String? = nil) async throws -> [CloudApproval] {

@@ -102,6 +102,8 @@ struct StandByView: View {
     }
 
     private var captionBody: String {
+        if let link = engine.voiceLink, link.hasPrefix("Fallback") { return link }
+        if engine.phase == .listening, engine.transcript.isEmpty, let link = engine.voiceLink, !link.isEmpty { return link }
         if engine.phase == .listening, !engine.transcript.isEmpty { return engine.transcript }
         if !engine.reply.isEmpty, engine.phase != .listening { return engine.reply }
         return "Tap the orb to talk."

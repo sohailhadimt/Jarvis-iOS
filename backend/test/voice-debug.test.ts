@@ -85,7 +85,8 @@ describe("voice debug", () => {
       env,
       ctx,
     );
-    const body = (await read.json()) as { events: { kind: string; detail: string }[] };
+    const body = (await read.json()) as { revision: string; events: { kind: string; detail: string }[] };
+    expect(body.revision).toBe("voice-log-2");
     expect(body.events.map((event) => event.kind)).toEqual(["live-open", "input-transcript"]);
     expect(body.events[1]?.detail).toBe("ring [number]");
     expect(JSON.stringify(body)).not.toContain("7700");

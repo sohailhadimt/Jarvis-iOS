@@ -188,7 +188,9 @@ private struct LiveCaption: View {
     @Environment(AppSettings.self) private var settings
 
     var body: some View {
-        if engine.isSessionActive, engine.phase == .listening {
+        if let link = engine.voiceLink, link.hasPrefix("Fallback") {
+            caption(link, color: Color(hex: "#FFB020"))
+        } else if engine.isSessionActive, engine.phase == .listening {
             if engine.pendingSummary != nil {
                 caption("Tap Approve to go ahead.", color: Color(hex: "#7EB6FF"))
             } else if engine.microphoneMuted {
@@ -197,6 +199,8 @@ private struct LiveCaption: View {
                 caption(JarvisLines.explain(error), color: Color(hex: "#C9C6D4"))
             } else if !engine.transcript.isEmpty {
                 caption(engine.transcript, color: Color(hex: "#A39BB4"))
+            } else if let link = engine.voiceLink, !link.isEmpty {
+                caption(link, color: Color(hex: "#7EB6FF"))
             } else {
                 caption(JarvisLines.listening, color: Color(hex: "#7EB6FF"))
             }

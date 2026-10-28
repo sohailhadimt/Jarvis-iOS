@@ -41,8 +41,9 @@ import {
 } from "./http";
 import { markPersonaDraft, routePersona } from "./personas";
 import { lastSmsErrors, pairResponse, recordSmsError, saveBusy, sendOwnerSmsRoute } from "./sms-desk";
+import { historyResponse, lineResponse, personaResponse, reminderResponse, sayResponse } from "./brain";
 import { liveTokenResponse } from "./live-token";
-import { readVoiceDebug, saveVoiceDebug } from "./voice-debug";
+import { readVoiceDebug, saveVoiceDebug, VOICE_DEBUG_REVISION } from "./voice-debug";
 import { optionalSourceUrls } from "./sources";
 import { isPipelineStage, parseMrr, toolsForNames } from "./tools";
 import type {
@@ -83,7 +84,14 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "POST" && path === "/debug/voice") return saveVoiceDebug(request, env);
     if (request.method === "POST" && path === "/voice/live-token") return liveTokenResponse(env);
     if (request.method === "POST" && path === "/messages/sms") return sendOwnerSmsRoute(request, env);
-    if (request.method === "GET" && path === "/debug/voice") return json({ events: await readVoiceDebug(env) });
+    if (request.method === "GET" && path === "/debug/voice") {
+      return json({ revision: VOICE_DEBUG_REVISION, events: await readVoiceDebug(env) });
+    }
+    if (request.method === "GET" && path === "/brain/persona") return personaResponse();
+    if (request.method === "GET" && path === "/brain/history") return historyResponse(env);
+    if (request.method === "POST" && path === "/brain") return sayResponse(request, env);
+    if (request.method === "POST" && path === "/brain/line") return lineResponse(request, env);
+    if (request.method === "POST" && path === "/brain/reminders") return reminderResponse(request, env);
     if (request.method === "POST" && path === "/debug/sms-probe") {
       const report = await probeSmsChat(env, toolsForNames(["web_search", "draft_document", "request_approval"]));
       await recordSmsError(env, "probe", JSON.stringify(report)).catch(() => undefined);

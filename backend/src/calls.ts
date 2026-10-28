@@ -1,3 +1,4 @@
+import { BRAIN_IDENTITY, GEORGE_VOICE_ID } from "./brain";
 import { recordHandoff } from "./stream";
 import {
   attachConfirmCall,
@@ -31,8 +32,8 @@ export const OUTBOUND_PERSONA =
 export const INBOUND_GREETING =
   "Hello, you've reached Master Hadi's phone, this is JARVIS his personal assistant. This call may be handled by AI. Who's calling and how can I help?";
 
-/** George, the premade British voice the iPhone app uses for JARVIS. */
-export const JARVIS_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb";
+/** George, the premade British voice the iPhone app and the phone line share. */
+export const JARVIS_VOICE_ID = GEORGE_VOICE_ID;
 
 /** Twilio fallback when ElevenLabs does not take the call. Brian is British neural. */
 export const FALLBACK_SAY_VOICE = "Polly.Brian-Neural";
@@ -202,6 +203,7 @@ export function agentScript(contactName: string, brief: string): string {
   const name = clip(contactName, 120);
   const opening = outboundOpening(brief);
   return [
+    BRAIN_IDENTITY,
     OUTBOUND_PERSONA,
     "This is not an inbound call. Do not ask who is calling. Do not take a message as if they had rung him.",
     `Your first spoken words are exactly: "${opening}"`,
@@ -221,6 +223,7 @@ export function agentScript(contactName: string, brief: string): string {
 export function approvedScreening(note: string): string {
   const approved = clip(note, 1000);
   return [
+    BRAIN_IDENTITY,
     "You are JARVIS, Master Hadi's personal assistant, answering his phone in the United Kingdom.",
     `Your first spoken words are exactly: "${INBOUND_GREETING}"`,
     "Listen. Stay polite. Learn the caller's name and why they are calling.",
@@ -235,6 +238,7 @@ export function approvedScreening(note: string): string {
 
 export function screeningScript(): string {
   return [
+    BRAIN_IDENTITY,
     "You are JARVIS, Master Hadi's personal assistant, answering his phone in the United Kingdom.",
     `Your first spoken words are exactly: "${INBOUND_GREETING}"`,
     "Listen. Stay polite. Learn the caller's name and why they are calling.",

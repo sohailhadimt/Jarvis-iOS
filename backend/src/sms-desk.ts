@@ -1,11 +1,11 @@
+import { brainReply, guardUnplacedCall, rememberLine } from "./brain";
 import { delegatedBrief, isBlockedNumber, placeOutboundCall, safeError, toE164 } from "./calls";
 import { dbAll, dbFirst, dbRun, getState, setState } from "./db";
 import { isRecord, json, newId, nowIso, apiError, asString, readJson } from "./http";
-import { CHAT_FALLBACK, completeChat, type ChatMessage } from "./llm";
-import { spokenAnswer } from "./live-answer";
+import { CHAT_FALLBACK } from "./llm";
 import { inQuietHours, londonDay, londonMinutes, readCallSettings, readOwnerMobile } from "./owner-alert";
 import { webSearch } from "./search";
-import { parseToolArgs, toolsForNames } from "./tools";
+import { parseToolArgs } from "./tools";
 import type { Env } from "./types";
 
 export interface LearnedFact {
@@ -1117,68 +1117,13 @@ function redactSmsDetail(text: string): string {
 }
 
 async function chatReply(env: Env, phone: string): Promise<string> {
-  const facts = await dbAll<{ detail: string }>(env, "SELECT detail FROM owner_facts ORDER BY created_at DESC LIMIT 12").catch(() => []);
-  const turns = await dbAll<{ role: string; body: string }>(
-    env,
-    "SELECT role, body FROM sms_turns WHERE phone = ? ORDER BY created_at DESC LIMIT 12",
-    [phone],
-  ).catch(() => []);
-  const messages: ChatMessage[] = [
-    {
-      role: "system",
-      content: [
-        "You are JARVIS, Master Hadi's personal assistant, replying by SMS.",
-        "British English. Call him Sir. Write two or three short sentences. Each sentence ends with a full stop and can stand alone as its own text.",
-        "You cannot dial from this chat. Never say you are calling now, ringing now, or that a call has been placed. The server places calls.",
-        "A message that starts with call, ring, or phone waits until he replies YES. Replying 1, you call, or call him back to a call message is already approved.",
-        "Do not include URLs. Do not invent phone numbers.",
-        "Do not pay, buy, charge a card, or mint a card. Do not send email. A draft waits for his approval.",
-        facts.length ? `Known facts:\n${facts.map((fact) => `- ${fact.detail}`).join("\n")}` : "No saved facts yet.",
-      ].join("\n"),
-    },
-  ];
-  for (const turn of [...turns].reverse()) {
-    if (turn.role !== "user" && turn.role !== "assistant") continue;
-    messages.push({ role: turn.role, content: turn.body });
-  }
-  const tools = toolsForNames(["web_search", "draft_document", "request_approval"]);
-  const first = await completeChat(env, messages, tools);
-  if (!first.ok) {
-    await recordSmsError(env, "chat", `${first.code}: ${first.message}`);
-    return CHAT_FALLBACK;
-  }
-  const calls = first.message.tool_calls ?? [];
-  if (calls.length === 0) return guardCallDenial(spokenAnswer(first.message.content ?? "") ?? "I've noted that, Sir.");
-  messages.push(first.message);
-  for (const call of calls.slice(0, 3)) {
-    const result = await runSmsTool(env, call.function.name, call.function.arguments);
-    messages.push({ role: "tool", content: JSON.stringify(result).slice(0, 1500), tool_call_id: call.id, name: call.function.name });
-  }
-  const second = await completeChat(env, messages, null);
-  if (!second.ok) {
-    await recordSmsError(env, "chat", `${second.code}: ${second.message}`);
-    return "I've noted that, Sir.";
-  }
-  return guardCallDenial(spokenAnswer(second.message.content ?? "") ?? "I've noted that, Sir.");
+  void phone;
+  const answered = await brainReply(env, "sms");
+  if (answered.error) await recordSmsError(env, "chat", answered.error);
+  return guardUnplacedCall(answered.text);
 }
 
-function guardCallDenial(text: string): string {
-  if (unplacedClaim(text)) return "I have not placed a call, Sir. Nothing was dialled.";
-  if (/unable to place|can(?:not|'t) (?:place|make) (?:a )?(?:telephone |phone )?calls?|can(?:not|'t) (?:use the phone|call)\b/i.test(text)) {
-    return "Tell me the number and what to say, Sir. Nothing has been dialled yet.";
-  }
-  return text;
-}
-
-function unplacedClaim(text: string): boolean {
-  const lower = text.toLowerCase();
-  if (/\b(?:calling|ringing)\b/.test(lower) && /\bnow\b/.test(lower)) return true;
-  if (/\bi(?:'m| am) (?:calling|ringing|dialling|dialing)\b/.test(lower)) return true;
-  if (/\bi(?:'ve| have) (?:just )?(?:called|rung|dialled|dialed)\b/.test(lower)) return true;
-  return false;
-}
-
-async function runSmsTool(env: Env, name: string, raw: string): Promise<unknown> {
+export async function runSmsTool(env: Env, name: string, raw: string): Promise<unknown> {
   const parsed = parseToolArgs(raw);
   if (!parsed.ok) return { ok: false, error: parsed.error };
   if (name === "web_search") {
@@ -1246,6 +1191,7 @@ async function rememberTurn(env: Env, phone: string, role: "user" | "assistant",
     clip(body, 1000),
     nowIso(),
   ]);
+  await rememberLine(env, { source: "sms", role, body }).catch(() => undefined);
 }
 
 async function queueApproval(

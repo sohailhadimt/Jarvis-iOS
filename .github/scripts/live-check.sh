@@ -39,6 +39,10 @@ hit outbound POST /calls/outbound '{"to":"+15557654321","purpose":"qa live check
 hit device POST /calls/device '{"token":"not-hex"}' yes
 hit sms_probe POST /debug/sms-probe '{}' yes
 hit sms_errors GET /debug/last-sms-errors "" yes
+hit voice_post POST /debug/voice '{"events":[{"kind":"live-check","detail":"worker roundtrip","at":"2026-10-21T22:00:00.000Z"}]}' yes
+hit voice_get GET /debug/voice "" yes
+hit brain_line POST /brain/line '{"source":"sms","role":"user","text":"The boiler quote was four hundred."}' yes
+hit brain_history GET /brain/history "" yes
 
 node --input-type=module <<'NODE'
 import { readFileSync } from "node:fs";
@@ -72,6 +76,26 @@ if (/\+\d{8,}/.test(debug) || /sk-|AIza|Bearer\s+\S{8,}/i.test(debug)) {
   process.exit(1);
 }
 console.log(`sms_debug ${debug}`);
+const voice = read("voice_get") || {};
+const kinds = Array.isArray(voice.events) ? voice.events.map((event) => event && event.kind).filter(Boolean) : [];
+console.log(`voice_debug revision=${voice.revision || ""} kinds=${kinds.join(",")}`);
+if (voice.revision !== "voice-log-2" || !kinds.includes("live-check")) {
+  console.error("voice debug round trip failed");
+  process.exit(1);
+}
+const history = read("brain_history") || {};
+const turns = Array.isArray(history.turns) ? history.turns : [];
+const found = turns.some((turn) => turn && turn.body === "The boiler quote was four hundred." && turn.source === "sms");
+console.log(`brain_recall found=${found ? "true" : "false"} revision=${history.revision || ""}`);
+if (!found || history.revision !== "brain-1" || history.voice !== "George") {
+  console.error("phone line was not in the app history");
+  process.exit(1);
+}
+const shared = JSON.stringify({ voice: { revision: voice.revision, kinds }, brain: { revision: history.revision, found } });
+if (/\+\d{8,}/.test(shared) || /AIza|Bearer\s+\S{8,}/i.test(shared)) {
+  console.error("live check leaked a secret");
+  process.exit(1);
+}
 NODE
 
 outbound_code=$(node -e 'const b=require("/tmp/live-outbound.json"); process.stdout.write(String((b.error&&b.error.code)||""))' 2>/dev/null || true)

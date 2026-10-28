@@ -11,6 +11,9 @@ export interface VoiceDebugEvent {
 const KEY = "voice_debug";
 const LIMIT = 40;
 
+/** Bumped when a round trip must prove this worker stored the phone's events. */
+export const VOICE_DEBUG_REVISION = "voice-log-2";
+
 /** Keeps kind and a short detail. Drops anything that looks like a phone number. */
 export function sanitizeVoiceDebug(input: unknown, at = nowIso(), limit = 20): VoiceDebugEvent[] {
   if (!isRecord(input) || !Array.isArray(input.events)) return [];
