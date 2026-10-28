@@ -188,7 +188,7 @@ private struct LiveCaption: View {
     @Environment(AppSettings.self) private var settings
 
     var body: some View {
-        if let link = engine.voiceLink, link.hasPrefix("Fallback") {
+        if engine.voiceNeedsAttention, let link = engine.voiceLink {
             caption(link, color: Color(hex: "#FFB020"))
         } else if engine.isSessionActive, engine.phase == .listening {
             if engine.pendingSummary != nil {

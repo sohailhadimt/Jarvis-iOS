@@ -682,18 +682,42 @@ struct CloudClient: Sendable {
         do {
             let body = Data("{}".utf8)
             let (data, status) = try await raw(method: "POST", path: "/voice/live-token", authorize: true, body: body, query: [])
-            if status == 429 { return .unavailable("quota") }
             guard (200..<300).contains(status),
                   let ticket = try? JSONDecoder().decode(LiveTicket.self, from: data),
                   ticket.ok,
                   ticket.websocketURL.hasPrefix("wss://"),
                   !ticket.token.isEmpty else {
-                return .unavailable("unavailable")
+                return .unavailable(Self.liveFailure(data: data, status: status))
             }
             return .ready(ticket)
         } catch {
-            return .unavailable("unavailable")
+            return .unavailable("I can't reach the JARVIS server. Check that the phone is online, then try voice again.")
         }
+    }
+
+    private static func liveFailure(data: Data, status: Int) -> String {
+        if status == 401 || status == 403 {
+            return "The app token was rejected. Open Settings, JARVIS Cloud, paste the worker app token, and tap Save token to Keychain."
+        }
+        if status == 429 {
+            return "Gemini Live is over its free quota. Wait a minute and try again."
+        }
+        let envelope = try? JSONDecoder().decode(CloudErrorEnvelope.self, from: data)
+        let code = envelope?.error.code ?? ""
+        let message = envelope?.error.message ?? ""
+        if code == "not_configured" || message.contains("GEMINI_API_KEY") {
+            return "Gemini is not set up on the JARVIS server."
+        }
+        if status == 0 {
+            return "I can't reach the JARVIS server. Check that the phone is online, then try voice again."
+        }
+        if (200..<300).contains(status) {
+            return "The JARVIS server sent a Live token the app could not read."
+        }
+        if message.isEmpty {
+            return "Gemini Live could not start. Try voice again."
+        }
+        return String(message.prefix(160))
     }
 
     /// Turn and barge-in notes. Returns the HTTP status, or 0 when the request never left the phone.

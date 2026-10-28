@@ -90,12 +90,19 @@ final class AssistantEngine {
         if deskCalls.contains(where: { CallDeskStage.of($0) == .dialing }) { return "Dialling" }
         if inboundCall != nil || deskCalls.contains(where: { CallDeskStage.of($0) == .live }) { return "On the call" }
         if busyMode, phase == .idle { return "BUSY" }
+        if voiceNeedsAttention { return nil }
         switch phase {
         case .listening: return "LISTENING"
         case .speaking: return "SPEAKING"
         case .thinking: return "THINKING"
         default: return nil
         }
+    }
+
+    /// A voice session that did not open Gemini Live. The caption is a sentence, not a debug code.
+    var voiceNeedsAttention: Bool {
+        guard let voiceLink, !voiceLink.isEmpty else { return false }
+        return voiceLink != "Connecting…" && voiceLink != "Gemini Live connected"
     }
     /// Bumped when the on-phone call log changes.
     private(set) var callLogTick: Int = 0
@@ -185,7 +192,7 @@ final class AssistantEngine {
     @ObservationIgnored private var geminiLive: GeminiLiveSession?
     @ObservationIgnored private var liveReconnects = 0
     @ObservationIgnored private var liveReopening = false
-    /// Exactly "Gemini Live connected" or "Fallback: <error>" once a session has tried the live path.
+    /// "Gemini Live connected", "Connecting…", or a plain sentence when Live did not open.
     private(set) var voiceLink: String?
     @ObservationIgnored private var lastLiveFailure: String?
     @ObservationIgnored private var debugClient: CloudClient?
@@ -332,6 +339,7 @@ final class AssistantEngine {
         let epoch = sessionEpoch
         let state = UIApplication.shared.applicationState
         sessionLog.info("startSession epoch=\(epoch) appState=\(state.rawValue) continuous=\(continuous)")
+        let ticketTask = Task { await self.prepareLiveTicket() }
 
         // Persist ON before any reload. A control refresh that still reads off sends perform(false)
         // and tears the session down.
@@ -392,12 +400,17 @@ final class AssistantEngine {
         voiceLink = "Connecting…"
         phase = .listening
         pushActivity()
-        if await beginGeminiLive(epoch: epoch) {
+        var preparation = await ticketTask.value
+        if let current = preparation, Self.cantReachLive(current.1) {
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard epoch == sessionEpoch, isSessionActive else { return .failed }
+            preparation = await prepareLiveTicket()
+        }
+        if await beginGeminiLive(epoch: epoch, preparation: preparation) {
             voiceConnecting = false
             voiceLink = "Gemini Live connected"
         } else if epoch == sessionEpoch, isSessionActive {
-            let why = lastLiveFailure ?? "Gemini Live did not connect"
-            voiceLink = "Fallback: \(why)"
+            voiceLink = lastLiveFailure ?? "Gemini Live could not start. Try voice again."
             phase = .listening
             voiceConnecting = false
             try? listener.keepEngineAlive()
@@ -405,10 +418,10 @@ final class AssistantEngine {
             return .failed
         }
         if let debugClient {
-            let status = await VoiceDebugLog.deliver(debugClient)
-            annotateDebug(status)
+            let client = debugClient
+            Task { _ = await VoiceDebugLog.deliver(client) }
         }
-        if voiceLink?.hasPrefix("Fallback:") == true {
+        if voiceNeedsAttention {
             phase = .listening
             pushActivity()
             return .started
@@ -461,8 +474,8 @@ final class AssistantEngine {
         listener.resetOnDevicePreference()
         refreshWake()
         if let debugClient {
-            let status = await VoiceDebugLog.deliver(debugClient)
-            annotateDebug(status)
+            let client = debugClient
+            Task { _ = await VoiceDebugLog.deliver(client) }
         }
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(160))
@@ -1086,20 +1099,60 @@ final class AssistantEngine {
         return code == 401 || code == 403
     }
 
+    /// Asks for a Live token before the microphone session can interrupt the network.
+    private func prepareLiveTicket() async -> (CloudClient, LiveTicketResult)? {
+        guard let token = KeychainStore.get(.jarvisCloud),
+              let saved = JarvisCloud.baseURL(AppSettings.shared.cloudBaseURL) else { return nil }
+        let client = CloudClient(base: saved, token: token)
+        let first = await client.liveTicket()
+        if case .ready = first { return (client, first) }
+        guard Self.cantReachLive(first),
+              let standard = JarvisCloud.baseURL(AppSettings.defaultCloudBaseURL),
+              standard.host?.lowercased() != saved.host?.lowercased() else {
+            return (client, first)
+        }
+        let other = CloudClient(base: standard, token: token)
+        let second = await other.liveTicket()
+        if case .ready = second {
+            AppSettings.shared.cloudBaseURL = AppSettings.defaultCloudBaseURL
+            return (other, second)
+        }
+        return (client, first)
+    }
+
+    private static func cantReachLive(_ result: LiveTicketResult) -> Bool {
+        if case .unavailable(let why) = result {
+            return why.hasPrefix("I can't reach")
+        }
+        return false
+    }
+
     /// Gemini Live when the worker can mint a token. A failure stays visible. It does not start Apple Speech.
-    private func beginGeminiLive(epoch: Int) async -> Bool {
-        await mergeSharedHistory()
-        guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else {
+    private func beginGeminiLive(epoch: Int, preparation: (CloudClient, LiveTicketResult)?) async -> Bool {
+        guard let preparation else {
             debugClient = nil
             noteLiveError("cloud not configured")
             return false
         }
+        let client = preparation.0
         debugClient = client
         VoiceDebugLog.use(client)
         liveReconnects = 0
         liveReopening = false
-        guard let connected = await connectLive(client: client, epoch: epoch) else { return false }
-        return installLive(connected.session, modality: connected.modality, window: connected.window, epoch: epoch)
+        if case .unavailable(let why) = preparation.1 {
+            noteLiveError(why)
+            return false
+        }
+        guard case .ready(let seeded) = preparation.1 else {
+            noteLiveError("token")
+            return false
+        }
+        guard let connected = await connectLive(client: client, epoch: epoch, seeded: seeded) else { return false }
+        let opened = installLive(connected.session, modality: connected.modality, window: connected.window, epoch: epoch)
+        if opened {
+            Task { await self.mergeSharedHistory() }
+        }
+        return opened
     }
 
     private func liveInstruction() -> String {
@@ -1128,7 +1181,7 @@ final class AssistantEngine {
         """
     }
 
-    private func connectLive(client: CloudClient, epoch: Int) async -> (session: GeminiLiveSession, modality: LiveModality, window: String)? {
+    private func connectLive(client: CloudClient, epoch: Int, seeded: LiveTicket? = nil) async -> (session: GeminiLiveSession, modality: LiveModality, window: String)? {
         guard epoch == sessionEpoch else { return nil }
         let instruction = liveInstruction()
         let tools = LiveWire.declarations(from: ToolCatalog.liveDefinitions(settings: AppSettings.shared))
@@ -1138,7 +1191,12 @@ final class AssistantEngine {
                 self?.handleLive(effect)
             }
         }
-        let textTicket = await client.liveTicket()
+        let textTicket: LiveTicketResult
+        if let seeded {
+            textTicket = .ready(seeded)
+        } else {
+            textTicket = await client.liveTicket()
+        }
         guard epoch == sessionEpoch else { return nil }
         guard case .ready(let first) = textTicket, let textURL = URL(string: first.websocketURL) else {
             let reason: String
@@ -1385,18 +1443,28 @@ final class AssistantEngine {
 
     private func noteLiveError(_ reason: String) {
         let clean = VoiceDebugLog.safe(reason)
-        let short = clean.isEmpty ? "unavailable" : String(clean.prefix(80))
-        lastLiveFailure = short
-        VoiceDebugLog.note("live-error", short)
+        let shown = Self.spokenLiveFailure(clean)
+        lastLiveFailure = shown
+        VoiceDebugLog.note("live-error", String(shown.prefix(80)))
     }
 
-    private func annotateDebug(_ status: Int) {
-        if status == -1 || status == 204 { return }
-        if (200..<300).contains(status) { return }
-        let suffix = status == 0 ? " · debug unreachable" : " · debug HTTP \(status)"
-        guard let link = voiceLink else { return }
-        if link.contains("debug ") { return }
-        voiceLink = String((link + suffix).prefix(140))
+    private static func spokenLiveFailure(_ reason: String) -> String {
+        let clean = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean.contains(" ") && clean.count > 24 { return clean }
+        switch clean {
+        case "quota":
+            return "Gemini Live is over its free quota. Wait a minute and try again."
+        case "cloud not configured":
+            return "Add the app token in Settings, JARVIS Cloud, then try voice again."
+        case "microphone":
+            return "The microphone did not start. Allow the microphone for JARVIS in iPhone Settings."
+        case "socket", "audio send", "reconnect", "goaway":
+            return "The live connection dropped. Try voice again."
+        case "text modality rejected", "modality", "audio token":
+            return "Gemini Live rejected the session. Try voice again."
+        default:
+            return "Gemini Live could not start. Open Settings, JARVIS Cloud, and check the app token."
+        }
     }
 
     /// Pulls the phone line's persona and history into this conversation. Existing lines stay.
@@ -1449,8 +1517,7 @@ final class AssistantEngine {
         listener.stop()
         noteLiveError(reason)
         VoiceDebugLog.note("live-close", "fallback")
-        let why = lastLiveFailure ?? "unavailable"
-        voiceLink = "Fallback: \(why)"
+        voiceLink = lastLiveFailure ?? "The live connection dropped. Try voice again."
         phase = .listening
         voiceConnecting = false
         try? listener.keepEngineAlive()
@@ -1458,8 +1525,7 @@ final class AssistantEngine {
         let client = debugClient
         Task {
             guard let client else { return }
-            let status = await VoiceDebugLog.deliver(client)
-            self.annotateDebug(status)
+            _ = await VoiceDebugLog.deliver(client)
         }
     }
 
