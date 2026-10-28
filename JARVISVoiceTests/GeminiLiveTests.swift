@@ -63,6 +63,12 @@ final class GeminiLiveTests: XCTestCase {
         XCTAssertEqual(reducer.apply(.turnComplete), [])
     }
 
+    func testSimpleTurnsUseAShortReflex() {
+        XCTAssertEqual(LiveReflex.line(for: "Hello"), "Hello, Sir.")
+        XCTAssertEqual(LiveReflex.line(for: "Thank you."), "Of course, Sir.")
+        XCTAssertNil(LiveReflex.line(for: "Book a table for four and ask about the window."))
+    }
+
     func testModelTextWinsOverADuplicateTranscript() {
         var reducer = LiveTurnReducer()
         let spoken = reducer.apply(.modelText("The meeting is at four."))
