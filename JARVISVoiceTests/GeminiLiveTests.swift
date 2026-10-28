@@ -67,6 +67,25 @@ final class GeminiLiveTests: XCTestCase {
         XCTAssertEqual(LiveReflex.line(for: "Hello"), "Hello, Sir.")
         XCTAssertEqual(LiveReflex.line(for: "Thank you."), "Of course, Sir.")
         XCTAssertNil(LiveReflex.line(for: "Book a table for four and ask about the window."))
+
+        var greeting = LiveTurnReducer()
+        XCTAssertEqual(greeting.apply(.inputTranscript("Hello")), [.user("Hello")])
+        XCTAssertEqual(greeting.apply(.activityEnd), [
+            .speechEnd,
+            .userFinal("Hello"),
+            .speak("Hello, Sir."),
+        ])
+        XCTAssertEqual(greeting.apply(.modelText("Good evening. How can I help?")), [])
+        XCTAssertEqual(greeting.apply(.turnComplete), [])
+
+        var late = LiveTurnReducer()
+        XCTAssertEqual(late.apply(.activityEnd), [.speechEnd])
+        XCTAssertEqual(late.apply(.inputTranscript("Thank you")), [
+            .user("Thank you"),
+            .userFinal("Thank you"),
+            .speak("Of course, Sir."),
+        ])
+        XCTAssertEqual(late.apply(.outputTranscript("You are most welcome, Sir.")), [])
     }
 
     func testModelTextWinsOverADuplicateTranscript() {

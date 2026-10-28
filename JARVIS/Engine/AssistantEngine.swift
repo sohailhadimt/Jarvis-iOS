@@ -200,12 +200,9 @@ final class AssistantEngine {
     @ObservationIgnored private var debugClient: CloudClient?
     @ObservationIgnored private var sharedPersona = ""
     @ObservationIgnored private var brainVoiceID = "JBFqnCBsd6RMkjVDRZzb"
-    /// A greeting or the time was spoken locally. Gemini's reply for this turn is not played.
-    @ObservationIgnored private var suppressLiveSpeech = false
-
     /// Quiet after the latest words, only for the unused file-capture path. Live turns use the meter.
     private var endpointPause: Duration {
-        let seconds = min(1.2, max(0.8, AppSettings.shared.endpointSilence))
+        let seconds = min(1.2, max(0.55, AppSettings.shared.endpointSilence))
         return .milliseconds(Int((seconds * 1000).rounded()))
     }
 
@@ -1349,7 +1346,6 @@ final class AssistantEngine {
         case .ready:
             break
         case .speak(let text):
-            if suppressLiveSpeech { break }
             LatencyLog.mark("llm")
             publishLatency()
             enqueueLiveSpeech(text)
@@ -1357,7 +1353,6 @@ final class AssistantEngine {
             VoiceDebugLog.note("barge-in", "live")
             stopLivePlayback()
         case .speechStart:
-            suppressLiveSpeech = false
             userIsSpeaking = true
             stopLivePlayback()
             pushActivity()
@@ -1378,12 +1373,6 @@ final class AssistantEngine {
             _ = recordUser(text)
             let heard = text
             Task { await self.shareTurn(role: "user", text: heard) }
-            if let reflex = LiveReflex.line(for: heard) {
-                suppressLiveSpeech = true
-                LatencyLog.mark("llm")
-                publishLatency()
-                enqueueLiveSpeech(reflex)
-            }
             pushActivity()
         case .tool(let id, let name, let arguments):
             Task { await self.answerLiveTool(id: id, name: name, arguments: arguments) }

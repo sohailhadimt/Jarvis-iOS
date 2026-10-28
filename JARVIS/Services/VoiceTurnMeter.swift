@@ -81,7 +81,7 @@ final class VoiceTurnMeter: @unchecked Sendable {
 
     func setPause(_ seconds: Double) {
         lock.lock()
-        pauseSeconds = min(1.2, max(0.8, seconds))
+        pauseSeconds = min(1.2, max(0.55, seconds))
         lock.unlock()
     }
 

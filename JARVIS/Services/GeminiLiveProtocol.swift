@@ -304,6 +304,12 @@ struct LiveTurnReducer {
     private var buffer = LiveSpeakBuffer()
     private var user = ""
     private var userClosed = ""
+    /// The short line for this turn was already chosen. Later model text is dropped.
+    private var reflexSent = false
+    /// Model speech already left this turn, so a late reflex must not talk over it.
+    private var modelSpoke = false
+    /// Server VAD has closed the user's turn.
+    private var stopped = false
 
     mutating func resetTurn() {
         buffer.reset()
@@ -314,22 +320,39 @@ struct LiveTurnReducer {
         case .setupComplete:
             return [.ready]
         case .modelText(let text):
-            return buffer.ingest(text, source: .modelText).map(LiveEffect.speak)
+            return speakModel(text, source: .modelText)
         case .outputTranscript(let text):
-            return buffer.ingest(text, source: .outputTranscript).map(LiveEffect.speak)
+            return speakModel(text, source: .outputTranscript)
         case .inputTranscript(let text):
             user = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            return user.isEmpty ? [] : [.user(user)]
+            var effects: [LiveEffect] = user.isEmpty ? [] : [.user(user)]
+            if stopped {
+                effects.append(contentsOf: takeReflex())
+            }
+            return effects
         case .interrupted:
             buffer.reset()
             return [.interrupt]
         case .activityStart:
             buffer.reset()
+            reflexSent = false
+            modelSpoke = false
+            stopped = false
             return [.speechStart, .interrupt]
         case .activityEnd:
-            return [.speechEnd]
+            stopped = true
+            var effects: [LiveEffect] = [.speechEnd]
+            effects.append(contentsOf: takeReflex())
+            return effects
         case .turnComplete:
-            var effects = buffer.flush().map(LiveEffect.speak)
+            var effects: [LiveEffect] = []
+            if !reflexSent, !modelSpoke, LiveReflex.line(for: user) != nil {
+                effects.append(contentsOf: takeReflex())
+            } else if !reflexSent {
+                effects.append(contentsOf: buffer.flush().map(LiveEffect.speak))
+            } else {
+                buffer.reset()
+            }
             if !user.isEmpty, user != userClosed {
                 userClosed = user
                 effects.append(.userFinal(user))
@@ -343,6 +366,27 @@ struct LiveTurnReducer {
         case .error(let message):
             return [.failed(message)]
         }
+    }
+
+    private mutating func speakModel(_ text: String, source: LiveTextSource) -> [LiveEffect] {
+        if reflexSent { return [] }
+        let chunks = buffer.ingest(text, source: source)
+        if !chunks.isEmpty { modelSpoke = true }
+        return chunks.map(LiveEffect.speak)
+    }
+
+    /// Greeting, thanks, or the time, once the user has stopped. The final line is recorded first.
+    private mutating func takeReflex() -> [LiveEffect] {
+        guard !reflexSent, !modelSpoke, let line = LiveReflex.line(for: user) else { return [] }
+        reflexSent = true
+        buffer.reset()
+        var effects: [LiveEffect] = []
+        if !user.isEmpty, user != userClosed {
+            userClosed = user
+            effects.append(.userFinal(user))
+        }
+        effects.append(.speak(line))
+        return effects
     }
 }
 
