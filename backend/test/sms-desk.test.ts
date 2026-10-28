@@ -563,9 +563,12 @@ describe("text desk", () => {
       expect(stored.brief).toContain("who they were talking to");
       expect(Date.parse(stored.expires_at) - Date.now()).toBeGreaterThan(29 * 60 * 1000);
 
+      kv.set("sms_callback", JSON.stringify({ name: "them", phone: "+15550003333", brief: "Leave this one.", purpose: "Leave this one." }));
       texts.length = 0;
       await handleInboundSms(env, "+15557654321", "Yes");
       expect(calls).toHaveLength(1);
+      expect(kv.get("sms_callback")).toContain("Leave this one");
+      kv.delete("sms_callback");
       expect(new URLSearchParams(calls[0] ?? "").get("To")).toBe("+15550001111");
       expect(inserts[0]?.[3]).toContain("who they were talking to");
       expect(texts.join(" ")).toContain("Calling");

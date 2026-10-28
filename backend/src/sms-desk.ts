@@ -969,9 +969,6 @@ async function placeApprovedOutbound(env: Env, owner: string): Promise<string | 
     found.raw,
   ]);
   if (changes !== 1) return null;
-  for (const key of [pendingKey(owner), OUTBOUND_KEY, CALLBACK_KEY]) {
-    if (key !== found.key) await setState(env, key, "").catch(() => undefined);
-  }
   const name = pending.name;
   const brief = pending.brief.trim() || delegatedBrief(pending.verb, pending.purpose);
   const placed = await placeOutboundCall(env, { contact: name, to: pending.phone, brief });
