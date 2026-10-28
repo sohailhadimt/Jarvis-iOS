@@ -45,7 +45,7 @@ export interface BrainAnswer {
   error: string | null;
 }
 
-const LIMIT = 40;
+const LIMIT = 60;
 let ready = false;
 
 export function brainSystem(channel: "sms" | "app"): string {
@@ -103,28 +103,29 @@ export async function ensureBrain(env: Env): Promise<void> {
 /** The one memory write. SMS rememberTurn and POST /brain/line both call this. */
 export async function rememberLine(
   env: Env,
-  line: { source: BrainSource; role: BrainRole; body: string; ref?: string | null },
+  line: { source: BrainSource; role: BrainRole; body: string; ref?: string | null; createdAt?: string | null },
 ): Promise<boolean> {
   const body = cleanLine(line.body);
   if (!body) return false;
   await ensureBrain(env);
   const ref = line.ref && /^call_[A-Za-z0-9]+$/.test(line.ref) ? line.ref : null;
+  const at = line.createdAt && line.createdAt.length <= 40 ? line.createdAt : nowIso();
   await dbRun(env, "INSERT INTO brain_turns (id, source, role, body, ref, created_at) VALUES (?, ?, ?, ?, ?, ?)", [
     newId("brain"),
     line.source,
     line.role,
     body,
     ref,
-    nowIso(),
+    at,
   ]);
   return true;
 }
 
 export async function syncCalls(env: Env): Promise<void> {
   await ensureBrain(env);
-  const calls = await dbAll<{ id: string; transcript_json: string | null }>(
+  const calls = await dbAll<{ id: string; transcript_json: string | null; updated_at: string | null }>(
     env,
-    "SELECT id, transcript_json FROM outbound_calls ORDER BY updated_at DESC LIMIT 20",
+    "SELECT id, transcript_json, updated_at FROM outbound_calls ORDER BY updated_at DESC LIMIT 8",
   ).catch(() => []);
   for (const call of calls) {
     if (!/^call_[A-Za-z0-9]+$/.test(call.id)) continue;
@@ -134,10 +135,10 @@ export async function syncCalls(env: Env): Promise<void> {
       [call.id],
     ).catch(() => []);
     const have = new Set(existing.map((row) => row.body));
-    for (const line of readTranscript(call.transcript_json)) {
+    for (const line of readTranscript(call.transcript_json).slice(-6)) {
       const body = cleanLine(line.text);
       if (!body || have.has(body)) continue;
-      await rememberLine(env, { source: "call", role: line.role, body, ref: call.id });
+      await rememberLine(env, { source: "call", role: line.role, body, ref: call.id, createdAt: call.updated_at });
       have.add(body);
     }
   }

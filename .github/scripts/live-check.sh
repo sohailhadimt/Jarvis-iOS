@@ -86,7 +86,7 @@ if (voice.revision !== "voice-log-2" || !kinds.includes("live-check")) {
 const history = read("brain_history") || {};
 const turns = Array.isArray(history.turns) ? history.turns : [];
 const found = turns.some((turn) => turn && turn.body === "The boiler quote was four hundred." && turn.source === "sms");
-console.log(`brain_recall found=${found ? "true" : "false"} revision=${history.revision || ""}`);
+console.log(`brain_recall found=${found ? "true" : "false"} revision=${history.revision || ""} turns=${turns.length}`);
 if (!found || history.revision !== "brain-1" || history.voice !== "George") {
   console.error("phone line was not in the app history");
   process.exit(1);
