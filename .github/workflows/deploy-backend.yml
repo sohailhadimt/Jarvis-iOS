@@ -238,8 +238,7 @@ jobs:
             fi
             # A trailing newline in the Actions secret must not become part of the bearer token.
             if [ "$name" = "JARVIS_APP_TOKEN" ]; then
-              value=$(printf '%s' "$value" | python3 -c 'import sys; t=sys.stdin.read().strip()
-print(t[7:].strip() if t[:7].lower()=="bearer " else t, end="")')
+              value=$(printf '%s' "$value" | python3 -c 'import sys; t=sys.stdin.read().strip(); print(t[7:].strip() if t[:7].lower()=="bearer " else t, end="")')
             fi
             if [ -z "$value" ]; then
               echo "missing $name"
