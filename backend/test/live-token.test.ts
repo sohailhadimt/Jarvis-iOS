@@ -58,6 +58,26 @@ describe("Gemini Live token", () => {
     }
   });
 
+  it("does not report a Gemini refusal as a rejected app token", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("no", { status: 401 })) as typeof fetch;
+    try {
+      const response = await route(
+        new Request("https://jarvis.test/voice/live-token", {
+          method: "POST",
+          headers: { authorization: "Bearer secret-token" },
+        }),
+        env(),
+        { waitUntil() {}, passThroughOnException() {}, props: {} } as unknown as ExecutionContext,
+      );
+      expect(response.status).toBe(502);
+      const body = (await response.json()) as { error: { code: string } };
+      expect(body.error.code).toBe("unavailable");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it("reports quota without the API key", async () => {
     const original = globalThis.fetch;
     globalThis.fetch = (async () =>

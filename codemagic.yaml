@@ -102,6 +102,27 @@ workflows:
           else
             echo "ELEVENLABS_API_KEY is not set. Startup speech caches on the first launch that has a saved ElevenLabs key."
           fi
+      - name: Bundle the worker app token when Codemagic has it
+        script: |
+          # The value stays in the environment. This script does not print it.
+          python3 - <<'PY'
+          import os
+          import plistlib
+          path = os.path.join(os.environ.get("CM_BUILD_DIR", "."), "JARVIS", "Info.plist")
+          token = os.environ.get("JARVIS_APP_TOKEN", "").strip()
+          if token[:7].lower() == "bearer ":
+              token = token[7:].strip()
+          with open(path, "rb") as handle:
+              info = plistlib.load(handle)
+          if token:
+              info["JarvisAppToken"] = token
+              print("JarvisAppToken bundled")
+          else:
+              info["JarvisAppToken"] = ""
+              print("JARVIS_APP_TOKEN is not set. Add it to the Codemagic variable group 'signing'. The value is the GitHub Actions secret JARVIS_APP_TOKEN.")
+          with open(path, "wb") as handle:
+              plistlib.dump(info, handle)
+          PY
       - name: Build ipa for distribution
         script: |
           xcode-project build-ipa \

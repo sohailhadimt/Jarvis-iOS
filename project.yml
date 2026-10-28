@@ -49,6 +49,8 @@ targets:
       properties:
         CFBundleDisplayName: JARVIS
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        # Filled at TestFlight time from the Codemagic variable JARVIS_APP_TOKEN. Empty in git.
+        JarvisAppToken: ""
         ITSAppUsesNonExemptEncryption: false
         UILaunchScreen:
           UIColorName: LaunchBackground

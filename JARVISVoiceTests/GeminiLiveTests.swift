@@ -63,6 +63,12 @@ final class GeminiLiveTests: XCTestCase {
         XCTAssertEqual(reducer.apply(.turnComplete), [])
     }
 
+    func testAppTokenDropsSpaceAndARepeatedBearer() {
+        XCTAssertEqual(CloudToken.normalize("  Bearer secret-token\n"), "secret-token")
+        XCTAssertEqual(CloudToken.normalize("Bearer Bearer secret-token"), "secret-token")
+        XCTAssertNil(CloudToken.normalize("   "))
+    }
+
     func testSimpleTurnsUseAShortReflex() {
         XCTAssertEqual(LiveReflex.line(for: "Hello"), "Hello, Sir.")
         XCTAssertEqual(LiveReflex.line(for: "Thank you."), "Of course, Sir.")

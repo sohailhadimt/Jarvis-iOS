@@ -9,12 +9,27 @@ export interface AuthRejected {
   response: Response;
 }
 
+/** Drops surrounding space, quotes, and a repeated "Bearer " so a pasted header still matches. */
+export function normalizeAppToken(value: string): string {
+  let token = value.trim();
+  if (
+    (token.startsWith('"') && token.endsWith('"') && token.length >= 2) ||
+    (token.startsWith("'") && token.endsWith("'") && token.length >= 2)
+  ) {
+    token = token.slice(1, -1).trim();
+  }
+  while (/^bearer\s+/i.test(token)) token = token.replace(/^bearer\s+/i, "").trim();
+  return token;
+}
+
 /**
  * Bearer check for every route except GET /health.
  * A missing Worker secret is 503 so the client can tell "not set up" from "wrong key".
+ * The stored secret is trimmed. A trailing newline from a secret paste must not reject the app.
  */
 export function authorize(request: Request, expected: string | undefined): AuthOk | AuthRejected {
-  if (!expected) {
+  const secret = normalizeAppToken(expected ?? "");
+  if (!secret) {
     return {
       ok: false,
       response: apiError(
@@ -24,15 +39,9 @@ export function authorize(request: Request, expected: string | undefined): AuthO
       ),
     };
   }
-  const header = request.headers.get("Authorization") ?? "";
-  const match = /^Bearer\s+(\S+)\s*$/i.exec(header);
-  if (!match) {
-    return {
-      ok: false,
-      response: apiError(401, "unauthorized", "Missing or invalid bearer token."),
-    };
-  }
-  if (!tokensMatch(match[1], expected)) {
+  const header = request.headers.get("Authorization") ?? request.headers.get("x-app-token") ?? "";
+  const provided = normalizeAppToken(header);
+  if (!provided || !tokensMatch(provided, secret)) {
     return {
       ok: false,
       response: apiError(401, "unauthorized", "Missing or invalid bearer token."),

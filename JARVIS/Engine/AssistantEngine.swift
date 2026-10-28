@@ -1103,10 +1103,33 @@ final class AssistantEngine {
     }
 
     /// Asks for a Live token before the microphone session can interrupt the network.
+    /// The Keychain value is tried first. A rejected one gives way to the token bundled in this build.
     private func prepareLiveTicket() async -> (CloudClient, LiveTicketResult)? {
-        guard let rawToken = KeychainStore.get(.jarvisCloud) else { return nil }
-        let token = rawToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !token.isEmpty, let saved = JarvisCloud.baseURL(AppSettings.shared.cloudBaseURL) else { return nil }
+        let stored = CloudToken.normalize(KeychainStore.get(.jarvisCloud))
+        let bundled = CloudToken.bundled()
+        var tokens: [String] = []
+        if let stored { tokens.append(stored) }
+        if let bundled, bundled != stored { tokens.append(bundled) }
+        guard !tokens.isEmpty else { return nil }
+        var last: (CloudClient, LiveTicketResult)?
+        for token in tokens {
+            guard let attempt = await liveTicket(using: token) else { continue }
+            last = attempt
+            if case .ready = attempt.1 {
+                if token == bundled {
+                    KeychainStore.set(bundled, for: .jarvisCloud)
+                }
+                return attempt
+            }
+            if case .unavailable(let why) = attempt.1, !why.contains("app token was rejected") {
+                return attempt
+            }
+        }
+        return last
+    }
+
+    private func liveTicket(using token: String) async -> (CloudClient, LiveTicketResult)? {
+        guard let saved = JarvisCloud.baseURL(AppSettings.shared.cloudBaseURL) else { return nil }
         let client = CloudClient(base: saved, token: token)
         let first = await client.liveTicket()
         if case .ready = first { return (client, first) }

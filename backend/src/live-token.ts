@@ -48,7 +48,11 @@ export async function mintGeminiLiveToken(env: Env, now = Date.now()): Promise<L
   }
   const text = await response.text().catch(() => "");
   if (response.status === 429) return { ok: false, reason: "quota", status: 429 };
-  if (!response.ok) return { ok: false, reason: "unavailable", status: response.status || 502 };
+  // Gemini's own 401 must not look like a rejected app token. The phone treats 401 as that sentence.
+  if (!response.ok) {
+    const status = response.status === 401 || response.status === 403 ? 502 : response.status || 502;
+    return { ok: false, reason: "unavailable", status };
+  }
   const token = tokenName(text);
   if (!token) return { ok: false, reason: "unavailable", status: 502 };
   return {

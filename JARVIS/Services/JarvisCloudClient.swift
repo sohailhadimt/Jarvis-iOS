@@ -714,7 +714,11 @@ struct CloudClient: Sendable {
 
     private static func liveFailure(data: Data, status: Int, host: String?) -> String {
         if status == 401 || status == 403 {
-            return "The app token was rejected. Open Settings, JARVIS Cloud, paste the worker app token, and tap Save token to Keychain."
+            let envelope = try? JSONDecoder().decode(CloudErrorEnvelope.self, from: data)
+            let code = envelope?.error.code ?? ""
+            if code == "unauthorized" || code.isEmpty {
+                return "The app token was rejected. Open Settings, JARVIS Cloud, paste the worker app token, and tap Save token to Keychain."
+            }
         }
         if status == 429 {
             return "Gemini Live is over its free quota. Wait a minute and try again."
@@ -1674,6 +1678,25 @@ struct CloudGroupLine: Decodable, Sendable {
     enum CodingKeys: String, CodingKey {
         case id, author, text, role
         case createdAt = "created_at"
+    }
+}
+
+/// The worker bearer token. A TestFlight build may carry it in Info.plist. The Keychain copy wins until it is rejected.
+enum CloudToken {
+    static func normalize(_ raw: String?) -> String? {
+        var token = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if token.hasPrefix("\""), token.hasSuffix("\""), token.count >= 2 {
+            token = String(token.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        while token.lowercased().hasPrefix("bearer ") {
+            token = String(token.dropFirst(7)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return token.isEmpty ? nil : token
+    }
+
+    /// Present only when Codemagic wrote JARVIS_APP_TOKEN into the archive. Empty in a local build.
+    static func bundled() -> String? {
+        normalize(Bundle.main.object(forInfoDictionaryKey: "JarvisAppToken") as? String)
     }
 }
 

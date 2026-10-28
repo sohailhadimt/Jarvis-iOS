@@ -236,6 +236,15 @@ jobs:
               echo "missing $name"
               return 1
             fi
+            # A trailing newline in the Actions secret must not become part of the bearer token.
+            if [ "$name" = "JARVIS_APP_TOKEN" ]; then
+              value=$(printf '%s' "$value" | python3 -c 'import sys; t=sys.stdin.read().strip()
+print(t[7:].strip() if t[:7].lower()=="bearer " else t, end="")')
+            fi
+            if [ -z "$value" ]; then
+              echo "missing $name"
+              return 1
+            fi
             while [ "$attempt" -le 4 ]; do
               if printf '%s' "$value" | npx wrangler secret put "$name"; then
                 echo "set $name"
