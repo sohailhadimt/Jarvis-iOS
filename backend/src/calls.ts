@@ -1345,6 +1345,8 @@ export interface ElevenCallInput {
   prompt: string;
   contact: string;
   brief: string;
+  /** Use a different ElevenLabs agent (the ASG receptionist). */
+  agentId?: string;
 }
 
 export interface ElevenCallResult {
@@ -1374,7 +1376,7 @@ export function clearElevenLabsTelephonyCache(): void {
  * is "true". For inbound, from is the caller and to is the Twilio number.
  */
 export async function registerElevenLabsCall(env: Env, input: ElevenCallInput): Promise<ElevenCallResult> {
-  const agentId = (env.ELEVENLABS_AGENT_ID ?? "").trim();
+  const agentId = (input.agentId ?? env.ELEVENLABS_AGENT_ID ?? "").trim();
   const apiKey = (env.ELEVENLABS_API_KEY ?? "").trim();
   const meta = {
     call: input.id,
@@ -1394,8 +1396,9 @@ export async function registerElevenLabsCall(env: Env, input: ElevenCallInput): 
   // The dashboard agent opens with the inbound screening line. Outbound must
   // replace first_message and the prompt on this call. A refused override
   // returns no TwiML so the Polly path speaks the same brief.
-  const overrides = input.direction === "outbound" || callOverridesEnabled(env);
-  const prepare = await prepareTelephonyAgent(apiKey, agentId);
+  // A dedicated agent (ASG) carries its own prompt, so it registers bare.
+  const overrides = !input.agentId && (input.direction === "outbound" || callOverridesEnabled(env));
+  const prepare = input.agentId ? "skipped" : await prepareTelephonyAgent(apiKey, agentId);
   let attempt = await postRegister(apiKey, agentId, input, overrides, 6_000);
   if (!attempt.twiml && (attempt.reason === "network" || attempt.reason === "timeout")) {
     attempt = await postRegister(apiKey, agentId, input, overrides, 5_000);

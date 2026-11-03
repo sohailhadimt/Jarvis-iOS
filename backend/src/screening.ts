@@ -28,6 +28,8 @@ import { apiError, asString, isRecord, json, newId, nowIso } from "./http";
 import { continueInboundConversation, converseAction, converseTwiml, inboundOpening } from "./inbound-converse";
 import { forcePolly } from "./outbound-speech";
 import type { Env } from "./types";
+import { asgLineOn, asgTwiml } from "./asg-phone";
+import { readOwnerMobile } from "./owner-alert";
 
 const ACTIVE = ["screening", "listening", "handling", "message", "connecting", "ringing", "in_progress", "wrapping"];
 
@@ -97,6 +99,20 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
   const ours = toE164(env.TWILIO_FROM_NUMBER ?? "");
   const dialed = toE164(params.To ?? "") ?? ours;
   if (!caller || (ours && caller === ours)) return xml("<Response><Hangup/></Response>", 200);
+  const owner = await readOwnerMobile(env).catch(() => null);
+  if (asgLineOn(env) && !pollyInbound(env) && owner && caller !== owner) {
+    const asgId = newId("call");
+    const stamp = nowIso();
+    await dbRun(
+      env,
+      `INSERT INTO outbound_calls
+        (id, contact_name, to_number, brief, status, twilio_sid, conversation_id, transcript_json, summary, error, created_at, updated_at)
+       VALUES (?, 'ASG enquiry', ?, 'ASG receptionist', 'in_progress', ?, NULL, '[]', NULL, NULL, ?, ?)`,
+      [asgId, caller, params.CallSid || null, stamp, stamp],
+    ).catch(() => undefined);
+    const twiml = await asgTwiml(env, asgId, caller, dialed || caller, "inbound");
+    if (twiml) return new Response(twiml, { status: 200, headers: { "content-type": "text/xml; charset=utf-8" } });
+  }
   const permission = await matchPermission(env, caller);
   const id = newId("call");
   const now = nowIso();

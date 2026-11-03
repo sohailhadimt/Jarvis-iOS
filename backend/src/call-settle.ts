@@ -89,6 +89,10 @@ export async function handleElevenPostCall(request: Request, env: Env): Promise<
   const type = typeof payload.type === "string" ? payload.type : "";
   if (type === "post_call_audio" || type === "call_initiation_failure") return json({ ok: true });
   const data = isRecord(payload.data) ? payload.data : payload;
+  if (isRecord(data)) {
+    const { captureAsgLead } = await import("./asg-phone");
+    await captureAsgLead(env, data).catch((err) => console.error("asg lead capture failed", err instanceof Error ? err.message : "error"));
+  }
   const hit = await settlePayload(env, data).catch(() => null);
   return json({
     ok: true,

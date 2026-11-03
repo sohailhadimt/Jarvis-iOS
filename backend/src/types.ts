@@ -67,6 +67,10 @@ export interface Env {
   TWILIO_FROM_NUMBER?: string;
   ELEVENLABS_API_KEY?: string;
   ELEVENLABS_AGENT_ID?: string;
+  /** Optional pin for the ASG receptionist agent; otherwise looked up by name. */
+  ASG_AGENT_ID?: string;
+  /** "off" sends every caller to JARVIS again. */
+  ASG_LINE?: string;
   ELEVENLABS_WEBHOOK_SECRET?: string;
   /** Set to "true" to send conversation_config_override on inbound register-call. Outbound always sends it. */
   ELEVENLABS_CALL_OVERRIDES?: string;

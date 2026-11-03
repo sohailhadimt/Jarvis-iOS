@@ -75,6 +75,11 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     }
     if (isOwnerWebhook(request.method, path)) return handleOwnerWebhook(request, env, path);
     if (isScreenWebhook(request.method, path)) return handleScreenWebhook(request, env, path, ctx);
+    const asgVoice = /^\/asg\/voice\/(call_[A-Za-z0-9]+)$/.exec(path);
+    if (request.method === "POST" && asgVoice) {
+      const { asgVoiceWebhook } = await import("./asg-phone");
+      return asgVoiceWebhook(request, env, asgVoice[1]);
+    }
     if (isCallWebhook(request.method, path)) return handleCallWebhook(request, env, path);
     const auth = authorize(request, env.JARVIS_APP_TOKEN);
     if (!auth.ok) return auth.response;
@@ -152,6 +157,11 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (owned) return owned;
     const relayed = await routeRelay(request, env, path);
     if (relayed) return relayed;
+    if (path.startsWith("/asg/")) {
+      const { routeAsg } = await import("./asg-phone");
+      const asg = await routeAsg(request, env, path);
+      if (asg) return asg;
+    }
     const screened = await routeScreeningApi(request, env, path);
     if (screened) return screened;
     const callResponse = await handleCallApi(request, env, path);
