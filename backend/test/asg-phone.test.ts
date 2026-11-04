@@ -1,69 +1,80 @@
 import { describe, expect, it } from "vitest";
-import { route } from "../src/routes";
 import { twilioSignature } from "../src/calls";
+import { route } from "../src/routes";
 import type { Env } from "../src/types";
 
-const OWNER = "+447700900111";
 function env(): Env {
-  const db = {
-    prepare(sql: string) {
-      const s = {
-        bind: () => s,
-        all: async () => ({ results: [], success: true, meta: {} }),
-        first: async () => (sql.includes("call_settings") ? { mobile_number: OWNER } : null),
-        run: async () => ({ success: true, meta: { changes: 1 } }),
-      };
-      return s;
-    },
+  const statement = {
+    bind() { return statement; },
+    async all() { return { results: [], success: true, meta: {} }; },
+    async first() { return null; },
+    async run() { return { success: true, meta: { changes: 1 } }; },
   };
   return {
-    DB: db,
+    JARVIS_APP_TOKEN: "secret-token",
+    DB: { prepare: () => statement } as unknown as D1Database,
     TWILIO_ACCOUNT_SID: "ACexampleaccountsid000000000000",
-    TWILIO_AUTH_TOKEN: "tok",
+    TWILIO_AUTH_TOKEN: "twilio-auth-token-example",
     TWILIO_FROM_NUMBER: "+447700900000",
-    OWNER_PHONE: OWNER,
-    ELEVENLABS_API_KEY: "k",
+    ELEVENLABS_API_KEY: "elevenlabs-key-example-value",
     ELEVENLABS_AGENT_ID: "agent_jarvis",
-  } as unknown as Env;
+    ASG_AGENT_ID: "agent_asg",
+    OWNER_PHONE: "+447700900999",
+  };
 }
-const ctx = { waitUntil: (p: Promise<unknown>) => p.catch(() => undefined), passThroughOnException() {} } as unknown as ExecutionContext;
 
-async function call(from: string, agents: string[]): Promise<void> {
-  const url = "http://internal.local/calls/inbound";
+const ctx = { waitUntil: (p: Promise<unknown>) => void p.catch(() => undefined), passThroughOnException() {}, props: {} } as ExecutionContext;
+
+async function ring(e: Env, from: string): Promise<string[]> {
   const params = { CallSid: "CA1", From: from, To: "+447700900000" };
-  const sig = await twilioSignature(url, params, "tok");
+  const url = "https://jarvis-backend.jarvis-hadi.workers.dev/calls/inbound";
+  const sig = await twilioSignature(url, params, "twilio-auth-token-example");
+  const agents: string[] = [];
   const original = globalThis.fetch;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const u = String(input);
-    if (u.includes("/convai/agents?")) return new Response(JSON.stringify({ agents: [{ agent_id: "agent_asg", name: "ASG Receptionist" }] }));
-    if (u.includes("register-call")) {
-      agents.push((JSON.parse(String(init?.body)) as { agent_id: string }).agent_id);
-      return new Response("<Response><Connect/></Response>");
+    if (String(input).includes("register-call")) {
+      agents.push(String((JSON.parse(String(init?.body ?? "{}")) as { agent_id?: string }).agent_id));
+      return new Response("<Response><Connect/></Response>", { status: 200 });
     }
-    return new Response("{}");
+    return new Response("{}", { status: 200 });
   }) as typeof fetch;
   try {
-    const res = await route(
-      new Request(url, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "X-Twilio-Signature": sig }, body: new URLSearchParams(params).toString() }),
-      env(),
-      ctx,
-    );
+    const req = new Request("http://internal.local/calls/inbound", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", "X-Twilio-Signature": sig },
+      body: new URLSearchParams(params).toString(),
+    });
+    const res = await route(req, e, ctx);
     expect(res.status).toBe(200);
   } finally {
     globalThis.fetch = original;
   }
+  return agents;
 }
 
 describe("ASG line", () => {
-  it("sends a stranger to the ASG agent", async () => {
-    const agents: string[] = [];
-    await call("+447700900222", agents);
-    expect(agents[0]).toBe("agent_asg");
+  it("sends a stranger to the ASG receptionist agent", async () => {
+    expect(await ring(env(), "+447700900123")).toEqual(["agent_asg"]);
   });
-  it("keeps JARVIS for the owner", async () => {
-    const agents: string[] = [];
-    await call(OWNER, agents);
+  it("keeps the owner on JARVIS", async () => {
+    const agents = await ring(env(), "+447700900999");
     expect(agents).not.toContain("agent_asg");
-    expect(agents[0]).toBe("agent_jarvis");
+  });
+  it("sends everyone to JARVIS when ASG_LINE is off", async () => {
+    const e = env();
+    e.ASG_LINE = "off";
+    expect(await ring(e, "+447700900123")).not.toContain("agent_asg");
+  });
+  it("refuses a callback without consent", async () => {
+    const res = await route(
+      new Request("https://jarvis.test/asg/callback", {
+        method: "POST",
+        headers: { authorization: "Bearer secret-token", "content-type": "application/json" },
+        body: JSON.stringify({ to: "+447700900123" }),
+      }),
+      env(),
+      ctx,
+    );
+    expect(res.status).toBe(400);
   });
 });
