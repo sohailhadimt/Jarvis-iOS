@@ -71,6 +71,12 @@ export interface Env {
   ASG_AGENT_ID?: string;
   /** "off" sends every caller to JARVIS again. */
   ASG_LINE?: string;
+  /** Bearer key for POST /alert (proactive JARVIS alert calls). Worker secret. */
+  ALERT_KEY?: string;
+  /** "off" stops proactive alert calls and texts. */
+  ALERT_LINE?: string;
+  /** Max alert calls per London day (default 3). */
+  ALERT_MAX_PER_DAY?: string;
   ELEVENLABS_WEBHOOK_SECRET?: string;
   /** Set to "true" to send conversation_config_override on inbound register-call. Outbound always sends it. */
   ELEVENLABS_CALL_OVERRIDES?: string;

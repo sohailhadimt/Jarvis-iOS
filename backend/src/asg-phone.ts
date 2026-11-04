@@ -115,6 +115,25 @@ export async function captureAsgLead(env: Env, data: Record<string, unknown>): P
       nowIso(),
     ],
   );
+  try {
+    const hotText = `${pick("summary")} ${pick("needs")} ${String(analysis.transcript_summary ?? "")}`;
+    const { fireAlert, isHotLead } = await import("./proactive-alert");
+    const origin = (await dbFirst<{ worker_origin: string }>(env, "SELECT worker_origin FROM call_settings WHERE id = 'default'"))?.worker_origin;
+    if (origin && pick("do_not_contact") !== "true" && isHotLead(hotText)) {
+      await fireAlert(env, {
+        type: "hot_lead",
+        summary: `A caller to the ASG line wants to buy. ${pick("needs")}`.slice(0, 300),
+        who: [pick("caller_name"), pick("company")].filter(Boolean).join(" from "),
+        value: "",
+        when: pick("preferred_times"),
+        meet_link: "",
+        details: [pick("email"), pick("summary")].filter(Boolean).join(" | ").slice(0, 600),
+        dedupe_key: `lead:${String(data.conversation_id ?? "")}`,
+      }, origin.replace(/\/$/, ""));
+    }
+  } catch {
+    // An alert failure never loses the lead.
+  }
   return true;
 }
 

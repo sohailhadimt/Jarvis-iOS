@@ -80,6 +80,14 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
       const { asgVoiceWebhook } = await import("./asg-phone");
       return asgVoiceWebhook(request, env, asgVoice[1]);
     }
+    if (request.method === "POST" && path === "/alert") {
+      const { alertRoute } = await import("./proactive-alert");
+      return alertRoute(request, env);
+    }
+    {
+      const pa = await import("./proactive-alert");
+      if (pa.isAlertWebhook(request.method, path)) return pa.alertWebhook(request, env, path);
+    }
     if (isCallWebhook(request.method, path)) return handleCallWebhook(request, env, path);
     const auth = authorize(request, env.JARVIS_APP_TOKEN);
     if (!auth.ok) return auth.response;
