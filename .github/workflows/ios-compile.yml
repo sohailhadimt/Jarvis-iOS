@@ -1,0 +1,79 @@
+name: iOS compile
+
+# Keep a queued Mac compile if another commit lands. GitHub cancelled c50923f
+# before a hosted runner accepted it.
+concurrency:
+  group: ios-compile-${{ github.ref }}
+  cancel-in-progress: false
+
+on:
+  push:
+    branches:
+      - cursor/inbound-call-screening-afd7
+      - main
+    paths:
+      - "JARVIS/**"
+      - "JARVISWidgets/**"
+      - "JARVISVoiceTests/**"
+      - "Shared/**"
+      - "project.yml"
+      - ".github/workflows/ios-compile.yml"
+  workflow_dispatch:
+
+jobs:
+  compile:
+    name: Compile JARVIS
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain || true
+
+      - name: Compile for the iOS Simulator
+        run: |
+          xcodebuild \
+            -project JARVIS.xcodeproj \
+            -scheme JARVIS \
+            -destination 'generic/platform=iOS Simulator' \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Voice turn fixtures
+        run: |
+          set -euo pipefail
+          # xcodebuild -showdestinations prints the list on stderr, so read simctl instead.
+          ID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)
+          for runtime, devices in data.get("devices", {}).items():
+              if "iOS" not in runtime:
+                  continue
+              for device in devices:
+                  name = device.get("name", "")
+                  if device.get("isAvailable") and name.startswith("iPhone"):
+                      print(device["udid"])
+                      sys.exit(0)
+          sys.exit(1)
+          ')
+          echo "Testing on simulator ${ID}"
+          xcodebuild \
+            -project JARVIS.xcodeproj \
+            -scheme JARVIS \
+            -destination "platform=iOS Simulator,id=${ID}" \
+            -configuration Debug \
+            -only-testing:JARVISVoiceTests \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            test

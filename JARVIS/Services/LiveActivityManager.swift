@@ -27,8 +27,10 @@ final class LiveActivityManager {
         if !staleIDs.isEmpty {
             Task { await Self.dismiss(ids: staleIDs, finalState: nil) }
         }
-        if activityID != nil {
+        if let activityID {
             activityLog.info("Live Activity already running")
+            lastState = state
+            Task { await Self.pushUpdate(id: activityID, state: state) }
             return true
         }
         do {

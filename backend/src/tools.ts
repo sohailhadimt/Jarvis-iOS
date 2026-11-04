@@ -118,6 +118,19 @@ export function toolsFor(agent: AgentName): LlmTool[] {
   }));
 }
 
+export function toolsForNames(names: readonly string[]): LlmTool[] {
+  const out: LlmTool[] = [];
+  for (const name of names) {
+    const spec = SPECS[name as ToolName];
+    if (!spec) continue;
+    out.push({
+      type: "function",
+      function: { name, description: spec.description, parameters: spec.parameters },
+    });
+  }
+  return out;
+}
+
 export function parseToolArgs(raw: string): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } {
   if (!raw.trim()) return { ok: true, value: {} };
   try {
@@ -142,8 +155,10 @@ export async function executeTool(
   actionLevel: string,
   name: string,
   args: Record<string, unknown>,
+  allow?: readonly string[],
 ): Promise<ToolOutcome> {
-  if (!(ALLOWED_TOOLS[agent] as string[]).includes(name)) {
+  const permitted = allow ?? (ALLOWED_TOOLS[agent] as readonly string[]);
+  if (!permitted.includes(name)) {
     return { stop: false, result: { ok: false, error: `Tool ${name} is not allowed for the ${agent} agent.` } };
   }
   switch (name as ToolName) {

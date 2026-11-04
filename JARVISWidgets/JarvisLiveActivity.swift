@@ -21,12 +21,15 @@ struct JarvisLiveActivity: Widget {
                     .tint(.red)
                 }
                 DynamicIslandExpandedRegion(.center) {
-                    Label(context.state.phase.label, systemImage: context.state.phase.symbol)
+                    Label(context.state.headline, systemImage: context.state.headlineSymbol)
                         .font(.headline)
                         .foregroundStyle(IslandStyle.teal)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(alignment: .leading, spacing: 2) {
+                        if !context.state.callStatus.isEmpty, context.state.phase != .idle {
+                            Text(context.state.callStatus).lineLimit(1).foregroundStyle(IslandStyle.teal)
+                        }
                         if !context.state.reply.isEmpty {
                             Text(context.state.reply).lineLimit(2).foregroundStyle(.white)
                         }
@@ -41,12 +44,17 @@ struct JarvisLiveActivity: Widget {
                 StaticOrb(phase: context.state.phase).frame(width: 22, height: 22)
             } compactTrailing: {
                 VStack(alignment: .trailing, spacing: 0) {
-                    Text(context.state.phase.label)
+                    Text(context.state.headline)
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(IslandStyle.teal)
                         .lineLimit(1)
                     if !context.state.reply.isEmpty {
                         Text(context.state.reply)
+                            .font(.system(size: 8))
+                            .lineLimit(1)
+                            .foregroundStyle(.white.opacity(0.85))
+                    } else if !context.state.callStatus.isEmpty {
+                        Text(context.state.callStatus)
                             .font(.system(size: 8))
                             .lineLimit(1)
                             .foregroundStyle(.white.opacity(0.85))
@@ -74,8 +82,11 @@ struct LockScreenActivityView: View {
         HStack(spacing: 12) {
             StaticOrb(phase: state.phase).frame(width: 52, height: 52)
             VStack(alignment: .leading, spacing: 3) {
-                Label(state.phase.label, systemImage: state.phase.symbol)
+                Label(state.headline, systemImage: state.headlineSymbol)
                     .font(.headline).foregroundStyle(IslandStyle.teal)
+                if !state.callStatus.isEmpty, state.phase != .idle {
+                    Text(state.callStatus).font(.caption).lineLimit(1).foregroundStyle(IslandStyle.teal)
+                }
                 if !state.transcript.isEmpty {
                     Text("“\(state.transcript)”").font(.caption).lineLimit(1).foregroundStyle(.white.opacity(0.7))
                 }

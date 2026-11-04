@@ -82,7 +82,7 @@ struct CloudSettingsView: View {
                 }
                 report = lines.joined(separator: " ")
             } catch {
-                report = error.localizedDescription
+                report = JarvisLines.explain(error)
             }
         }
     }

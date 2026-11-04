@@ -78,16 +78,17 @@ Other settings:
 
 The control is in the Action Button's **Controls** list.
 
-1. Run the app and start a session once, then allow **Microphone** and **Speech Recognition**. iOS can only show those prompts while JARVIS is on screen, so the first session has to start from the app (hold the mic, tap Converse, or use the Talk to JARVIS shortcut below).
-2. Open the iPhone **Settings > Action Button**, swipe to **Controls**, tap the control, and search **JARVIS**.
-3. Press the Action Button. JARVIS starts in the Dynamic Island (Listening, then Thinking, then Responding) and does not open the app. Press the Action Button again to end it. The red stop button on the Live Activity ends it too.
+1. Run the app and start a session once, then allow **Microphone** and **Speech Recognition**. iOS can only show those prompts while JARVIS is on screen, so the first session has to start from the app (hold the mic, tap Converse, or say the phrase below).
+2. Say **Hey Siri, JARVIS** or **Hey Siri, Talk to JARVIS**. JARVIS opens and starts listening.
+3. Open the iPhone **Settings > Action Button**, swipe to **Controls**, tap the control, and search **Talk to JARVIS**. Pressing the Action Button uses that same intent: the app opens straight into listening.
+4. The **JARVIS** toggle is still there. It starts a session in the Dynamic Island without opening the app. Press it again to end that session. The red stop button on the Live Activity ends it too.
 
-**Talk to JARVIS** is still a shortcut: Settings > Action Button > Shortcut > Choose a Shortcut > JARVIS > Talk to JARVIS. That one opens the app and starts listening. You can also say "Hey Siri, Talk to JARVIS" or "Hey Siri, Toggle JARVIS".
+You can also say "Hey Siri, Toggle JARVIS". Lock Screen widgets (circular, rectangular, inline) open listening when tapped. The Home Screen widget still opens StandBy.
 
 ## 8. StandBy
 
 - **In-app StandBy view:** put the phone on charge and turn it sideways (landscape) with JARVIS open. The screen goes black with a large orb. Tap the orb to talk, or tap ∞ for a continuous conversation. You can turn this off in Appearance.
-- **iOS StandBy widget:** iOS StandBy (charging, landscape, locked) only shows **widgets and Live Activities**, not full apps. To add the widget: lock the phone, put it on charge in landscape, long-press the StandBy widget stack, tap **+**, and add **JARVIS**. Tapping it opens the in-app StandBy view. The same widget can also go on the Lock Screen (circular, rectangular, or inline) and the Home Screen.
+- **iOS StandBy widget:** iOS StandBy (charging, landscape, locked) only shows **widgets and Live Activities**, not full apps. To add the widget: lock the phone, put it on charge in landscape, long-press the StandBy widget stack, tap **+**, and add **JARVIS**. On the Home Screen, tapping it opens the in-app StandBy view. On the Lock Screen, tapping the circular, rectangular, or inline widget opens JARVIS listening. Control Center has **Talk to JARVIS** (opens listening) and **JARVIS** (Dynamic Island toggle). Both need iOS 18.
 
 ## 9. Talking to other apps (tools)
 
@@ -151,10 +152,11 @@ Each one is only asked for the first time a feature needs it. You can change the
 
 ## 10. What iOS limits (please read)
 
-- **Background microphone:** iOS lets the app keep listening only while its audio session is active and a Live Activity is showing. That covers a session started from the app or from the Action Button control. If iOS ends the session (for example a phone call, or another app taking over the audio), press the Action Button again. iOS does not allow an always-on "Hey JARVIS" wake word for third-party apps.
-- **First Action Button press:** the control cannot show the microphone or speech permission prompts. Start a session in the app once and allow both. After that, the control can listen without bringing the app forward. Live Activities must also be allowed for JARVIS.
-- **Speech recognition** uses Groq Whisper when a Groq API key is saved. Otherwise it runs on-device when your iPhone supports it for English (UK). If on-device recognition isn't available, Apple's servers are used.
-- **The Live Activity** updates when the state changes (Listening, Thinking, Responding), not 60 times a second. The animated orb is only inside the app, because widgets cannot animate continuously. The Dynamic Island shows a still teal orb, the status, and the latest reply.
+- **Background work stays on the Cloudflare Worker.** Tasks, call screening, question timeouts, and problem-call checks run on the worker cron, which keeps going when the phone is locked. The iPhone only wakes JARVIS into listening and shows status. It does not run that queue.
+- **Background microphone:** iOS lets the app keep listening only while its audio session is active and a Live Activity is showing. That covers a session started from the app or from the JARVIS toggle. If iOS ends the session (for example a phone call, or another app taking over the audio), press the Action Button again. iOS does not allow an always-on "Hey JARVIS" wake word for third-party apps. "Hey Siri, JARVIS" is the system shortcut that opens listening.
+- **First Action Button press:** the control cannot show the microphone or speech permission prompts. Start a session in the app once and allow both. After that, the JARVIS toggle can listen without bringing the app forward. Talk to JARVIS opens the app. Live Activities must also be allowed for JARVIS, unless you turn the Live Activity switch off in JARVIS settings.
+- **Speech recognition** for a live voice turn streams on the iPhone. A finished sentence is sent as that transcript. A whole-file Groq Whisper upload is not used for hands-free turns. If on-device recognition isn't available, Apple's servers are used.
+- **The Live Activity** is optional (Settings > Always available). It updates when the state changes (Listening, Thinking, Responding, or an active call), not 60 times a second. The animated orb is only inside the app, because widgets cannot animate continuously. The Dynamic Island shows a still teal orb, the status, an active call when one is open, and the latest reply.
 - **Live Activities** last up to 8 hours on screen.
 
 ### Things that would need a newer SDK, or don't exist publicly
@@ -175,9 +177,47 @@ If a future SDK adds these, they could be adopted.
 - **Tools don't work with the Custom agent endpoint**: that service must support OpenAI-style function calling. Otherwise set routing to *Chat only*.
 - **App won't open after a week**: this is free signing. Connect the phone and press Run again.
 
+## Start-up sequence
+
+JARVIS plays an original sequence when the app opens, and again after it has been in the background for more than five minutes. It is on by default. Settings > This iPhone has **Start-up sequence** and **Short version**. Tap anywhere to skip. Reduce Motion uses a short fade instead of the rings.
+
+The phases are a boot line and loading bar, a collapse to a centre dot, concentric rings with “J.A.R.V.I.S.”, then a power-up that shrinks onto the home orb. Sounds are generated synth tones in `JARVIS/Resources/Startup`. Spoken lines use the George voice. `scripts/bundle-startup-voice.mjs` writes them into the app when `ELEVENLABS_API_KEY` is set at build time. Otherwise the first launch that has a saved ElevenLabs key caches them, and later opens play the cache. The sequence does not call ElevenLabs on every open.
+
+Startup chime turns the synth effects on or off. Spoken lines and effects follow the iPhone silent switch. The sequence waits until Face ID unlock, and it stays off when a voice session is already starting, a briefing is due, or a call-message notification is opening a card.
+
+The next Codemagic `ios-testflight` archive on this branch includes the sequence. GitHub Actions job **iOS compile** builds the app for the simulator without signing, which checks that the Swift compiles. It does not upload a TestFlight build.
+
+## Call interceptor
+
+iOS cannot intercept a normal carrier call. Conditional forwarding sends busy, unanswered, and unreachable calls to the JARVIS Twilio number. The drawer and Calling settings open **Interceptor**.
+
+The switch is on until you turn it off. JARVIS then answers with: "You've reached Sohail Hadi's line. He's unavailable right now. I'm J.A.R.V.I.S., his assistant. May I take a message?" He takes the message and sends the usual call summary by push or text. With the switch off and Busy mode off, he says "Please try again later." and texts who called.
+
+Busy mode answers on its own, including when the switch is off. Settings > Focus > a Focus > Add Filter > JARVIS Busy mode turns it on. The Shortcuts action **Set JARVIS busy mode** does the same. After that Focus ends, busy mode turns off the next time you open the app. The home ring shows BUSY while it is on and JARVIS is idle.
+
+The screen lists the generic GSM codes `**67*`, `**61*`, and `**62*`, then the JARVIS number and `#`, plus `##002#` to cancel. The number comes from the worker's calling config. Some UK networks use a different code. A direct call to the JARVIS number still uses the existing screening greeting.
+
+The next Codemagic `ios-testflight` archive on this branch includes the interceptor. This environment does not upload a TestFlight build.
+
+## Voice mode
+
+In-app voice uses `AVAudioSession` play-and-record in voice-chat mode, and turns on voice processing (echo cancellation, automatic gain, and noise suppression) on the capture engine so JARVIS does not hear himself. The simulator often refuses voice processing. Settings > Voice > Voice timing shows whether it is on.
+
+A Silero model is not in this build, and neither are LiveKit's turn-detector weights. The microphone meter is a small fixed recurrent net on signal-to-noise, speech-band energy, spectral flatness, and level. The first 300 ms learns a noise floor from the quieter samples, so speech in that window does not become the floor. Speech has to last about 250 ms, so a click or a cough does not start a turn. The recogniser is given the real microphone the whole time. Replacing a pause with digital silence was making Apple Speech finalise and drop the rest of the sentence. With Voice ID enrolled, another speaker is still replaced with silence. Without it, a far-field frame does not start a turn, but a loud television can until a voice print is saved.
+
+End of turn follows the published Realtime `semantic_vad` loop and LiveKit's turn-detector control, on the transcript rather than on silence alone. The words get a score for whether the turn is finished. A finished sentence still waits about 0.65 seconds, and never under 0.55. Gemini Live uses 600 ms of server silence. An unfinished one, such as a trailing "and" or "uhhm", waits longer. Settings > Voice > Eagerness sets that cap the way the Realtime API documents it: low 8 seconds, medium 4 seconds, high 2 seconds. Medium is the default. If recognition has not produced words yet, the turn stays open, so a breath cannot cut the sentence off.
+
+If you talk while JARVIS is speaking, playback stops after about 300 ms of your own close speech, and only when echo cancellation is actually on. His leftover echo is below that signal-to-noise bar. Turn and barge events are posted to `POST /debug/voice` when the cloud token is set.
+
+The reply streams. Apple Speech partials are the transcript, the model streams tokens, and ElevenLabs (George) starts on the first sentence chunk while the rest of the answer is still arriving. If that key is missing or the stream fails, the iPhone's British voice speaks the same words. Phone calls still use Polly on the worker. If no reply audio has started by 1.2 seconds, JARVIS says a short "Right.", "One moment.", or "Yes." on the iPhone voice and stops it the moment George begins. Connections are opened when a voice session starts. The ring already has a thinking pulse, and it reads the meter on the display link rather than on every audio buffer.
+
+Settings > Voice > Voice timing shows the last end-of-speech to first-audio time, the false-trigger count, and the end-of-turn score. The same synthetic frames run in GitHub Actions as `JARVISVoiceTests`. That checks the timings (speech after 250 ms, a finished sentence after about 650 ms, an unfinished sentence waiting longer, high eagerness shorter than low, barge-in near 300 ms only with echo cancellation, noise and other speakers ignored). It does not measure a real room. On an iPhone the caption line shows vad, stt, llm, tts, and play from the moment speech stops. The target is first George audio within about 1.8 seconds of that moment.
+
+The next Codemagic `ios-testflight` archive on this branch includes this voice path. This environment does not upload a TestFlight build.
+
 ## Project layout
 
-- `project.yml`: the XcodeGen spec (2 targets: the JARVIS app and the JARVISWidgets extension).
+- `project.yml`: the XcodeGen spec (the JARVIS app, the JARVISWidgets extension, and the JARVISVoiceTests bundle). The test bundle is not part of the TestFlight archive.
 - `JARVIS/`: app code (engine, services, settings, views, intents).
 - `JARVISWidgets/`: Live Activity, Dynamic Island, the Control Center / Action Button control, and the StandBy/Lock Screen widget.
 - `Shared/`: code compiled into both targets (Live Activity attributes, the control toggle intent, the End-session intent, colours, the static orb).

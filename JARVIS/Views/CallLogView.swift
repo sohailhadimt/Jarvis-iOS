@@ -8,7 +8,20 @@ struct CallLogView: View {
 
     var body: some View {
         List {
-            if rows.isEmpty {
+            if !engine.callMessages.isEmpty {
+                Section("Messages") {
+                    ForEach(engine.callMessages) { message in
+                        Button {
+                            engine.showCallMessage(message.id)
+                        } label: {
+                            CallMessageCard(message: message)
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(Color.black)
+                    }
+                }
+            }
+            if rows.isEmpty && engine.callMessages.isEmpty {
                 Text("No calls yet. Say call someone and tell them the message.")
                     .font(.footnote)
                     .foregroundStyle(.white.opacity(0.7))
@@ -32,9 +45,25 @@ struct CallLogView: View {
         .onAppear {
             rows = CallLogStore.entries()
             engine.refreshOpenCalls()
+            engine.refreshCallMessages()
+        }
+        .onChange(of: engine.callMessages.count) { _, _ in
+            rows = CallLogStore.entries()
         }
         .onChange(of: engine.callLogTick) { _, _ in
             rows = CallLogStore.entries()
+        }
+        .sheet(isPresented: Binding(
+            get: { engine.focusedCallMessageID != nil },
+            set: { if !$0 { engine.dismissFocusedCallMessage() } }
+        )) {
+            if let message = engine.callMessages.first(where: { $0.id == engine.focusedCallMessageID }) {
+                CallMessageDetail(message: message)
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(hex: "#05080F").ignoresSafeArea())
+            }
         }
     }
 
@@ -45,9 +74,14 @@ struct CallLogView: View {
             } label: {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
-                        Text(row.contactName)
+                        Text(row.displayName)
                             .font(.subheadline.weight(.medium))
                             .foregroundStyle(.white)
+                        if row.direction == "inbound" {
+                            Text("In")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(settings.accentColor)
+                        }
                         Spacer()
                         Text(row.titleStatus)
                             .font(.caption)
@@ -64,9 +98,15 @@ struct CallLogView: View {
                 Text(row.number)
                     .font(.caption.monospaced())
                     .foregroundStyle(.white.opacity(0.7))
-                Text(row.brief)
-                    .font(.footnote)
-                    .foregroundStyle(.white)
+                if let reason = row.reason, !reason.isEmpty {
+                    Text(reason)
+                        .font(.footnote)
+                        .foregroundStyle(.white)
+                } else {
+                    Text(row.brief)
+                        .font(.footnote)
+                        .foregroundStyle(.white)
+                }
                 if !row.summary.isEmpty {
                     Text(row.summary)
                         .font(.body)
@@ -107,6 +147,9 @@ struct CallBriefBar: View {
     var body: some View {
         if let brief = engine.pendingCallBrief {
             VStack(alignment: .leading, spacing: 8) {
+                Text("APPROVAL")
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(1.4)
                 Text("Call \(brief.contactName)?")
                     .font(.subheadline.weight(.semibold))
                 Text(brief.number)
@@ -118,10 +161,16 @@ struct CallBriefBar: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 HStack(spacing: 10) {
-                    Button("Decline") { engine.declinePendingCall() }
-                        .buttonStyle(.bordered)
-                    Button("Approve") { engine.approvePendingCall() }
-                        .buttonStyle(.borderedProminent)
+                    Button("Decline") {
+                        JarvisHaptics.tap()
+                        engine.declinePendingCall()
+                    }
+                    .buttonStyle(.bordered)
+                    Button("Approve") {
+                        JarvisHaptics.tap()
+                        engine.approvePendingCall()
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
             }
             .padding(14)

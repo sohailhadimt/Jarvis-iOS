@@ -1,4 +1,5 @@
 import { agentSystemPrompt, plannerSystemPrompt, plannerUserPrompt } from "./agents";
+import { isRoutine, openMission } from "./missions";
 import { computeNextRun, cronMatches, parseCron } from "./cron";
 import { dbAll, dbFirst, dbRun, logActivity, logProgress } from "./db";
 import { clip, newId, nowIso, parseStringArray } from "./http";
@@ -63,6 +64,17 @@ async function runDueJobs(env: Env): Promise<void> {
     const due = !job.next_run_at || job.next_run_at <= nowStamp;
     if (!due) continue;
     if (created >= 3) break;
+    if (isRoutine(job.id)) {
+      const missionId = await openMission(env, job.goal);
+      await dbRun(env, "UPDATE scheduled_jobs SET last_run_at = ?, next_run_at = ? WHERE id = ?", [
+        nowStamp,
+        computeNextRun(now, expr),
+        job.id,
+      ]);
+      await logActivity(env, "scheduler", "routine.ran", null, { job_id: job.id, mission_id: missionId, cron: job.cron });
+      created++;
+      continue;
+    }
     const taskId = newId("task");
     await dbRun(
       env,
@@ -139,6 +151,15 @@ async function planOneTask(env: Env): Promise<boolean> {
       );
       await logProgress(env, task.id, null, "error", error, null);
       await logActivity(env, "orchestrator", "task.plan_failed", task.id, { error: parsed.error });
+      void import("./owner-alert").then((mod) =>
+        mod.reportProblem(env, {
+          sourceId: `task:${task.id}`,
+          kind: "failed_task",
+          urgent: false,
+          summary: "A task failed and needs you.",
+          detail: error,
+        }),
+      );
       return true;
     }
     await dbRun(
@@ -488,6 +509,15 @@ export async function recomputeTaskStatus(env: Env, taskId: string): Promise<voi
       [error, now, taskId],
     );
     await logActivity(env, "orchestrator", "task.failed", taskId, { subtask_id: failed.id, error });
+    void import("./owner-alert").then((mod) =>
+      mod.reportProblem(env, {
+        sourceId: `task:${taskId}`,
+        kind: "failed_task",
+        urgent: false,
+        summary: "A task failed and needs you.",
+        detail: error,
+      }),
+    );
     return;
   }
   if (subs.some((sub) => sub.status === "pending" || sub.status === "running")) {
@@ -534,6 +564,16 @@ export async function recomputeTaskStatus(env: Env, taskId: string): Promise<voi
     [summary, now, now, taskId],
   );
   await logActivity(env, "orchestrator", "task.completed", taskId, { qc_pass: verdict });
+  const finished = summary.replace(/\s+/g, " ").trim().slice(0, 180);
+  void import("./owner-alert").then((mod) =>
+    mod.reportProblem(env, {
+      sourceId: `task:${taskId}`,
+      kind: "task_done",
+      urgent: false,
+      summary: finished ? `A task has finished. ${finished}` : "A task has finished.",
+      detail: summary.slice(0, 800),
+    }),
+  );
 }
 
 function readMessages(raw: string | null): ChatMessage[] | null {

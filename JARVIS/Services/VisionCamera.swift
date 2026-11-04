@@ -1,6 +1,8 @@
 import AVFoundation
 import CoreImage
 import CoreVideo
+import Observation
+import SwiftUI
 import UIKit
 
 enum CameraOwner: Hashable {
@@ -242,7 +244,7 @@ final class VisionCamera {
             }
             owners.remove(owner)
             isLive = false
-            note = problem
+            note = JarvisLines.explain(problem)
             return
         }
         guard owners.contains(owner) else {
