@@ -215,7 +215,6 @@ jobs:
           OWNER_PHONE: ${{ secrets.OWNER_PHONE }}
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
           ELEVENLABS_AGENT_ID: ${{ secrets.ELEVENLABS_AGENT_ID }}
-          ELEVENLABS_APP_AGENT_ID: ${{ secrets.ELEVENLABS_APP_AGENT_ID }}
           ELEVENLABS_WEBHOOK_SECRET: ${{ secrets.ELEVENLABS_WEBHOOK_SECRET }}
           ELEVENLABS_FORCE_POLLY: ${{ secrets.ELEVENLABS_FORCE_POLLY }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
@@ -270,7 +269,6 @@ jobs:
             ELEVENLABS_AGENT_ID
           )
           optional=(
-            ELEVENLABS_APP_AGENT_ID
             ELEVENLABS_WEBHOOK_SECRET
             ELEVENLABS_FORCE_POLLY
             TAVILY_API_KEY
