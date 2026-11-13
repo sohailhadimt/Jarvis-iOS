@@ -157,7 +157,8 @@ export async function routePersona(
   return null;
 }
 
-export async function runPersonaTick(env: Env): Promise<void> {
+/** Returns true when at least one persona agent took a step. */
+export async function runPersonaTick(env: Env): Promise<boolean> {
   await ensurePersonas(env);
   const now = nowIso();
   const candidates = await dbAll<TaskRow>(
@@ -176,6 +177,7 @@ export async function runPersonaTick(env: Env): Promise<void> {
     if (await claimPersona(env, task)) claimed.push(task);
   }
   await Promise.all(claimed.map((task) => stepPersona(env, task)));
+  return claimed.length > 0;
 }
 
 async function claimPersona(env: Env, task: TaskRow): Promise<boolean> {

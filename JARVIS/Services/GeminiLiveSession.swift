@@ -21,6 +21,8 @@ final class GeminiLiveSession: @unchecked Sendable {
     private var reducer = LiveTurnReducer()
     private var sendFailures = 0
     private(set) var modality: LiveModality = .text
+    /// Server VAD pause that ends the user's turn. Set before `open`.
+    var silenceMs = LiveWire.silenceDurationMs
 
     /// 100 ms of 16 kHz 16-bit mono. One socket message per slice, still a continuous stream for server VAD.
     private let batchBytes = 3_200
@@ -60,7 +62,7 @@ final class GeminiLiveSession: @unchecked Sendable {
         socket = task
         lock.unlock()
         task.resume()
-        let payload = LiveWire.setup(instruction: instruction, declarations: tools, modality: modality)
+        let payload = LiveWire.setup(instruction: instruction, declarations: tools, modality: modality, silenceMs: silenceMs)
         let result = await withCheckedContinuation { (continuation: CheckedContinuation<SetupResult, Never>) in
             self.lock.lock()
             self.setupWait = continuation

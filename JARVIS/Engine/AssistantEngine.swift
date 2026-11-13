@@ -192,6 +192,17 @@ final class AssistantEngine {
     @ObservationIgnored private var geminiLive: GeminiLiveSession?
     @ObservationIgnored private var liveReconnects = 0
     @ObservationIgnored private var liveReopening = false
+    /// Speech was heard while George was talking. Volume is ducked until the transcript says user or echo.
+    @ObservationIgnored private var echoCheckActive = false
+    @ObservationIgnored private var echoTimer: Task<Void, Never>?
+    /// Everything the transcript has heard since the echo check began. Live sends it in pieces.
+    @ObservationIgnored private var echoHeard = ""
+    /// The live turn was George's own voice. Its reply is dropped instead of spoken.
+    @ObservationIgnored private var suppressLiveTurn = false
+    @ObservationIgnored private var suppressLiveUntil = Date.distantPast
+    /// The last few lines George spoke, compared against what the microphone hears.
+    @ObservationIgnored private var liveRecentLines: [String] = []
+    @ObservationIgnored private var georgeEndedAt = Date.distantPast
     /// "Gemini Live connected", "Connecting…", or a plain sentence when Live did not open.
     private(set) var voiceLink: String?
     /// vad, stt, llm, tts, and play, in milliseconds from the end of speech.
@@ -1226,6 +1237,7 @@ final class AssistantEngine {
         let instruction = liveInstruction()
         let tools = LiveWire.declarations(from: ToolCatalog.liveDefinitions(settings: AppSettings.shared))
         let session = GeminiLiveSession()
+        session.silenceMs = LiveWire.silenceMs(endpointSilence: AppSettings.shared.endpointSilence)
         session.onEffect = { [weak self] effect in
             Task { @MainActor in
                 self?.handleLive(effect)
@@ -1369,26 +1381,48 @@ final class AssistantEngine {
         case .ready:
             break
         case .speak(let text):
+            if liveTurnSuppressed {
+                VoiceDebugLog.note("echo", "dropped reply to own voice")
+                return
+            }
             LatencyLog.mark("llm")
             publishLatency()
             enqueueLiveSpeech(text)
         case .interrupt:
+            if beginEchoCheck() { return }
             VoiceDebugLog.note("barge-in", "live")
             stopLivePlayback()
         case .speechStart:
+            if beginEchoCheck() { return }
+            suppressLiveTurn = false
             userIsSpeaking = true
             stopLivePlayback()
             pushActivity()
         case .speechEnd:
             userIsSpeaking = false
+            if !echoCheckActive && !liveTurnSuppressed {
+                output.resetContinuity()
+            }
             LatencyLog.noteSpeechEnd()
             VoiceDebugLog.note("turn-complete", "activity-end")
             pushActivity()
         case .user(let text):
+            if echoCheckActive {
+                switch resolveEchoCheck(heard: text) {
+                case .echo, .undecided: return
+                case .user: break
+                }
+            }
+            if liveTurnSuppressed { return }
             transcript = text
             userIsSpeaking = true
             pushActivity()
         case .userFinal(let text):
+            if liveTurnSuppressed {
+                suppressLiveTurn = false
+                VoiceDebugLog.note("echo", "ignored own voice: \(String(text.prefix(40)))")
+                return
+            }
             transcript = text
             VoiceDebugLog.note("input-transcript", text)
             LatencyLog.mark("stt")
@@ -1428,9 +1462,14 @@ final class AssistantEngine {
                     guard let self, self.usingGeminiLive else { return }
                     self.phase = .speaking
                     self.reply = line
+                    self.liveRecentLines.append(line)
+                    if self.liveRecentLines.count > 3 { self.liveRecentLines.removeFirst() }
                     self.pushActivity()
                     await self.speak(line, voiceID: self.brainVoiceID)
-                    if self.usingGeminiLive, self.phase == .speaking {
+                    self.georgeEndedAt = Date()
+                    // Stay "speaking" between sentences so the orb and echo check do not flicker.
+                    let more = !(self.spokenQueue?.isDrained ?? true)
+                    if self.usingGeminiLive, self.phase == .speaking, !more {
                         self.phase = .listening
                         self.pushActivity()
                     }
@@ -1441,13 +1480,89 @@ final class AssistantEngine {
                     guard let key = KeychainStore.get(.elevenLabs) else { return }
                     self.output.prefetch(text: line, voiceID: self.brainVoiceID, apiKey: key,
                                          stability: settings.stability, similarity: settings.similarity)
+                },
+                note: { [weak self] line in
+                    self?.output.noteSentence(line)
                 }
             )
         }
         spokenQueue?.add(spoken)
     }
 
+    private var liveTurnSuppressed: Bool {
+        suppressLiveTurn && Date() < suppressLiveUntil
+    }
+
+    /// Speech started while George is audible, or just after. Duck him instead of stopping,
+    /// and let the transcript decide. Returns false when George is not speaking.
+    private func beginEchoCheck() -> Bool {
+        if echoCheckActive { return true }
+        let audible = phase == .speaking || Date().timeIntervalSince(georgeEndedAt) < 0.6
+        guard audible, !liveRecentLines.isEmpty, !microphoneMuted else { return false }
+        echoCheckActive = true
+        echoHeard = ""
+        output.duck(true)
+        VoiceDebugLog.note("echo-check", "ducked")
+        echoTimer?.cancel()
+        echoTimer = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(1_200))
+            guard !Task.isCancelled else { return }
+            self?.echoCheckTimedOut()
+        }
+        return true
+    }
+
+    private func resolveEchoCheck(heard: String) -> LiveEcho.Verdict {
+        let piece = heard.trimmingCharacters(in: .whitespacesAndNewlines)
+        if echoHeard.isEmpty || piece.hasPrefix(echoHeard) {
+            echoHeard = piece
+        } else if !echoHeard.hasSuffix(piece) {
+            echoHeard += " " + piece
+        }
+        let verdict = LiveEcho.verdict(heard: echoHeard, spoken: liveRecentLines.joined(separator: " "))
+        switch verdict {
+        case .user:
+            endEchoCheck()
+            VoiceDebugLog.note("barge-in", "live user")
+            suppressLiveTurn = false
+            stopLivePlayback()
+        case .echo:
+            endEchoCheck()
+            output.duck(false)
+            markOwnVoice()
+        case .undecided:
+            break
+        }
+        return verdict
+    }
+
+    /// No clear words within 1.2 s: it was George, a cough, or the room. Carry on talking.
+    private func echoCheckTimedOut() {
+        guard echoCheckActive else { return }
+        endEchoCheck()
+        output.duck(false)
+        markOwnVoice()
+        pushActivity()
+    }
+
+    private func markOwnVoice() {
+        suppressLiveTurn = true
+        suppressLiveUntil = Date().addingTimeInterval(8)
+        userIsSpeaking = false
+        VoiceDebugLog.note("echo", "own voice, kept talking")
+    }
+
+    private func endEchoCheck() {
+        echoCheckActive = false
+        echoHeard = ""
+        echoTimer?.cancel()
+        echoTimer = nil
+    }
+
     private func stopLivePlayback() {
+        endEchoCheck()
+        liveRecentLines.removeAll()
+        output.resetContinuity()
         spokenQueue?.cancel()
         spokenQueue = nil
         output.stop()
@@ -1560,6 +1675,8 @@ final class AssistantEngine {
         usingGeminiLive = false
         geminiLive?.stop()
         geminiLive = nil
+        endEchoCheck()
+        suppressLiveTurn = false
         spokenQueue?.cancel()
         spokenQueue = nil
         output.stop()
@@ -3631,8 +3748,12 @@ final class AssistantEngine {
             },
             prefetch: { [weak self] piece in
                 self?.prefetchSpeech(piece)
+            },
+            note: { [weak self] piece in
+                self?.output.noteSentence(piece)
             }
         )
+        output.resetContinuity()
         spokenQueue = queue
         defer {
             if let current = spokenQueue, current === queue {
@@ -4025,14 +4146,20 @@ private final class SpokenQueue {
     private let speak: (String) async -> Void
     private let prefetch: (String) -> Void
 
-    init(speak: @escaping (String) async -> Void, prefetch: @escaping (String) -> Void) {
+    /// Called in arrival order, before any prefetch, so ElevenLabs gets the right previous sentence.
+    private let note: ((String) -> Void)?
+
+    init(speak: @escaping (String) async -> Void, prefetch: @escaping (String) -> Void,
+         note: ((String) -> Void)? = nil) {
         self.speak = speak
         self.prefetch = prefetch
+        self.note = note
     }
 
     func add(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !closed else { return }
+        note?(trimmed)
         pending.append(trimmed)
         if pumping, let latest = pending.last {
             prefetch(latest)
@@ -4051,6 +4178,9 @@ private final class SpokenQueue {
             waiter = cont
         }
     }
+
+    /// No sentence is waiting behind the one playing now.
+    var isDrained: Bool { pending.isEmpty }
 
     func cancel() {
         pending.removeAll()

@@ -1,6 +1,6 @@
 import { sweepInboundCalls } from "./call-settle";
-import { runTick } from "./execute";
 import { sweepHunts } from "./hunt";
+import { startLanes } from "./lanes";
 import { runMissionTick } from "./missions";
 import { sweepOwner } from "./owner-alert";
 import { runPersonaTick } from "./personas";
@@ -15,7 +15,7 @@ export default {
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(
       Promise.all([
-        runTick(env, `cron:${controller.cron}`),
+        startLanes(env, `cron:${controller.cron}`),
         (async () => {
           await runMissionTick(env);
           await runPersonaTick(env);

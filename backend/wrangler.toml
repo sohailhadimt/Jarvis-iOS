@@ -13,6 +13,12 @@ binding = "DB"
 database_name = "jarvis-db"
 database_id = "432f8531-b090-4df4-ad1d-efe720693d86"
 
+# Agent lanes call this same Worker so each step gets a fresh invocation (see src/lanes.ts).
+# To turn parallel agents off, delete these three lines.
+[[services]]
+binding = "SELF"
+service = "jarvis-backend"
+
 [triggers]
 crons = ["*/5 * * * *"]
 
@@ -23,3 +29,5 @@ head_sampling_rate = 1
 [vars]
 ENVIRONMENT = "production"
 ELEVENLABS_FORCE_POLLY = "false"
+# Agents working at the same time (1-6).
+AGENT_LANES = "3"

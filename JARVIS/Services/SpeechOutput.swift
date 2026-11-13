@@ -27,6 +27,16 @@ final class SpeechOutput: NSObject {
     private let deviceSpeech = DeviceSpeech()
     private var fillerActive = false
     private var fillerGeneration = 0
+    /// Sentences of the current reply in the order they were requested, for ElevenLabs context.
+    private var continuity: [String] = []
+    private var ducked = false
+    /// Where the scheduled audio ends on the player's own clock, in seconds.
+    private var timelineNode: ObjectIdentifier?
+    private var timelineEnd: Double = 0
+    /// The next sentence is handed over this long before the current one ends, so the
+    /// player never runs dry between sentences.
+    private static let handoffLead: Double = 0.12
+    private static let duckVolume: Float = 0.25
     /// 50 ms at 24 kHz, 16-bit mono, so the first buffer starts as soon as speech arrives.
     private static let primeBytes: Int = 2_400
     /// 200 ms follow-on buffers.
@@ -64,10 +74,42 @@ final class SpeechOutput: NSObject {
         let key = apiKey
         let stable = stability
         let similar = similarity
+        let previous = previousSentence(for: trimmed)
         prefetchTasks[trimmed] = Task.detached {
             try await ElevenLabsClient.collectSpeech(
-                text: trimmed, voiceID: voice, apiKey: key, stability: stable, similarity: similar)
+                text: trimmed, voiceID: voice, apiKey: key, stability: stable, similarity: similar,
+                previousText: previous)
         }
+    }
+
+    /// A new reply starts. Its first sentence must not borrow the last reply's intonation.
+    func resetContinuity() {
+        continuity.removeAll()
+    }
+
+    /// Records a sentence of the current reply in the order it arrived.
+    func noteSentence(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, continuity.last != trimmed else { return }
+        continuity.append(trimmed)
+        if continuity.count > 8 { continuity.removeFirst(continuity.count - 8) }
+    }
+
+    /// The sentence requested just before `text` in this reply, recording `text` if it is new.
+    private func previousSentence(for text: String) -> String? {
+        if let index = continuity.firstIndex(of: text) {
+            return index > 0 ? continuity[index - 1] : nil
+        }
+        let previous = continuity.last
+        continuity.append(text)
+        if continuity.count > 8 { continuity.removeFirst(continuity.count - 8) }
+        return previous
+    }
+
+    /// Lowers George while the engine decides whether the microphone heard the user or George himself.
+    func duck(_ on: Bool) {
+        ducked = on
+        player?.volume = on ? Self.duckVolume : 1
     }
 
     func bindVoiceGate(_ gate: SpeakerGate) {
@@ -123,8 +165,10 @@ final class SpeechOutput: NSObject {
             return
         }
         try Task.checkCancellation()
+        let previous = previousSentence(for: text.trimmingCharacters(in: .whitespacesAndNewlines))
         let bytes = try await ElevenLabsClient.streamSpeech(
-            text: text, voiceID: voiceID, apiKey: apiKey, stability: stability, similarity: similarity)
+            text: text, voiceID: voiceID, apiKey: apiKey, stability: stability, similarity: similarity,
+            previousText: previous)
         try Task.checkCancellation()
 
         let player = try ensureEngine(monitorMicrophone: monitorMicrophone)
@@ -158,6 +202,7 @@ final class SpeechOutput: NSObject {
                 try Task.checkCancellation()
                 if let buffer = makeBuffer(pending) {
                     track(buffer)
+                    noteScheduled(buffer, on: player)
                     player.scheduleBuffer(buffer, completionHandler: nil)
                 }
                 pending.removeAll(keepingCapacity: true)
@@ -219,6 +264,7 @@ final class SpeechOutput: NSObject {
         for index in 0..<buffers.count {
             let buffer = buffers[index]
             if trackBuffers { track(buffer) }
+            noteScheduled(buffer, on: player)
             if index == lastIndex {
                 player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack,
                                       completionHandler: AudioTaps.playbackFinished(signal))
@@ -226,7 +272,57 @@ final class SpeechOutput: NSObject {
                 player.scheduleBuffer(buffer, completionHandler: nil)
             }
         }
+        watchHandoff(signal, player: player)
         await signal.wait()
+    }
+
+    // MARK: Gapless hand-off
+
+    /// The player's own clock in seconds, or nil before it has rendered.
+    private func playerSeconds(_ player: AVAudioPlayerNode) -> Double? {
+        guard player.isPlaying,
+              let nodeTime = player.lastRenderTime, nodeTime.isSampleTimeValid,
+              let time = player.playerTime(forNodeTime: nodeTime), time.sampleRate > 0 else { return nil }
+        return Double(time.sampleTime) / time.sampleRate
+    }
+
+    private func noteScheduled(_ buffer: AVAudioPCMBuffer, on player: AVAudioPlayerNode) {
+        let id = ObjectIdentifier(player)
+        let now = playerSeconds(player) ?? 0
+        if timelineNode != id {
+            timelineNode = id
+            timelineEnd = now
+        }
+        // After a gap the new audio starts now, not where the old audio ended.
+        if timelineEnd < now { timelineEnd = now }
+        timelineEnd += Double(buffer.frameLength) / pcmFormat.sampleRate
+    }
+
+    /// Fires the sentence-finished signal just before the audio actually ends, so the next
+    /// sentence is already queued on the player. The normal played-back callback still fires
+    /// the same signal if this watcher cannot read the clock.
+    private func watchHandoff(_ signal: OnceSignal, player: AVAudioPlayerNode) {
+        guard timelineNode == ObjectIdentifier(player), playerSeconds(player) != nil else { return }
+        let target = timelineEnd - Self.handoffLead
+        Task { @MainActor [weak self, weak player] in
+            var polls = 0
+            while polls < 3_000 {
+                polls += 1
+                guard let self, let player, self.playbackSignal === signal else { return }
+                guard let now = self.playerSeconds(player) else { return }
+                if now >= target {
+                    signal.fire()
+                    return
+                }
+                let wait = min(0.05, max(0.01, target - now))
+                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+            }
+        }
+    }
+
+    private func resetTimeline() {
+        timelineNode = nil
+        timelineEnd = 0
     }
 
     private func makeBuffer(_ data: Data) -> AVAudioPCMBuffer? {
@@ -324,15 +420,19 @@ final class SpeechOutput: NSObject {
             if !sharedPlayer.isPlaying { sharedPlayer.play() }
             installSharedLevelTap()
             player = sharedPlayer
+            sharedPlayer.volume = ducked ? Self.duckVolume : 1
             return sharedPlayer
         }
         usingSharedPlayback = false
         if let engine, engine.isRunning, let player, engineMonitorsMic == monitorMicrophone {
             if !player.isPlaying { player.play() }
+            player.volume = ducked ? Self.duckVolume : 1
             return player
         }
         stopEngine()
-        return try openEngine(monitorMicrophone: monitorMicrophone)
+        let opened = try openEngine(monitorMicrophone: monitorMicrophone)
+        opened.volume = ducked ? Self.duckVolume : 1
+        return opened
     }
 
     private func installSharedLevelTap() {
@@ -400,6 +500,7 @@ final class SpeechOutput: NSObject {
     private func stopEngine() {
         playbackSignal?.fire()
         playbackSignal = nil
+        resetTimeline()
         player?.stop()
         if mixerTapInstalled {
             engine?.mainMixerNode.removeTap(onBus: 0)
@@ -455,6 +556,9 @@ final class SpeechOutput: NSObject {
     func stop() {
         fillerActive = false
         deviceSpeech.stop()
+        ducked = false
+        resetTimeline()
+        continuity.removeAll()
         for task in prefetchTasks.values {
             task.cancel()
         }
@@ -464,6 +568,7 @@ final class SpeechOutput: NSObject {
             playbackSignal?.fire()
             playbackSignal = nil
             sharedPlayer?.stop()
+            sharedPlayer?.volume = 1
             usingSharedPlayback = false
             player = nil
             onLevel?(0)

@@ -26,7 +26,8 @@ import {
   mapSubtask,
   mapTask,
 } from "./db";
-import { recomputeTaskStatus, runTick } from "./execute";
+import { recomputeTaskStatus } from "./execute";
+import { parseLaneHeaders, runLane, startLanes } from "./lanes";
 import {
   apiError,
   asOptionalString,
@@ -119,6 +120,11 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "POST" && path === "/agent/reply") return agentReply(request, env);
     if (request.method === "GET" && path === "/agent/messages") return agentMessages(env, url);
     if (request.method === "POST" && path === "/tasks") return createTask(request, env, ctx);
+    if (request.method === "POST" && path === "/tick") {
+      const { lane, hop } = parseLaneHeaders(request);
+      ctx.waitUntil(runLane(env, lane, hop));
+      return json({ accepted: true, lane, hop }, 202);
+    }
     if (request.method === "GET" && path === "/tasks") return listTasks(env, url);
     if (request.method === "GET" && parts[0] === "tasks" && parts[1] && parts.length === 2) return getTask(env, parts[1]);
     if (request.method === "GET" && path === "/briefing") return json(await buildBriefing(env));
@@ -243,8 +249,8 @@ async function createTask(request: Request, env: Env, ctx: ExecutionContext): Pr
     [id, goal, schedule, scheduledJobId, now, now],
   );
   await logActivity(env, "api", "task.created", id, { schedule, scheduled_job_id: scheduledJobId });
-  await logProgress(env, id, null, "info", "Task created. Planning runs on this request, then one step every cron tick.", null);
-  ctx.waitUntil(runTick(env, "create"));
+  await logProgress(env, id, null, "info", "Task created. Planning runs on this request, then the agents work in parallel lanes until it is done.", null);
+  ctx.waitUntil(startLanes(env, "create"));
   const task = await dbFirst<TaskRow>(env, "SELECT * FROM tasks WHERE id = ?", [id]);
   return json({ task: task ? mapTask(task) : { id, goal, status: "planning", schedule, scheduled_job_id: scheduledJobId, error: null, result_summary: null, created_at: now, updated_at: now, completed_at: null } }, 201);
 }

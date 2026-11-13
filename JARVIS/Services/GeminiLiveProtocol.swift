@@ -46,7 +46,15 @@ enum LiveWire {
     /// 600 ms of silence ends the turn inside the 1.8 s reply budget.
     static let silenceDurationMs = 600
 
-    static func setup(instruction: String, declarations: [JSONValue], modality: LiveModality) -> String {
+    /// The pause that ends a live turn, from the Settings "pause before reply" slider.
+    /// 600 ms cut people off when they paused to think, so the live floor is 800 ms.
+    static func silenceMs(endpointSilence: Double) -> Int {
+        let seconds = min(1.4, max(0.8, endpointSilence + 0.15))
+        return Int((seconds * 1000).rounded())
+    }
+
+    static func setup(instruction: String, declarations: [JSONValue], modality: LiveModality,
+                      silenceMs: Int = silenceDurationMs) -> String {
         var setup: [String: Any] = [
             "model": "models/\(LiveModel.current)",
             "responseModalities": [modality == .text ? "TEXT" : "AUDIO"],
@@ -56,7 +64,7 @@ enum LiveWire {
                 "activityHandling": "START_OF_ACTIVITY_INTERRUPTS",
                 "automaticActivityDetection": [
                     "disabled": false,
-                    "silenceDurationMs": silenceDurationMs,
+                    "silenceDurationMs": silenceMs,
                     "prefixPaddingMs": 300,
                     "startOfSpeechSensitivity": "START_SENSITIVITY_HIGH",
                     "endOfSpeechSensitivity": "END_SENSITIVITY_LOW",
@@ -292,6 +300,41 @@ enum LiveReflex {
             return "It's \(clock), Sir."
         }
         return nil
+    }
+}
+
+/// Decides whether speech heard while George is talking is the user or George coming back
+/// through the microphone. Voice processing removes most echo, but a loud speaker leaks enough
+/// for server VAD to fire, which used to make JARVIS stop and answer its own words.
+enum LiveEcho {
+    enum Verdict: Equatable {
+        case user
+        case echo
+        case undecided
+    }
+
+    /// Words that mean "stop talking" unless George himself just said them.
+    static let stopWords: Set<String> = ["stop", "wait", "hold", "hang", "pause", "quiet", "enough", "cancel", "jarvis", "no"]
+
+    static func verdict(heard: String, spoken: String) -> Verdict {
+        let words = tokens(heard)
+        if words.isEmpty { return .undecided }
+        let said = Set(tokens(spoken))
+        if said.isEmpty { return .user }
+        if words.contains(where: { stopWords.contains($0) && !said.contains($0) }) { return .user }
+        let matched = words.filter { said.contains($0) }.count
+        if matched < words.count, words.count - matched >= 2 { return .user }
+        if words.count < 3 {
+            return matched == words.count ? .undecided : .user
+        }
+        let ratio = Double(matched) / Double(words.count)
+        return ratio >= 0.7 ? .echo : .user
+    }
+
+    static func tokens(_ text: String) -> [String] {
+        text.lowercased()
+            .split { !($0.isLetter || $0.isNumber || $0 == "'") }
+            .map(String.init)
     }
 }
 

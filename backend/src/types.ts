@@ -52,6 +52,10 @@ export type ToolName = (typeof TOOL_NAMES)[number];
 
 export interface Env {
   DB: D1Database;
+  /** Service binding to this same Worker. Lets agent lanes hand each step to a fresh invocation. */
+  SELF?: Fetcher;
+  /** How many agents work at once (1-6). Default 3. */
+  AGENT_LANES?: string;
   GEMINI_API_KEY?: string;
   GROQ_API_KEY?: string;
   JARVIS_APP_TOKEN?: string;
@@ -256,6 +260,11 @@ export const LIMITS = {
   fetchBytes: 100_000,
   rateLimitCooldownMs: 60_000,
   stepsPerTick: 1,
+  /** Parallel agent lanes when AGENT_LANES is not set. */
+  defaultLanes: 3,
+  maxLanes: 6,
+  /** Steps one lane runs back to back before it waits for the next cron tick. */
+  maxLaneHops: 25,
 } as const;
 
 export const SERVICE = "jarvis-backend";
