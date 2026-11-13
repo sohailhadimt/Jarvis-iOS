@@ -2,6 +2,13 @@ workflows:
   ios-testflight:
     name: JARVIS iOS - TestFlight
     max_build_duration: 60
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: 'cursor/inbound-call-screening-afd7'
+          include: true
+          source: true
     instance_type: mac_mini_m2
     integrations:
       # Name of the App Store Connect API key you add in Codemagic (Teams > Integrations).
@@ -31,6 +38,14 @@ workflows:
           # CODEMAGIC_ASC_KEY supplies APP_STORE_CONNECT_ISSUER_ID,
           # APP_STORE_CONNECT_KEY_IDENTIFIER, and APP_STORE_CONNECT_PRIVATE_KEY.
           # CERTIFICATE_PRIVATE_KEY is the PEM RSA key in the "signing" variable group.
+          #
+          # Push Notifications on com.sohail.jarvis invalidated App Store profile
+          # "JARVIS ios_app_store 1792031906" (it has no aps-environment). The CLI
+          # only reuses ACTIVE profiles. --create makes a new one when that profile
+          # is INVALID, and Apple includes the current capabilities, including push.
+          # --strict-match-identifier stops com.sohail.jarvis from also matching
+          # com.sohail.jarvis.widgets. That widget profile is still active and is
+          # fetched on its own line. The widget entitlement is the App Group only.
           if [ -z "${CERTIFICATE_PRIVATE_KEY:-}" ]; then
             echo "CERTIFICATE_PRIVATE_KEY is not set. Add the PEM RSA private key to the Codemagic variable group 'signing'."
             exit 1
@@ -38,10 +53,12 @@ workflows:
           app-store-connect fetch-signing-files "com.sohail.jarvis" \
             --type IOS_APP_STORE \
             --create \
+            --strict-match-identifier \
             --certificate-key=@env:CERTIFICATE_PRIVATE_KEY
           app-store-connect fetch-signing-files "com.sohail.jarvis.widgets" \
             --type IOS_APP_STORE \
             --create \
+            --strict-match-identifier \
             --certificate-key=@env:CERTIFICATE_PRIVATE_KEY
       - name: Set up signing certificate
         script: keychain add-certificates
@@ -78,6 +95,34 @@ workflows:
             fi
             echo "$PLIST CFBundleVersion=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST")"
           done
+      - name: Bundle startup voice when a key is present
+        script: |
+          if [ -n "${ELEVENLABS_API_KEY:-}" ]; then
+            node scripts/bundle-startup-voice.mjs
+          else
+            echo "ELEVENLABS_API_KEY is not set. Startup speech caches on the first launch that has a saved ElevenLabs key."
+          fi
+      - name: Bundle the worker app token when Codemagic has it
+        script: |
+          # The value stays in the environment. This script does not print it.
+          python3 - <<'PY'
+          import os
+          import plistlib
+          path = os.path.join(os.environ.get("CM_BUILD_DIR", "."), "JARVIS", "Info.plist")
+          token = os.environ.get("JARVIS_APP_TOKEN", "").strip()
+          if token[:7].lower() == "bearer ":
+              token = token[7:].strip()
+          with open(path, "rb") as handle:
+              info = plistlib.load(handle)
+          if token:
+              info["JarvisAppToken"] = token
+              print("JarvisAppToken bundled")
+          else:
+              info["JarvisAppToken"] = ""
+              print("JARVIS_APP_TOKEN is not set. Add it to the Codemagic variable group 'signing'. The value is the GitHub Actions secret JARVIS_APP_TOKEN.")
+          with open(path, "wb") as handle:
+              plistlib.dump(info, handle)
+          PY
       - name: Build ipa for distribution
         script: |
           xcode-project build-ipa \

@@ -6,6 +6,9 @@ struct JARVISWidgetsBundle: WidgetBundle {
     var body: some Widget {
         JarvisLiveActivity()
         JarvisStandByWidget()
-        JarvisControl()
+        if #available(iOS 18.0, *) {
+            JarvisTalkControl()
+            JarvisControl()
+        }
     }
 }

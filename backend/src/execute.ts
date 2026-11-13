@@ -1,4 +1,5 @@
 import { agentSystemPrompt, plannerSystemPrompt, plannerUserPrompt } from "./agents";
+import { isRoutine, openMission } from "./missions";
 import { computeNextRun, cronMatches, parseCron } from "./cron";
 import { dbAll, dbFirst, dbRun, logActivity, logProgress } from "./db";
 import { clip, newId, nowIso, parseStringArray } from "./http";
@@ -10,13 +11,14 @@ import type { ActionLevel, AgentName, DocumentRow, Env, FindingRow, ScheduledJob
 import { LIMITS } from "./types";
 import { mapDocument, mapFinding } from "./db";
 
-export async function runTick(env: Env, reason: string): Promise<void> {
+/** One tick. Returns true when it planned a task or ran a specialist step, so a lane knows to keep going. */
+export async function runTick(env: Env, reason: string): Promise<boolean> {
   try {
     await releaseStaleLocks(env);
     await runDueJobs(env);
     const planned = await planOneTask(env);
-    if (planned) return;
-    await stepOneSubtask(env);
+    if (planned) return true;
+    return await stepOneSubtask(env);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Tick failed.";
     console.error("jarvis tick failed", reason, message);
@@ -25,6 +27,7 @@ export async function runTick(env: Env, reason: string): Promise<void> {
     } catch {
       console.error("jarvis could not record the tick error");
     }
+    return false;
   }
 }
 
@@ -63,6 +66,17 @@ async function runDueJobs(env: Env): Promise<void> {
     const due = !job.next_run_at || job.next_run_at <= nowStamp;
     if (!due) continue;
     if (created >= 3) break;
+    if (isRoutine(job.id)) {
+      const missionId = await openMission(env, job.goal);
+      await dbRun(env, "UPDATE scheduled_jobs SET last_run_at = ?, next_run_at = ? WHERE id = ?", [
+        nowStamp,
+        computeNextRun(now, expr),
+        job.id,
+      ]);
+      await logActivity(env, "scheduler", "routine.ran", null, { job_id: job.id, mission_id: missionId, cron: job.cron });
+      created++;
+      continue;
+    }
     const taskId = newId("task");
     await dbRun(
       env,
@@ -139,6 +153,15 @@ async function planOneTask(env: Env): Promise<boolean> {
       );
       await logProgress(env, task.id, null, "error", error, null);
       await logActivity(env, "orchestrator", "task.plan_failed", task.id, { error: parsed.error });
+      void import("./owner-alert").then((mod) =>
+        mod.reportProblem(env, {
+          sourceId: `task:${task.id}`,
+          kind: "failed_task",
+          urgent: false,
+          summary: "A task failed and needs you.",
+          detail: error,
+        }),
+      );
       return true;
     }
     await dbRun(
@@ -240,7 +263,7 @@ async function handlePlanFailure(env: Env, task: TaskRow, failure: LlmFailure): 
   await logProgress(env, task.id, null, "warn", `Planning error, retry after ${until}. ${failure.message}`, null);
 }
 
-async function stepOneSubtask(env: Env): Promise<void> {
+async function stepOneSubtask(env: Env): Promise<boolean> {
   const now = nowIso();
   const candidates = await dbAll<SubtaskRow>(
     env,
@@ -273,8 +296,9 @@ async function stepOneSubtask(env: Env): Promise<void> {
     );
     if (claimed !== 1) continue;
     await runSubtaskStep(env, candidate);
-    return;
+    return true;
   }
+  return false;
 }
 
 async function runSubtaskStep(env: Env, sub: SubtaskRow): Promise<void> {
@@ -488,6 +512,15 @@ export async function recomputeTaskStatus(env: Env, taskId: string): Promise<voi
       [error, now, taskId],
     );
     await logActivity(env, "orchestrator", "task.failed", taskId, { subtask_id: failed.id, error });
+    void import("./owner-alert").then((mod) =>
+      mod.reportProblem(env, {
+        sourceId: `task:${taskId}`,
+        kind: "failed_task",
+        urgent: false,
+        summary: "A task failed and needs you.",
+        detail: error,
+      }),
+    );
     return;
   }
   if (subs.some((sub) => sub.status === "pending" || sub.status === "running")) {
@@ -534,6 +567,16 @@ export async function recomputeTaskStatus(env: Env, taskId: string): Promise<voi
     [summary, now, now, taskId],
   );
   await logActivity(env, "orchestrator", "task.completed", taskId, { qc_pass: verdict });
+  const finished = summary.replace(/\s+/g, " ").trim().slice(0, 180);
+  void import("./owner-alert").then((mod) =>
+    mod.reportProblem(env, {
+      sourceId: `task:${taskId}`,
+      kind: "task_done",
+      urgent: false,
+      summary: finished ? `A task has finished. ${finished}` : "A task has finished.",
+      detail: summary.slice(0, 800),
+    }),
+  );
 }
 
 function readMessages(raw: string | null): ChatMessage[] | null {

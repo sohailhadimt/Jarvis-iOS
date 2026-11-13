@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { authorize, tokensMatch } from "../src/auth";
+import { authorize, normalizeAppToken, tokensMatch } from "../src/auth";
 import { route } from "../src/routes";
 import type { Env } from "../src/types";
 
@@ -68,6 +68,21 @@ describe("API auth", () => {
   it("accepts the exact bearer token", () => {
     const result = authorize(request("/tasks", { headers: { authorization: "Bearer secret-token" } }), "secret-token");
     expect(result.ok).toBe(true);
+  });
+
+  it("accepts the same token when the secret or the header has extra bearer text or space", () => {
+    expect(normalizeAppToken("  Bearer secret-token\n")).toBe("secret-token");
+    const newline = authorize(request("/tasks", { headers: { authorization: "Bearer secret-token" } }), "secret-token\n");
+    const doubled = authorize(
+      request("/tasks", { headers: { authorization: "Bearer Bearer secret-token" } }),
+      "secret-token",
+    );
+    const quoted = authorize(request("/tasks", { headers: { authorization: "Bearer secret-token" } }), '"secret-token"');
+    const legacy = authorize(request("/tasks", { headers: { "x-app-token": "secret-token" } }), "secret-token");
+    expect(newline.ok).toBe(true);
+    expect(doubled.ok).toBe(true);
+    expect(quoted.ok).toBe(true);
+    expect(legacy.ok).toBe(true);
   });
 
   it("reports a missing server token as not configured", () => {

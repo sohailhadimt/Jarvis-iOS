@@ -1,26 +1,8 @@
 import AppIntents
 import Foundation
 
-/// Opens JARVIS and starts a hands-free session. `openAppWhenRun` is what makes this
-/// show up in Settings > Action Button > Shortcut > Choose a Shortcut.
-struct TalkToJarvisIntent: AppIntent {
-    static var title: LocalizedStringResource { "Talk to JARVIS" }
-    static var description: IntentDescription {
-        IntentDescription("Opens JARVIS and starts listening.")
-    }
-    static var openAppWhenRun: Bool = true
-
-    init() {}
-
-    @MainActor
-    func perform() async throws -> some IntentResult {
-        JarvisStartListening.request()
-        return .result()
-    }
-}
-
-/// Shortcut list entry. The Action Button Controls gallery uses SetJarvisSessionIntent instead,
-/// because a control toggle has to be a SetValueIntent. This one stays for "Toggle JARVIS".
+/// Shortcut list entry for "Toggle JARVIS".
+/// The Action Button control "Talk to JARVIS" uses TalkToJarvisIntent instead.
 /// AudioRecordingIntent (iOS 18+) lets the app start recording from the background,
 /// provided a Live Activity is started while the intent runs, which startSession() does.
 struct ToggleJarvisIntent: AudioRecordingIntent {
@@ -44,6 +26,7 @@ struct JarvisShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(intent: TalkToJarvisIntent(),
                     phrases: [
+                        "\(.applicationName)",
                         "Talk to \(.applicationName)",
                         "Ask \(.applicationName)",
                         "Listen with \(.applicationName)",
@@ -69,6 +52,11 @@ enum JarvisStartListening {
     static func request() {
         UserDefaults.standard.set(true, forKey: pendingKey)
         NotificationCenter.default.post(name: notification, object: nil)
+    }
+
+    @MainActor
+    static var isPending: Bool {
+        UserDefaults.standard.bool(forKey: pendingKey)
     }
 
     @MainActor

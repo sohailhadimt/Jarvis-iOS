@@ -46,24 +46,43 @@ enum ElevenLabsClient {
         let text: String
         let model_id: String
         let voice_settings: Settings
+        /// The sentence spoken just before this one, so the voice carries on instead of
+        /// restarting its intonation on every chunk. Omitted from the JSON when nil.
+        let previous_text: String?
     }
 
     static func streamSpeech(text: String, voiceID: String, apiKey: String,
-                             stability: Double, similarity: Double) async throws -> URLSession.AsyncBytes {
+                             stability: Double, similarity: Double,
+                             previousText: String? = nil) async throws -> URLSession.AsyncBytes {
+        let context = previousText.flatMap { value -> String? in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : String(trimmed.suffix(600))
+        }
         do {
             return try await streamSpeech(text: text, voiceID: voiceID, apiKey: apiKey,
-                                          stability: stability, similarity: similarity, model: flashModelID)
+                                          stability: stability, similarity: similarity, model: flashModelID,
+                                          previousText: context)
         } catch let error as ElevenLabsError {
-            if case .http(let code, _) = error, code == 400 || code == 404 || code == 422 {
-                return try await streamSpeech(text: text, voiceID: voiceID, apiKey: apiKey,
-                                              stability: stability, similarity: similarity, model: modelID)
+            guard case .http(let code, _) = error, code == 400 || code == 404 || code == 422 else { throw error }
+            if context != nil {
+                // An account or model that refuses the context field still gets the fast voice.
+                do {
+                    return try await streamSpeech(text: text, voiceID: voiceID, apiKey: apiKey,
+                                                  stability: stability, similarity: similarity, model: flashModelID,
+                                                  previousText: nil)
+                } catch let retry as ElevenLabsError {
+                    guard case .http(let again, _) = retry, again == 400 || again == 404 || again == 422 else { throw retry }
+                }
             }
-            throw error
+            return try await streamSpeech(text: text, voiceID: voiceID, apiKey: apiKey,
+                                          stability: stability, similarity: similarity, model: modelID,
+                                          previousText: nil)
         }
     }
 
     private static func streamSpeech(text: String, voiceID: String, apiKey: String,
-                                     stability: Double, similarity: Double, model: String) async throws -> URLSession.AsyncBytes {
+                                     stability: Double, similarity: Double, model: String,
+                                     previousText: String?) async throws -> URLSession.AsyncBytes {
         var comps = URLComponents(string: "https://api.elevenlabs.io/v1/text-to-speech/\(voiceID)/stream")!
         comps.queryItems = [
             URLQueryItem(name: "output_format", value: "pcm_24000"),
@@ -75,7 +94,8 @@ enum ElevenLabsClient {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONEncoder().encode(TTSBody(
             text: text, model_id: model,
-            voice_settings: .init(stability: stability, similarity_boost: similarity)))
+            voice_settings: .init(stability: stability, similarity_boost: similarity),
+            previous_text: previousText))
 
         let (bytes, resp) = try await HTTPConnections.session.bytes(for: req)
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
@@ -92,9 +112,11 @@ enum ElevenLabsClient {
 
     /// Downloads one utterance so the next sentence can start while the current one plays.
     static func collectSpeech(text: String, voiceID: String, apiKey: String,
-                              stability: Double, similarity: Double) async throws -> Data {
+                              stability: Double, similarity: Double,
+                              previousText: String? = nil) async throws -> Data {
         let bytes = try await streamSpeech(text: text, voiceID: voiceID, apiKey: apiKey,
-                                           stability: stability, similarity: similarity)
+                                           stability: stability, similarity: similarity,
+                                           previousText: previousText)
         var data = Data()
         data.reserveCapacity(24_000)
         for try await byte in bytes {

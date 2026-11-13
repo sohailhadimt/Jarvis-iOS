@@ -93,15 +93,18 @@ struct StandByView: View {
     }
 
     private var captionTitle: String {
+        if engine.voiceNeedsAttention { return "JARVIS" }
         switch engine.phase {
-        case .listening: "LISTENING"
-        case .thinking: "THINKING"
-        case .speaking: "RESPONDING"
-        case .idle: "STANDING BY"
+        case .listening: return "LISTENING"
+        case .thinking: return "THINKING"
+        case .speaking: return "RESPONDING"
+        case .idle: return "STANDING BY"
         }
     }
 
     private var captionBody: String {
+        if engine.voiceNeedsAttention, let link = engine.voiceLink { return link }
+        if engine.phase == .listening, engine.transcript.isEmpty, let link = engine.voiceLink, !link.isEmpty { return link }
         if engine.phase == .listening, !engine.transcript.isEmpty { return engine.transcript }
         if !engine.reply.isEmpty, engine.phase != .listening { return engine.reply }
         return "Tap the orb to talk."

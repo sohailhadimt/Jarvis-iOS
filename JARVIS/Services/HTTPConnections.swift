@@ -16,6 +16,7 @@ enum HTTPConnections {
     /// Opens TLS to Gemini, Groq and ElevenLabs before the first spoken turn.
     static func prewarm() {
         let hosts = [
+            "https://jarvis-backend.jarvis-hadi.workers.dev/health",
             "https://generativelanguage.googleapis.com/",
             "https://api.groq.com/",
             "https://api.elevenlabs.io/",

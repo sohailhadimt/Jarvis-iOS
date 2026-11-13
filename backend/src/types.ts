@@ -52,9 +52,16 @@ export type ToolName = (typeof TOOL_NAMES)[number];
 
 export interface Env {
   DB: D1Database;
+  /** Service binding to this same Worker. Lets agent lanes hand each step to a fresh invocation. */
+  SELF?: Fetcher;
+  /** How many agents work at once (1-6). Default 3. */
+  AGENT_LANES?: string;
   GEMINI_API_KEY?: string;
   GROQ_API_KEY?: string;
   JARVIS_APP_TOKEN?: string;
+  /** Grok Bot routine webhook. Set with `npx wrangler secret put`. Never commit the values. */
+  JARVIS_WEBHOOK_URL?: string;
+  JARVIS_WEBHOOK_KEY?: string;
   TAVILY_API_KEY?: string;
   BRAVE_API_KEY?: string;
   ENVIRONMENT?: string;
@@ -64,7 +71,40 @@ export interface Env {
   TWILIO_FROM_NUMBER?: string;
   ELEVENLABS_API_KEY?: string;
   ELEVENLABS_AGENT_ID?: string;
+  /** Optional pin for the ASG receptionist agent; otherwise looked up by name. */
+  ASG_AGENT_ID?: string;
+  /** "off" sends every caller to JARVIS again. */
+  ASG_LINE?: string;
+  /** Bearer key for POST /alert (proactive JARVIS alert calls). Worker secret. */
+  ALERT_KEY?: string;
+  /** "off" stops proactive alert calls and texts. */
+  ALERT_LINE?: string;
+  /** Max alert calls per London day (default 3). */
+  ALERT_MAX_PER_DAY?: string;
   ELEVENLABS_WEBHOOK_SECRET?: string;
+  /** Set to "true" to send conversation_config_override on inbound register-call. Outbound always sends it. */
+  ELEVENLABS_CALL_OVERRIDES?: string;
+  /**
+   * When "true", "1", "yes", or "on", inbound calls skip ElevenLabs and use
+   * Polly Brian plus a recorded message. Unset (or anything else) tries the
+   * register-call hand-off first. A failed hand-off still records with Polly.
+   */
+  ELEVENLABS_FORCE_POLLY?: string;
+  /**
+   * Sohail's own mobile for put-through, take-over, SMS, and problem calls.
+   * Set at deploy with `npx wrangler secret put OWNER_PHONE`. Never commit the number.
+   */
+  OWNER_PHONE?: string;
+  APNS_KEY_ID?: string;
+  APNS_TEAM_ID?: string;
+  APNS_PRIVATE_KEY?: string;
+  APNS_BUNDLE_ID?: string;
+  /** sandbox or production. Production matches TestFlight. */
+  APNS_ENVIRONMENT?: string;
+  /** Optional. In-app VoIP audio is not linked until these and the Voice SDK exist. */
+  TWILIO_API_KEY_SID?: string;
+  TWILIO_API_KEY_SECRET?: string;
+  TWILIO_VOICE_APP_SID?: string;
 }
 
 export interface PlanSubtask {
@@ -220,12 +260,19 @@ export const LIMITS = {
   fetchBytes: 100_000,
   rateLimitCooldownMs: 60_000,
   stepsPerTick: 1,
+  /** Parallel agent lanes when AGENT_LANES is not set. */
+  defaultLanes: 3,
+  maxLanes: 6,
+  /** Steps one lane runs back to back before it waits for the next cron tick. */
+  maxLaneHops: 25,
 } as const;
 
 export const SERVICE = "jarvis-backend";
 export const VERSION = "1.0.0";
 export const GEMINI_MODEL = "gemini-3.8-flash";
-export const GROQ_MODEL = "llama-3.3-70b-versatile";
+/** Current Gemini Live model. Native audio; text for George comes from output transcription when TEXT is refused. */
+export const GEMINI_LIVE_MODEL = "gemini-3.8-live";
+export const GROQ_MODEL = "openai/gpt-oss-120b";
 export const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
 export const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 export const CRON_EXPRESSION = "*/5 * * * *";

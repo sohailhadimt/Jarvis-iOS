@@ -23,6 +23,7 @@ final class SpeakerGate: @unchecked Sendable {
     private var analysisPending = false
     private var lastKick: TimeInterval = 0
     private var latched = false
+    let turn = VoiceTurnMeter()
 
     func update(enabled: Bool, profile: VoiceProfile?, threshold: Double) {
         lock.lock()
@@ -65,22 +66,37 @@ final class SpeakerGate: @unchecked Sendable {
         let raw: Float = Self.rawRMS(samples, count: frames)
         let level: Float = Float(AudioTaps.normalized(raw))
         let rate: Float = Float(buffer.format.sampleRate)
-        let band: Float = SpeechBandMeter.shared.ratio(samples: samples, count: frames, sampleRate: rate)
+        let measured = SpeechBandMeter.shared.measure(samples: samples, count: frames, sampleRate: rate)
+        let ms = Int((Double(frames) / max(buffer.format.sampleRate, 1) * 1000).rounded())
         lock.lock()
-        let smoothed: Float = speechBand * 0.55 + band * 0.45
+        let smoothed: Float = speechBand * 0.55 + measured.speechBand * 0.45
         let now: TimeInterval = Date().timeIntervalSinceReferenceDate
-        let speechLike: Bool = smoothed >= 0.28 && level >= 0.10
+        let lockOn: Bool = enabled && profile != nil
+        let speakerOK: Bool = !lockOn || freshLocked(now)
+        lock.unlock()
+        let decision = turn.push(
+            rms: raw,
+            speechBand: measured.speechBand,
+            flatness: measured.flatness,
+            level: level,
+            frameMs: ms,
+            speakerOK: speakerOK
+        )
+        let speechLike: Bool = decision.hearsSpeech
+        let pass: Bool = decision.forwardsAudio
+        lock.lock()
         if speechLike {
             speechBand = smoothed
             speechBandHeldUntil = now + 0.35
         } else if now >= speechBandHeldUntil {
             speechBand = smoothed
         }
-        let lockOn: Bool = enabled && profile != nil
         if !lockOn {
             lock.unlock()
-            if speechLike { return [buffer] }
-            return []
+            // The recogniser hears the real microphone, including a quiet syllable and a short pause.
+            // A buffer of zeros makes Apple Speech finalise and drop the rest of the sentence.
+            // The meter still decides when the turn ends. Voice ID, below, is what rejects another speaker.
+            return [buffer]
         }
         if speechLike {
             appendLocked(samples, count: frames, rate: buffer.format.sampleRate)
@@ -93,10 +109,14 @@ final class SpeakerGate: @unchecked Sendable {
             backlog.removeAll()
             backlogFrames = 0
             lock.unlock()
-            if speechLike {
+            if speechLike || pass {
                 pending.append(buffer)
             }
             return pending
+        }
+        if pass {
+            lock.unlock()
+            return [buffer]
         }
         if speechLike, let copy = Self.copy(buffer) {
             backlog.append(copy)
@@ -110,7 +130,7 @@ final class SpeakerGate: @unchecked Sendable {
     private func freshLocked(_ now: TimeInterval) -> Bool {
         if matchedAt <= 0 { return false }
         let age: Double = now - matchedAt
-        return age < 0.60
+        return age < 1.2
     }
 
     private func appendLocked(_ samples: UnsafePointer<Float>, count: Int, rate: Double) {

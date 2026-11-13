@@ -42,6 +42,11 @@ enum SpeakerEmbedding {
     }
 }
 
+struct SpectralFrame: Sendable {
+    var speechBand: Float
+    var flatness: Float
+}
+
 /// Speech-band share of a short FFT. Values near 1 are voice-shaped; bass and hiss sit lower.
 final class SpeechBandMeter: @unchecked Sendable {
     static let shared = SpeechBandMeter()
@@ -66,7 +71,14 @@ final class SpeechBandMeter: @unchecked Sendable {
     }
 
     func ratio(samples: UnsafePointer<Float>, count: Int, sampleRate: Float) -> Float {
-        guard count >= size, sampleRate > 1_000, let setup else { return 1 }
+        measure(samples: samples, count: count, sampleRate: sampleRate).speechBand
+    }
+
+    /// Speech-band share and spectral flatness for one short frame. Flatness near 1 is hiss.
+    func measure(samples: UnsafePointer<Float>, count: Int, sampleRate: Float) -> SpectralFrame {
+        guard count >= size, sampleRate > 1_000, let setup else {
+            return SpectralFrame(speechBand: 0.5, flatness: 0.35)
+        }
         lock.lock()
         defer { lock.unlock() }
         var frame = [Float](repeating: 0, count: size)
@@ -78,6 +90,9 @@ final class SpeechBandMeter: @unchecked Sendable {
         let power = Self.power(frame, setup: setup, log2n: log2n)
         var total: Float = 0
         var speech: Float = 0
+        var arith: Float = 0
+        var logSum: Float = 0
+        var used: Float = 0
         let bins: Int = size / 2
         var bin: Int = 1
         while bin < bins {
@@ -87,10 +102,21 @@ final class SpeechBandMeter: @unchecked Sendable {
             if hz >= 300 && hz <= 3_400 {
                 speech += mag
             }
+            let amplitude: Float = mag.squareRoot()
+            arith += amplitude
+            logSum += log(amplitude + 0.000_000_1)
+            used += 1
             bin += 1
         }
-        if total < 0.000_000_1 { return 0 }
-        return speech / total
+        let band: Float = total < 0.000_000_1 ? 0 : speech / total
+        let flat: Float
+        if used < 1 || arith < 0.000_000_1 {
+            flat = 1
+        } else {
+            let geometric: Float = exp(logSum / used)
+            flat = min(1, max(0, geometric / (arith / used)))
+        }
+        return SpectralFrame(speechBand: band, flatness: flat)
     }
 
     fileprivate static func power(_ frame: [Float], setup: FFTSetup, log2n: vDSP_Length) -> [Float] {

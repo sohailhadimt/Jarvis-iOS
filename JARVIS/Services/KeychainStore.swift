@@ -10,6 +10,8 @@ enum KeychainKey: String, CaseIterable {
     case agentWebhook = "agent_webhook_bearer_key"
     case grokBotWebhook = "grok_bot_routine_webhook_key"
     case jarvisCloud = "jarvis_cloud_app_token"
+    /// Own mobile for put-through and problem calls. Empty until typed in Calling settings.
+    case ownerPhone = "owner_phone"
     case brave = "brave_search_api_key"
 }
 
