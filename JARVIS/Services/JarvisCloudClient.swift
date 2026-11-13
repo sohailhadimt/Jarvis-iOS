@@ -677,6 +677,23 @@ struct CloudClient: Sendable {
         try await decode(path: "/briefing")
     }
 
+    /// A signed ElevenLabs Agents URL for in-app voice. Nil reason means the phone should use Gemini Live.
+    func elevenSession() async -> (url: URL, maxSeconds: Int)? {
+        guard let (data, status) = try? await raw(method: "POST", path: "/voice/eleven-session", authorize: true,
+                                                  body: Data("{}".utf8), query: []),
+              (200..<300).contains(status),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let text = object["signed_url"] as? String, text.hasPrefix("wss://"),
+              let url = URL(string: text) else { return nil }
+        return (url, object["max_seconds"] as? Int ?? 600)
+    }
+
+    /// Seconds the agent conversation really ran, for the daily minutes guard.
+    func elevenUsage(seconds: Int) async {
+        let body = (try? JSONSerialization.data(withJSONObject: ["seconds": seconds])) ?? Data("{}".utf8)
+        _ = try? await raw(method: "POST", path: "/voice/eleven-usage", authorize: true, body: body, query: [])
+    }
+
     /// A short-lived Gemini Live token. The API key stays on the worker.
     func liveTicket() async -> LiveTicketResult {
         do {

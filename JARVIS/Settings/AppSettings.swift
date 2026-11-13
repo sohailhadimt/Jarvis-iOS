@@ -208,6 +208,8 @@ final class AppSettings {
     var speechLocale: String { didSet { d.set(speechLocale, forKey: "speechLocale") } }
     /// Full-screen captions start on when a voice session opens.
     var captionsDefault: Bool { didSet { d.set(captionsDefault, forKey: "captionsDefault") } }
+    /// Voice mode runs on the ElevenLabs agent (streaming, barge-in). Off uses Gemini Live to save ElevenLabs minutes.
+    var elevenAgentVoice: Bool { didSet { d.set(elevenAgentVoice, forKey: "elevenAgentVoice") } }
     /// Shifts the speech threshold. 0 is stricter. 1 accepts a quieter close voice.
     var vadSensitivity: Double { didSet { d.set(vadSensitivity, forKey: "vadSensitivity") } }
     /// Seconds of quiet before a finished sentence ends. Default is 0.65, and never under 0.55.
@@ -326,6 +328,7 @@ final class AppSettings {
         liveActivityEnabled = d.object(forKey: "liveActivityEnabled") as? Bool ?? true
         speechLocale = d.string(forKey: "speechLocale") ?? "en-GB"
         captionsDefault = d.object(forKey: "captionsDefault") as? Bool ?? true
+        elevenAgentVoice = d.object(forKey: "elevenAgentVoice") as? Bool ?? true
         vadSensitivity = d.object(forKey: "vadSensitivity") as? Double ?? 0.5
         let storedPause = d.object(forKey: "endpointSilence") as? Double
         let oldDefault = storedPause.map { abs($0 - 0.85) < 0.001 } ?? false

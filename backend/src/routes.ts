@@ -44,6 +44,7 @@ import { markPersonaDraft, routePersona } from "./personas";
 import { lastSmsErrors, lastSmsLog, pairResponse, recordSmsError, saveBusy, sendOwnerSmsRoute, simulateSmsRoute } from "./sms-desk";
 import { historyResponse, lineResponse, personaResponse, reminderResponse, sayResponse } from "./brain";
 import { liveTokenResponse } from "./live-token";
+import { elevenSessionResponse, elevenUsageResponse } from "./eleven-session";
 import { readVoiceDebug, saveVoiceDebug, VOICE_DEBUG_REVISION } from "./voice-debug";
 import { optionalSourceUrls } from "./sources";
 import { isPipelineStage, parseMrr, toolsForNames } from "./tools";
@@ -99,6 +100,8 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "POST" && path === "/debug/sms-simulate") return simulateSmsRoute(request, env);
     if (request.method === "POST" && path === "/debug/voice") return saveVoiceDebug(request, env);
     if (request.method === "POST" && path === "/voice/live-token") return liveTokenResponse(env);
+    if (request.method === "POST" && path === "/voice/eleven-session") return elevenSessionResponse(env);
+    if (request.method === "POST" && path === "/voice/eleven-usage") return elevenUsageResponse(request, env);
     if (request.method === "POST" && path === "/messages/sms") return sendOwnerSmsRoute(request, env);
     if (request.method === "GET" && path === "/debug/voice") {
       return json({ revision: VOICE_DEBUG_REVISION, events: await readVoiceDebug(env) });

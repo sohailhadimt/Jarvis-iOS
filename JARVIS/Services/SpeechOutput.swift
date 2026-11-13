@@ -553,6 +553,40 @@ final class SpeechOutput: NSObject {
         if fillerActive { stopFiller() }
     }
 
+    // MARK: Streaming agent audio (ElevenLabs Agents)
+
+    /// Called on the main actor when every agent buffer handed over so far has been heard.
+    var onAgentAudioDrained: (() -> Void)?
+    private var agentPending = 0
+    private var agentGeneration = 0
+
+    /// Plays one 24 kHz 16-bit PCM chunk from the agent at once, gapless behind the previous chunk.
+    func playAgentPCM(_ data: Data) {
+        guard let buffer = makeBuffer(data),
+              let player = try? ensureEngine(monitorMicrophone: false) else { return }
+        track(buffer)
+        noteScheduled(buffer, on: player)
+        agentPending += 1
+        let generation = agentGeneration
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, generation == self.agentGeneration else { return }
+                self.agentPending = max(0, self.agentPending - 1)
+                if self.agentPending == 0 { self.onAgentAudioDrained?() }
+            }
+        }
+    }
+
+    /// Barge-in: drops everything queued for the agent's current reply.
+    func stopAgentPCM() {
+        agentGeneration += 1
+        agentPending = 0
+        preparePlayback()
+        stop()
+    }
+
+    var agentAudioQueued: Bool { agentPending > 0 }
+
     func stop() {
         fillerActive = false
         deviceSpeech.stop()
