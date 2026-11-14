@@ -236,6 +236,7 @@ CREATE TABLE IF NOT EXISTS outbound_calls (
 );
 
 CREATE INDEX IF NOT EXISTS idx_outbound_calls_created ON outbound_calls (created_at);
+CREATE INDEX IF NOT EXISTS idx_outbound_calls_updated ON outbound_calls (updated_at);
 
 -- Inbound screening. Default is to deny personal details.
 CREATE TABLE IF NOT EXISTS call_screen (
@@ -539,6 +540,7 @@ CREATE TABLE IF NOT EXISTS brain_turns (
 );
 
 CREATE INDEX IF NOT EXISTS idx_brain_turns_created ON brain_turns (created_at);
+CREATE INDEX IF NOT EXISTS idx_brain_turns_ref ON brain_turns (source, ref);
 
 CREATE TABLE IF NOT EXISTS brain_reminders (
   id TEXT PRIMARY KEY,

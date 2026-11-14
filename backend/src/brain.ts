@@ -87,6 +87,8 @@ export async function ensureBrain(env: Env): Promise<void> {
     )`,
   );
   await dbRun(env, "CREATE INDEX IF NOT EXISTS idx_brain_turns_created ON brain_turns (created_at)");
+  await dbRun(env, "CREATE INDEX IF NOT EXISTS idx_brain_turns_ref ON brain_turns (source, ref)").catch(() => 0);
+  await dbRun(env, "CREATE INDEX IF NOT EXISTS idx_outbound_calls_updated ON outbound_calls (updated_at)").catch(() => 0);
   await dbRun(
     env,
     `CREATE TABLE IF NOT EXISTS brain_reminders (
@@ -126,13 +128,20 @@ let lastCallSync = "";
 
 export async function syncCalls(env: Env): Promise<void> {
   await ensureBrain(env);
-  const calls = (await dbAll<{ id: string; transcript_json: string | null; updated_at: string | null }>(
+  // Ids and stamps first. The transcripts are only read when a call changed since the last sync.
+  const recent = (await dbAll<{ id: string; updated_at: string | null }>(
     env,
-    "SELECT id, transcript_json, updated_at FROM outbound_calls ORDER BY updated_at DESC LIMIT 8",
+    "SELECT id, updated_at FROM outbound_calls ORDER BY updated_at DESC LIMIT 8",
   ).catch(() => [])).filter((call) => /^call_[A-Za-z0-9]+$/.test(call.id));
-  if (!calls.length) return;
-  const signature = calls.map((call) => `${call.id}@${call.updated_at ?? ""}`).join(",");
+  if (!recent.length) return;
+  const signature = recent.map((call) => `${call.id}@${call.updated_at ?? ""}`).join(",");
   if (signature === lastCallSync) return;
+  const calls = await dbAll<{ id: string; transcript_json: string | null; updated_at: string | null }>(
+    env,
+    `SELECT id, transcript_json, updated_at FROM outbound_calls WHERE id IN (${recent.map(() => "?").join(",")})`,
+    recent.map((call) => call.id),
+  ).catch(() => null);
+  if (!calls) return;
   // One read for every call's existing lines instead of one query per call.
   const marks = calls.map(() => "?").join(",");
   const existing = await dbAll<{ ref: string; body: string }>(
