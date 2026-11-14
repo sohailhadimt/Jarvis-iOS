@@ -1,4 +1,4 @@
-import { getState, setState } from "./db";
+import { getState } from "./db";
 import { apiError, isRecord, json } from "./http";
 import type { Env } from "./types";
 
@@ -71,7 +71,13 @@ export async function elevenUsageResponse(request: Request, env: Env, now = Date
   const raw = isRecord(body) ? Number(body.seconds) : NaN;
   if (!Number.isFinite(raw) || raw < 0) return apiError(400, "bad_request", "seconds must be a number.");
   const seconds = Math.min(MAX_REPORT_SECONDS, Math.round(raw));
-  const total = (await usedToday(env, now)) + seconds;
-  await setState(env, `eleven_app:${londonDay(now)}`, String(total));
+  // One atomic add, so two conversations ending together cannot overwrite each other's seconds.
+  const row = await env.DB.prepare(
+    `INSERT INTO runtime_state (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(runtime_state.value AS INTEGER) + CAST(excluded.value AS INTEGER) AS TEXT),
+       updated_at = excluded.updated_at
+     RETURNING value`,
+  ).bind(`eleven_app:${londonDay(now)}`, String(seconds), new Date(now).toISOString()).first<{ value: string }>();
+  const total = Number(row?.value ?? seconds) || seconds;
   return json({ ok: true, used_seconds: total, remaining_seconds: Math.max(0, dailyCap(env) - total) });
 }

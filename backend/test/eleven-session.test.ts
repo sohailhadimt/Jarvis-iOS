@@ -12,7 +12,15 @@ function env(state: Map<string, string>, extra: Partial<Env> = {}): Env {
         let args: unknown[] = [];
         const s = {
           bind(...a: unknown[]) { args = a; return s; },
-          async first() { return sql.startsWith("SELECT") ? (state.has(String(args[0])) ? { value: state.get(String(args[0])) } : null) : null; },
+          async first() {
+            if (sql.includes("RETURNING value")) {
+              const key = String(args[0]);
+              const total = Number(state.get(key) ?? 0) + Number(args[1]);
+              state.set(key, String(total));
+              return { value: String(total) };
+            }
+            return sql.startsWith("SELECT") ? (state.has(String(args[0])) ? { value: state.get(String(args[0])) } : null) : null;
+          },
           async all() { return { results: [], success: true, meta: {} }; },
           async run() { if (sql.includes("INSERT INTO runtime_state")) state.set(String(args[0]), String(args[1])); return { success: true, meta: { changes: 1 } }; },
         };

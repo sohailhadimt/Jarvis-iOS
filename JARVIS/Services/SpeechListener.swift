@@ -78,6 +78,9 @@ final class SpeechListener {
     }
     private(set) var lastCaptureFailure: String?
     private var playbackPlayer: AVAudioPlayerNode?
+    /// The tap that is running now, so the engine can be rebuilt after an interruption or a route change.
+    private var currentTap: (@Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void)?
+    private var currentTapSize: AVAudioFrameCount = 1024
     var speechBandRatio: Double { gate.speechBandRatio }
     var allowsUtterance: Bool { gate.allowsUtterance }
     var sharedPlayback: AVAudioPlayerNode? { playbackPlayer }
@@ -172,6 +175,18 @@ final class SpeechListener {
         refreshVoiceProcessing()
     }
 
+    /// A phone call, Siri, new headphones, or a media-services reset stopped or invalidated the engine.
+    /// Builds a fresh engine on the current route and reinstalls the live tap. The shared player is new afterwards.
+    func rebuildLiveEngine() throws {
+        guard liveFeed, let block = currentTap else { return }
+        let size = currentTapSize
+        teardownEngine()
+        try installTap(block, bufferSize: size)
+        playbackPlayer?.play()
+        liveFeed = true
+        refreshVoiceProcessing()
+    }
+
     func stop() {
         bargeMonitor = false
         liveFeed = false
@@ -240,6 +255,8 @@ final class SpeechListener {
         guard format.sampleRate > 0, format.channelCount > 0 else { throw ListenerError.noInput }
         input.installTap(onBus: 0, bufferSize: bufferSize, format: format, block: block)
         tapInstalled = true
+        currentTap = block
+        currentTapSize = bufferSize
         // Attach before start so voice processing's echo reference includes TTS.
         attachPlayback(engine)
         if !engine.isRunning {
