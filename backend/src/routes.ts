@@ -87,6 +87,10 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
       return alertRoute(request, env);
     }
     {
+      const bc = await import("./briefing-call");
+      if (bc.isBriefingWebhook(request.method, path)) return bc.briefingAsk(request, env);
+    }
+    {
       const pa = await import("./proactive-alert");
       if (pa.isAlertWebhook(request.method, path)) return pa.alertWebhook(request, env, path);
     }
@@ -100,6 +104,9 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "POST" && path === "/debug/sms-simulate") return simulateSmsRoute(request, env);
     if (request.method === "POST" && path === "/debug/voice") return saveVoiceDebug(request, env);
     if (request.method === "POST" && path === "/voice/live-token") return liveTokenResponse(env);
+    if (path === "/briefing/call-settings" && (request.method === "GET" || request.method === "POST")) {
+      return (await import("./briefing-call")).settingsRoute(request, env);
+    }
     if (request.method === "POST" && path === "/voice/eleven-session") return elevenSessionResponse(env);
     if (request.method === "POST" && path === "/voice/eleven-usage") return elevenUsageResponse(request, env);
     if (request.method === "POST" && path === "/messages/sms") return sendOwnerSmsRoute(request, env);
