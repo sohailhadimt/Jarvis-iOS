@@ -448,10 +448,12 @@ export async function handleCallApi(request: Request, env: Env, path: string): P
 async function configResponse(env: Env): Promise<Response> {
   const setup = callingSecrets(env);
   const from = toE164(env.TWILIO_FROM_NUMBER ?? "");
-  const { readOwnerMobile } = await import("./owner-alert");
-  const mobile = await readOwnerMobile(env);
-  const desk = await import("./sms-desk");
-  const chat = await import("./agent-chat");
+  const [{ readOwnerMobile }, desk, chat] = await Promise.all([
+    import("./owner-alert"),
+    import("./sms-desk"),
+    import("./agent-chat"),
+  ]);
+  const [mobile, texts] = await Promise.all([readOwnerMobile(env), desk.textDelivery(env)]);
   return json({
     configured: setup.configured,
     message: setup.configured ? "Calling is ready." : "Calling not set up.",
@@ -459,7 +461,7 @@ async function configResponse(env: Env): Promise<Response> {
     from_number: from,
     forwarding: from ? forwardingCodes(from) : null,
     assistant_webhook: chat.assistantWebhookReady(env),
-    texts: await desk.textDelivery(env),
+    texts,
     screening: {
       mobile_set: Boolean(mobile),
       push: Boolean(env.APNS_KEY_ID?.trim() && env.APNS_TEAM_ID?.trim() && env.APNS_PRIVATE_KEY?.trim()),

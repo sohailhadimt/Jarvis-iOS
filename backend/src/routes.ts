@@ -206,6 +206,8 @@ function normalizePath(pathname: string): string {
   return pathname || "/";
 }
 
+let healthyUntil = 0;
+
 async function health(env: Env): Promise<Response> {
   const body = {
     service: SERVICE,
@@ -215,7 +217,11 @@ async function health(env: Env): Promise<Response> {
     external_actions: false,
   };
   try {
-    await dbFirst<{ ok: number }>(env, "SELECT 1 AS ok");
+    // A healthy D1 answer is reused for a few seconds so health polling does not queue behind real work.
+    if (Date.now() >= healthyUntil) {
+      await dbFirst<{ ok: number }>(env, "SELECT 1 AS ok");
+      healthyUntil = Date.now() + 5_000;
+    }
     return json({ ok: true, ...body, db: "ok" });
   } catch (err) {
     return json(

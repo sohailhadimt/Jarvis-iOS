@@ -121,20 +121,34 @@ export async function rememberLine(
   return true;
 }
 
+/** Calls already copied into the brain by this isolate, keyed by id and last update. Skips repeat work on every history read. */
+let lastCallSync = "";
+
 export async function syncCalls(env: Env): Promise<void> {
   await ensureBrain(env);
-  const calls = await dbAll<{ id: string; transcript_json: string | null; updated_at: string | null }>(
+  const calls = (await dbAll<{ id: string; transcript_json: string | null; updated_at: string | null }>(
     env,
     "SELECT id, transcript_json, updated_at FROM outbound_calls ORDER BY updated_at DESC LIMIT 8",
-  ).catch(() => []);
+  ).catch(() => [])).filter((call) => /^call_[A-Za-z0-9]+$/.test(call.id));
+  if (!calls.length) return;
+  const signature = calls.map((call) => `${call.id}@${call.updated_at ?? ""}`).join(",");
+  if (signature === lastCallSync) return;
+  // One read for every call's existing lines instead of one query per call.
+  const marks = calls.map(() => "?").join(",");
+  const existing = await dbAll<{ ref: string; body: string }>(
+    env,
+    `SELECT ref, body FROM brain_turns WHERE source = 'call' AND ref IN (${marks})`,
+    calls.map((call) => call.id),
+  ).catch(() => null);
+  if (existing === null) return;
+  const seen = new Map<string, Set<string>>();
+  for (const row of existing) {
+    const set = seen.get(row.ref) ?? new Set<string>();
+    set.add(row.body);
+    seen.set(row.ref, set);
+  }
   for (const call of calls) {
-    if (!/^call_[A-Za-z0-9]+$/.test(call.id)) continue;
-    const existing = await dbAll<{ body: string }>(
-      env,
-      "SELECT body FROM brain_turns WHERE source = 'call' AND ref = ?",
-      [call.id],
-    ).catch(() => []);
-    const have = new Set(existing.map((row) => row.body));
+    const have = seen.get(call.id) ?? new Set<string>();
     for (const line of readTranscript(call.transcript_json).slice(-6)) {
       const body = cleanLine(line.text);
       if (!body || have.has(body)) continue;
@@ -142,6 +156,7 @@ export async function syncCalls(env: Env): Promise<void> {
       have.add(body);
     }
   }
+  lastCallSync = signature;
 }
 
 export async function listTurns(env: Env): Promise<BrainTurn[]> {
@@ -312,8 +327,7 @@ export function personaResponse(): Response {
 }
 
 export async function historyResponse(env: Env): Promise<Response> {
-  const turns = await listTurns(env);
-  const reminders = await openReminders(env).catch(() => []);
+  const [turns, reminders] = await Promise.all([listTurns(env), openReminders(env).catch(() => [] as string[])]);
   return json({
     revision: BRAIN_REVISION,
     voice: "George",

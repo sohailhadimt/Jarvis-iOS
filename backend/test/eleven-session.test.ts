@@ -40,6 +40,21 @@ describe("ElevenLabs app voice session", () => {
     } finally { globalThis.fetch = original; }
   });
 
+  it("retries once when ElevenLabs answers 5xx", async () => {
+    const original = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) return new Response("busy", { status: 503 });
+      return new Response(JSON.stringify({ signed_url: "wss://api.elevenlabs.io/v1/convai/conversation?agent_id=agent_app&conversation_signature=sig" }));
+    }) as typeof fetch;
+    try {
+      const res = await elevenSessionResponse(env(new Map()));
+      expect(res.status).toBe(200);
+      expect(calls).toBe(2);
+    } finally { globalThis.fetch = original; }
+  });
+
   it("is 503 when not configured and 429 once the day's seconds are used", async () => {
     expect((await elevenSessionResponse(env(new Map(), { ELEVENLABS_APP_AGENT_ID: "" }))).status).toBe(503);
     const state = new Map([[`eleven_app:${londonDay()}`, "900"]]);

@@ -34,15 +34,21 @@ export async function elevenSessionResponse(env: Env, now = Date.now()): Promise
   if (used >= cap) {
     return apiError(429, "budget", "Today's ElevenLabs voice minutes for the app are used. Gemini Live takes over.");
   }
-  let response: Response;
-  try {
-    response = await fetch(`${SIGNED_URL}?agent_id=${encodeURIComponent(agent)}`, {
-      headers: { "xi-api-key": key },
-      signal: AbortSignal.timeout(8_000),
-    });
-  } catch {
-    return apiError(502, "unavailable", "ElevenLabs could not be reached.");
+  // Two short tries beat one long wait: the phone falls back to Gemini Live sooner if ElevenLabs is down.
+  let response: Response | null = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      response = await fetch(`${SIGNED_URL}?agent_id=${encodeURIComponent(agent)}`, {
+        headers: { "xi-api-key": key },
+        signal: AbortSignal.timeout(4_000),
+      });
+      if (response.status < 500) break;
+    } catch {
+      response = null;
+    }
+    if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 250));
   }
+  if (!response) return apiError(502, "unavailable", "ElevenLabs could not be reached.");
   if (!response.ok) {
     const status = response.status === 401 || response.status === 403 ? 502 : response.status === 429 ? 429 : 502;
     return apiError(status, response.status === 429 ? "quota" : "unavailable", "ElevenLabs could not start a session.");
