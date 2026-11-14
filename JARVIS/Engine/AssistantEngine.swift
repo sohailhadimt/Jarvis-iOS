@@ -190,6 +190,15 @@ final class AssistantEngine {
     /// Gemini Live owns VAD, turns, and tools. A failed open stays on screen instead of pretending to listen.
     @ObservationIgnored private var usingGeminiLive = false
     @ObservationIgnored private var geminiLive: GeminiLiveSession?
+    /// ElevenLabs Agents conversation. While it runs, `usingGeminiLive` is also true so every "live session" gate applies.
+    @ObservationIgnored private var elevenAgent: ElevenAgentSession?
+    @ObservationIgnored private var usingElevenAgent = false
+    /// Hands over to Gemini Live when today's ElevenLabs allowance for this conversation runs out.
+    @ObservationIgnored private var agentLimitTask: Task<Void, Never>?
+    /// Phone call, Siri, headphones and media-services observers for the live voice session.
+    @ObservationIgnored private var audioObservers: [NSObjectProtocol] = []
+    @ObservationIgnored private var audioInterrupted = false
+    @ObservationIgnored private var audioRecoveryTask: Task<Void, Never>?
     @ObservationIgnored private var liveReconnects = 0
     @ObservationIgnored private var liveReopening = false
     /// Speech was heard while George was talking. Volume is ducked until the transcript says user or echo.
@@ -414,22 +423,29 @@ final class AssistantEngine {
         voiceLink = "Connecting…"
         phase = .listening
         pushActivity()
-        var preparation = await ticketTask.value
-        if let current = preparation, Self.cantReachLive(current.1) {
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            guard epoch == sessionEpoch, isSessionActive else { return .failed }
-            preparation = await prepareLiveTicket()
-        }
-        if await beginGeminiLive(epoch: epoch, preparation: preparation) {
+        let elevenOK = AppSettings.shared.elevenAgentVoice ? await beginElevenAgent(epoch: epoch) : false
+        guard epoch == sessionEpoch, isSessionActive else { return .failed }
+        if elevenOK {
             voiceConnecting = false
-            voiceLink = "Gemini Live connected"
-        } else if epoch == sessionEpoch, isSessionActive {
-            voiceLink = lastLiveFailure ?? "Gemini Live could not start. Try voice again."
-            phase = .listening
-            voiceConnecting = false
-            try? listener.keepEngineAlive()
+            voiceLink = "ElevenLabs live connected"
         } else {
-            return .failed
+            var preparation = await ticketTask.value
+            if let current = preparation, Self.cantReachLive(current.1) {
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                guard epoch == sessionEpoch, isSessionActive else { return .failed }
+                preparation = await prepareLiveTicket()
+            }
+            if await beginGeminiLive(epoch: epoch, preparation: preparation) {
+                voiceConnecting = false
+                voiceLink = "Gemini Live connected"
+            } else if epoch == sessionEpoch, isSessionActive {
+                voiceLink = lastLiveFailure ?? "Gemini Live could not start. Try voice again."
+                phase = .listening
+                voiceConnecting = false
+                try? listener.keepEngineAlive()
+            } else {
+                return .failed
+            }
         }
         if let debugClient {
             let client = debugClient
@@ -460,6 +476,10 @@ final class AssistantEngine {
         if usingGeminiLive {
             VoiceDebugLog.note("live-close", reason)
         }
+        teardownAgent()
+        audioInterrupted = false
+        audioRecoveryTask?.cancel()
+        audioRecoveryTask = nil
         usingGeminiLive = false
         geminiLive?.stop()
         geminiLive = nil
@@ -1205,6 +1225,257 @@ final class AssistantEngine {
         return opened
     }
 
+    // MARK: Audio interruptions and route changes (live voice)
+
+    /// Registered once. Each handler only acts while a live voice session is up.
+    private func installAudioObservers() {
+        guard audioObservers.isEmpty else { return }
+        let center = NotificationCenter.default
+        let session = AVAudioSession.sharedInstance()
+        audioObservers.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: session, queue: .main) { [weak self] note in
+            let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt ?? 0
+            let began = AVAudioSession.InterruptionType(rawValue: raw) == .began
+            Task { @MainActor in self?.audioInterruption(began: began) }
+        })
+        audioObservers.append(center.addObserver(forName: AVAudioSession.routeChangeNotification, object: session, queue: .main) { [weak self] note in
+            let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
+            let reason = AVAudioSession.RouteChangeReason(rawValue: raw) ?? .unknown
+            // Our own category and override changes also post here. Only real device changes rebuild.
+            guard reason == .newDeviceAvailable || reason == .oldDeviceUnavailable else { return }
+            let label = reason == .newDeviceAvailable ? "route-new" : "route-gone"
+            Task { @MainActor in self?.scheduleAudioRecovery(label, reconfigure: false) }
+        })
+        audioObservers.append(center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: session, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.audioConfigured = false
+                self?.scheduleAudioRecovery("media-reset", reconfigure: true)
+            }
+        })
+        audioObservers.append(center.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                // Our rebuilt engine is already running. A stopped capture engine means the hardware format moved.
+                guard let self, !self.listener.isEngineRunning else { return }
+                self.scheduleAudioRecovery("engine-config", reconfigure: false)
+            }
+        })
+    }
+
+    private var liveVoiceUp: Bool { isSessionActive && usingGeminiLive }
+
+    private func audioInterruption(began: Bool) {
+        guard liveVoiceUp else { return }
+        if began {
+            audioInterrupted = true
+            audioRecoveryTask?.cancel()
+            VoiceDebugLog.note("audio-interrupt", "began")
+            // iOS already stopped the engine. Drop queued speech so it does not resume mid-word.
+            if usingElevenAgent { output.stopAgentPCM() } else { output.stop() }
+            if phase == .speaking { phase = .listening }
+            pushActivity()
+        } else {
+            // Resume even without shouldResume: the user is still in a voice session.
+            audioInterrupted = false
+            VoiceDebugLog.note("audio-interrupt", "ended")
+            scheduleAudioRecovery("interrupt-ended", reconfigure: false)
+        }
+    }
+
+    /// Coalesces the route, engine and interruption notices that arrive together into one rebuild.
+    private func scheduleAudioRecovery(_ reason: String, reconfigure: Bool) {
+        guard liveVoiceUp, !audioInterrupted else { return }
+        audioRecoveryTask?.cancel()
+        audioRecoveryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.recoverLiveAudio(reason, reconfigure: reconfigure)
+        }
+    }
+
+    private func recoverLiveAudio(_ reason: String, reconfigure: Bool) async {
+        guard liveVoiceUp, !audioInterrupted else { return }
+        VoiceDebugLog.note("audio-recover", reason)
+        if usingElevenAgent { output.stopAgentPCM() } else { output.stop() }
+        if phase == .speaking { phase = .listening }
+        let session = AVAudioSession.sharedInstance()
+        if reconfigure || session.category != .playAndRecord || session.mode != .voiceChat {
+            try? Self.configureVoiceSession(session)
+        }
+        do {
+            try session.setActive(true)
+            audioConfigured = true
+            try listener.rebuildLiveEngine()
+        } catch {
+            VoiceDebugLog.note("audio-recover", "failed \(VoiceDebugLog.safe(error.localizedDescription))")
+            // One retry after the hardware settles, then the normal fallback.
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard liveVoiceUp else { return }
+            do {
+                try session.setActive(true)
+                try listener.rebuildLiveEngine()
+            } catch {
+                fallBackFromLive("audio-recover")
+                return
+            }
+        }
+        output.bindSharedPlayer(listener.sharedPlayback)
+        output.prewarm()
+        noteCapturePath()
+        pushActivity()
+    }
+
+    // MARK: ElevenLabs Agents voice
+
+    /// Streaming George with server-side turn-taking and barge-in. False means Gemini Live should open instead.
+    private func beginElevenAgent(epoch: Int) async -> Bool {
+        guard JarvisCloud.isConfigured, let client = try? JarvisCloudAPI.client() else { return false }
+        debugClient = client
+        VoiceDebugLog.use(client)
+        guard let ticket = await client.elevenSession() else {
+            VoiceDebugLog.note("agent", "no session, using Gemini Live")
+            return false
+        }
+        guard epoch == sessionEpoch, isSessionActive else { return false }
+        let session = ElevenAgentSession()
+        session.onEvent = { [weak self] event in
+            Task { @MainActor in self?.handleAgent(event) }
+        }
+        let opened = await session.open(url: ticket.url, prompt: liveInstruction(), firstMessage: "")
+        guard opened, epoch == sessionEpoch, isSessionActive else {
+            session.stop()
+            if !opened { VoiceDebugLog.note("agent", "socket did not open, using Gemini Live") }
+            return false
+        }
+        do {
+            try listener.startLiveFeed { [weak session] pcm in session?.sendAudio(pcm) }
+        } catch {
+            session.stop()
+            noteLiveError("microphone")
+            return false
+        }
+        elevenAgent = session
+        usingElevenAgent = true
+        usingGeminiLive = true
+        output.bindSharedPlayer(listener.sharedPlayback)
+        output.prewarm()
+        installAudioObservers()
+        output.onAgentAudioDrained = { [weak self] in self?.agentAudioDrained() }
+        let limit = max(30, ticket.maxSeconds)
+        agentLimitTask?.cancel()
+        agentLimitTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(limit) * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.agentLimitReached()
+        }
+        phase = .listening
+        VoiceDebugLog.note("live-open", "elevenlabs agent \(session.conversationID.prefix(12))")
+        noteCapturePath()
+        pushActivity()
+        Task { await self.mergeSharedHistory() }
+        return true
+    }
+
+    private func handleAgent(_ event: AgentEvent) {
+        guard usingElevenAgent else { return }
+        switch event {
+        case .userTranscript(let text):
+            transcript = text
+            userIsSpeaking = false
+            LatencyLog.noteSpeechEnd()
+            _ = recordUser(text)
+            Task { await self.shareTurn(role: "user", text: text) }
+            if phase != .speaking { phase = .thinking }
+            pushActivity()
+        case .agentText(let text):
+            let parsed = MemoryParser.extract(from: text)
+            if AppSettings.shared.autoRemember { rememberFacts(parsed.facts) }
+            let spoken = parsed.cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !spoken.isEmpty else { return }
+            reply = spoken
+            recordAssistant(spoken)
+            Task { await self.shareTurn(role: "assistant", text: spoken) }
+            pushActivity()
+        case .audio(let pcm):
+            if phase != .speaking {
+                phase = .speaking
+                pushActivity()
+            }
+            output.playAgentPCM(pcm)
+        case .interruption:
+            VoiceDebugLog.note("barge-in", "agent")
+            output.stopAgentPCM()
+            if phase == .speaking || phase == .thinking { phase = .listening }
+            userIsSpeaking = true
+            pushActivity()
+        case .tool(let id, let name, let arguments):
+            Task { await self.answerLiveTool(id: id, name: name, arguments: arguments) }
+        case .failed(let reason):
+            Task { await self.downgradeFromAgent(reason) }
+        case .closed:
+            // The agent ends idle or over-length conversations itself, which keeps Starter minutes.
+            Task { await self.endSession(reason: "agent-closed") }
+        }
+    }
+
+    private func agentAudioDrained() {
+        guard usingElevenAgent, phase == .speaking else { return }
+        georgeEndedAt = Date()
+        phase = .listening
+        pushActivity()
+    }
+
+    /// The allowance is spent. Let George finish his sentence, then carry on with Gemini Live.
+    private func agentLimitReached() async {
+        guard usingElevenAgent else { return }
+        var waits = 0
+        while usingElevenAgent, phase == .speaking || output.agentAudioQueued, waits < 40 {
+            waits += 1
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        guard usingElevenAgent else { return }
+        await downgradeFromAgent("minutes")
+    }
+
+    /// Ends the agent socket, reports the minutes used, and stops its audio.
+    private func teardownAgent() {
+        agentLimitTask?.cancel()
+        agentLimitTask = nil
+        guard let agent = elevenAgent else { return }
+        let seconds = agent.elapsedSeconds
+        agent.stop()
+        elevenAgent = nil
+        usingElevenAgent = false
+        output.onAgentAudioDrained = nil
+        output.stopAgentPCM()
+        if seconds > 0 {
+            Task {
+                guard let client = try? JarvisCloudAPI.client() else { return }
+                await client.elevenUsage(seconds: seconds)
+            }
+        }
+    }
+
+    /// The agent socket broke mid-conversation. Carry on with Gemini Live instead of ending voice.
+    private func downgradeFromAgent(_ reason: String) async {
+        guard usingElevenAgent else { return }
+        VoiceDebugLog.note("agent", "downgrade \(VoiceDebugLog.safe(reason))")
+        teardownAgent()
+        // The socket can die during a phone call. Open Gemini Live once the microphone is back.
+        var waits = 0
+        while audioInterrupted, isSessionActive, waits < 480 {
+            waits += 1
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        let epoch = sessionEpoch
+        guard let client = try? JarvisCloudAPI.client(),
+              let connected = await connectLive(client: client, epoch: epoch),
+              installLive(connected.session, modality: connected.modality, window: connected.window, epoch: epoch) else {
+            fallBackFromLive(reason)
+            return
+        }
+        voiceLink = "Gemini Live connected"
+        pushActivity()
+    }
+
     private func liveInstruction() -> String {
         let identity: String
         if sharedPersona.isEmpty {
@@ -1329,6 +1600,7 @@ final class AssistantEngine {
         usingGeminiLive = true
         output.bindSharedPlayer(listener.sharedPlayback)
         output.prewarm()
+        installAudioObservers()
         phase = .listening
         let mode = modality == .text ? "text" : "audio-transcript"
         VoiceDebugLog.note("live-open", "\(mode) session \(window)")
@@ -1596,7 +1868,11 @@ final class AssistantEngine {
             }
         }
         statusLine = nil
-        geminiLive?.sendToolResult(id: id, name: name, result: result)
+        if let agent = elevenAgent {
+            agent.sendToolResult(id: id, result: result)
+        } else {
+            geminiLive?.sendToolResult(id: id, name: name, result: result)
+        }
         pushActivity()
     }
 
@@ -1672,6 +1948,10 @@ final class AssistantEngine {
     private func fallBackFromLive(_ reason: String) {
         guard usingGeminiLive else { return }
         liveReopening = false
+        teardownAgent()
+        audioInterrupted = false
+        audioRecoveryTask?.cancel()
+        audioRecoveryTask = nil
         usingGeminiLive = false
         geminiLive?.stop()
         geminiLive = nil

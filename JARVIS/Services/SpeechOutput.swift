@@ -553,6 +553,59 @@ final class SpeechOutput: NSObject {
         if fillerActive { stopFiller() }
     }
 
+    // MARK: Streaming agent audio (ElevenLabs Agents)
+
+    /// Called on the main actor when every agent buffer handed over so far has been heard.
+    var onAgentAudioDrained: (() -> Void)?
+    private var agentPending = 0
+    private var agentGeneration = 0
+
+    /// A byte left over when a chunk splits a 16-bit sample. Dropping it would shift every later sample into noise.
+    private var agentCarry: UInt8?
+    /// Silence ahead of the first chunk of each reply, so a late second chunk does not stutter.
+    private static let agentCushionFrames: Int = 1_440  // 60 ms at 24 kHz
+
+    /// Plays one 24 kHz 16-bit PCM chunk from the agent at once, gapless behind the previous chunk.
+    func playAgentPCM(_ data: Data) {
+        var bytes = data
+        if let carry = agentCarry {
+            bytes.insert(carry, at: bytes.startIndex)
+            agentCarry = nil
+        }
+        if bytes.count % 2 == 1, let last = bytes.last {
+            agentCarry = last
+            bytes.removeLast()
+        }
+        guard let buffer = makeBuffer(bytes),
+              let player = try? ensureEngine(monitorMicrophone: false) else { return }
+        if agentPending == 0, let cushion = makeBuffer(Data(count: Self.agentCushionFrames * 2)) {
+            noteScheduled(cushion, on: player)
+            player.scheduleBuffer(cushion, completionHandler: nil)
+        }
+        track(buffer)
+        noteScheduled(buffer, on: player)
+        agentPending += 1
+        let generation = agentGeneration
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, generation == self.agentGeneration else { return }
+                self.agentPending = max(0, self.agentPending - 1)
+                if self.agentPending == 0 { self.onAgentAudioDrained?() }
+            }
+        }
+    }
+
+    /// Barge-in: drops everything queued for the agent's current reply.
+    func stopAgentPCM() {
+        agentGeneration += 1
+        agentPending = 0
+        agentCarry = nil
+        preparePlayback()
+        stop()
+    }
+
+    var agentAudioQueued: Bool { agentPending > 0 }
+
     func stop() {
         fillerActive = false
         deviceSpeech.stop()

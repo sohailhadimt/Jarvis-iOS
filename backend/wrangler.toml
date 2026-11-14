@@ -31,3 +31,5 @@ ENVIRONMENT = "production"
 ELEVENLABS_FORCE_POLLY = "false"
 # Agents working at the same time (1-6).
 AGENT_LANES = "3"
+# In-app voice agent. Not a secret: the agent requires a signed URL, which only the Worker can mint.
+ELEVENLABS_APP_AGENT_ID = "agent_3901m7bmxyc0f19b1q1myy2cmxxy"

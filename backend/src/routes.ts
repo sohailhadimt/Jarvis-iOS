@@ -44,6 +44,7 @@ import { markPersonaDraft, routePersona } from "./personas";
 import { lastSmsErrors, lastSmsLog, pairResponse, recordSmsError, saveBusy, sendOwnerSmsRoute, simulateSmsRoute } from "./sms-desk";
 import { historyResponse, lineResponse, personaResponse, reminderResponse, sayResponse } from "./brain";
 import { liveTokenResponse } from "./live-token";
+import { elevenSessionResponse, elevenUsageResponse } from "./eleven-session";
 import { readVoiceDebug, saveVoiceDebug, VOICE_DEBUG_REVISION } from "./voice-debug";
 import { optionalSourceUrls } from "./sources";
 import { isPipelineStage, parseMrr, toolsForNames } from "./tools";
@@ -86,6 +87,10 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
       return alertRoute(request, env);
     }
     {
+      const bc = await import("./briefing-call");
+      if (bc.isBriefingWebhook(request.method, path)) return bc.briefingAsk(request, env);
+    }
+    {
       const pa = await import("./proactive-alert");
       if (pa.isAlertWebhook(request.method, path)) return pa.alertWebhook(request, env, path);
     }
@@ -99,6 +104,11 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "POST" && path === "/debug/sms-simulate") return simulateSmsRoute(request, env);
     if (request.method === "POST" && path === "/debug/voice") return saveVoiceDebug(request, env);
     if (request.method === "POST" && path === "/voice/live-token") return liveTokenResponse(env);
+    if (path === "/briefing/call-settings" && (request.method === "GET" || request.method === "POST")) {
+      return (await import("./briefing-call")).settingsRoute(request, env);
+    }
+    if (request.method === "POST" && path === "/voice/eleven-session") return elevenSessionResponse(env);
+    if (request.method === "POST" && path === "/voice/eleven-usage") return elevenUsageResponse(request, env);
     if (request.method === "POST" && path === "/messages/sms") return sendOwnerSmsRoute(request, env);
     if (request.method === "GET" && path === "/debug/voice") {
       return json({ revision: VOICE_DEBUG_REVISION, events: await readVoiceDebug(env) });
@@ -196,6 +206,8 @@ function normalizePath(pathname: string): string {
   return pathname || "/";
 }
 
+let healthyUntil = 0;
+
 async function health(env: Env): Promise<Response> {
   const body = {
     service: SERVICE,
@@ -205,7 +217,11 @@ async function health(env: Env): Promise<Response> {
     external_actions: false,
   };
   try {
-    await dbFirst<{ ok: number }>(env, "SELECT 1 AS ok");
+    // A healthy D1 answer is reused for a few seconds so health polling does not queue behind real work.
+    if (Date.now() >= healthyUntil) {
+      await dbFirst<{ ok: number }>(env, "SELECT 1 AS ok");
+      healthyUntil = Date.now() + 5_000;
+    }
     return json({ ok: true, ...body, db: "ok" });
   } catch (err) {
     return json(

@@ -281,6 +281,9 @@ struct VoicesSettingsView: View {
                 Toggle("Start with voice", isOn: $settings.startWithVoice)
                 Toggle("Background conversations", isOn: $settings.backgroundConversations)
                 Toggle("Captions on", isOn: $settings.captionsDefault)
+                Toggle("ElevenLabs live voice", isOn: $settings.elevenAgentVoice)
+                Text("Streaming George with instant barge-in. Uses ElevenLabs minutes (about 15 a day at most). Off, or out of minutes, JARVIS uses Gemini Live.")
+                    .font(.footnote).foregroundStyle(.secondary)
                 Picker("Language", selection: $settings.speechLocale) {
                     Text("English (UK)").tag("en-GB")
                     Text("English (US)").tag("en-US")

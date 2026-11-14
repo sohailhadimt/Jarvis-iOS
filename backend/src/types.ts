@@ -71,6 +71,9 @@ export interface Env {
   TWILIO_FROM_NUMBER?: string;
   ELEVENLABS_API_KEY?: string;
   ELEVENLABS_AGENT_ID?: string;
+  /** In-app voice agent (signed URL only). Daily seconds cap is ELEVENLABS_APP_DAILY_SECONDS. */
+  ELEVENLABS_APP_AGENT_ID?: string;
+  ELEVENLABS_APP_DAILY_SECONDS?: string;
   /** Optional pin for the ASG receptionist agent; otherwise looked up by name. */
   ASG_AGENT_ID?: string;
   /** "off" sends every caller to JARVIS again. */

@@ -24,6 +24,7 @@ export default {
         sweepMemoryNudges(env),
         sweepHunts(env),
         sweepInboundCalls(env),
+        import("./briefing-call").then((m) => m.sweepBriefingCall(env)).catch(() => "error"),
       ]),
     );
   },
