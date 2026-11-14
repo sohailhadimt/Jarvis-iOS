@@ -560,10 +560,28 @@ final class SpeechOutput: NSObject {
     private var agentPending = 0
     private var agentGeneration = 0
 
+    /// A byte left over when a chunk splits a 16-bit sample. Dropping it would shift every later sample into noise.
+    private var agentCarry: UInt8?
+    /// Silence ahead of the first chunk of each reply, so a late second chunk does not stutter.
+    private static let agentCushionFrames: Int = 1_440  // 60 ms at 24 kHz
+
     /// Plays one 24 kHz 16-bit PCM chunk from the agent at once, gapless behind the previous chunk.
     func playAgentPCM(_ data: Data) {
-        guard let buffer = makeBuffer(data),
+        var bytes = data
+        if let carry = agentCarry {
+            bytes.insert(carry, at: bytes.startIndex)
+            agentCarry = nil
+        }
+        if bytes.count % 2 == 1, let last = bytes.last {
+            agentCarry = last
+            bytes.removeLast()
+        }
+        guard let buffer = makeBuffer(bytes),
               let player = try? ensureEngine(monitorMicrophone: false) else { return }
+        if agentPending == 0, let cushion = makeBuffer(Data(count: Self.agentCushionFrames * 2)) {
+            noteScheduled(cushion, on: player)
+            player.scheduleBuffer(cushion, completionHandler: nil)
+        }
         track(buffer)
         noteScheduled(buffer, on: player)
         agentPending += 1
@@ -581,6 +599,7 @@ final class SpeechOutput: NSObject {
     func stopAgentPCM() {
         agentGeneration += 1
         agentPending = 0
+        agentCarry = nil
         preparePlayback()
         stop()
     }

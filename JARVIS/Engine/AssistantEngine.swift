@@ -193,6 +193,8 @@ final class AssistantEngine {
     /// ElevenLabs Agents conversation. While it runs, `usingGeminiLive` is also true so every "live session" gate applies.
     @ObservationIgnored private var elevenAgent: ElevenAgentSession?
     @ObservationIgnored private var usingElevenAgent = false
+    /// Hands over to Gemini Live when today's ElevenLabs allowance for this conversation runs out.
+    @ObservationIgnored private var agentLimitTask: Task<Void, Never>?
     @ObservationIgnored private var liveReconnects = 0
     @ObservationIgnored private var liveReopening = false
     /// Speech was heard while George was talking. Volume is ducked until the transcript says user or echo.
@@ -1251,6 +1253,13 @@ final class AssistantEngine {
         output.bindSharedPlayer(listener.sharedPlayback)
         output.prewarm()
         output.onAgentAudioDrained = { [weak self] in self?.agentAudioDrained() }
+        let limit = max(30, ticket.maxSeconds)
+        agentLimitTask?.cancel()
+        agentLimitTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(limit) * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.agentLimitReached()
+        }
         phase = .listening
         VoiceDebugLog.note("live-open", "elevenlabs agent \(session.conversationID.prefix(12))")
         noteCapturePath()
@@ -1308,8 +1317,22 @@ final class AssistantEngine {
         pushActivity()
     }
 
+    /// The allowance is spent. Let George finish his sentence, then carry on with Gemini Live.
+    private func agentLimitReached() async {
+        guard usingElevenAgent else { return }
+        var waits = 0
+        while usingElevenAgent, phase == .speaking || output.agentAudioQueued, waits < 40 {
+            waits += 1
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        guard usingElevenAgent else { return }
+        await downgradeFromAgent("minutes")
+    }
+
     /// Ends the agent socket, reports the minutes used, and stops its audio.
     private func teardownAgent() {
+        agentLimitTask?.cancel()
+        agentLimitTask = nil
         guard let agent = elevenAgent else { return }
         let seconds = agent.elapsedSeconds
         agent.stop()

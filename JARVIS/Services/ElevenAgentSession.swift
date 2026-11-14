@@ -26,6 +26,7 @@ final class ElevenAgentSession: @unchecked Sendable {
     private var openWait: CheckedContinuation<Bool, Never>?
     private var staged: [String] = []
     private var interruptFloor = -1
+    private var sendFailed = false
     private(set) var conversationID = ""
     private(set) var startedAt: Date?
 
@@ -38,6 +39,7 @@ final class ElevenAgentSession: @unchecked Sendable {
         let ticket = generation
         stopped = false
         ready = false
+        sendFailed = false
         staged.removeAll()
         lock.unlock()
         let urlSession = URLSession(configuration: .default)
@@ -63,7 +65,8 @@ final class ElevenAgentSession: @unchecked Sendable {
                 if error != nil { self?.finishOpen(false, generation: ticket) }
             }
             Task {
-                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                // Five seconds, then Gemini Live opens instead of leaving the user waiting.
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
                 self.finishOpen(false, generation: ticket)
             }
         }
@@ -109,7 +112,13 @@ final class ElevenAgentSession: @unchecked Sendable {
         let task = socket
         lock.unlock()
         task?.send(.string(message)) { [weak self] error in
-            if error != nil { self?.emit(.failed("audio send")) }
+            guard error != nil, let self else { return }
+            // One failure is enough to hand over to Gemini Live; ten a second would queue ten downgrades.
+            self.lock.lock()
+            let first = !self.sendFailed && !self.stopped
+            self.sendFailed = true
+            self.lock.unlock()
+            if first { self.emit(.failed("audio send")) }
         }
     }
 
@@ -169,8 +178,14 @@ final class ElevenAgentSession: @unchecked Sendable {
             guard current === task, !halted else { return }
             switch result {
             case .failure:
+                let wasReady = self.isReady
                 self.finishOpen(false)
-                self.emit(.closed)
+                // A clean close is the agent ending the call. A dropped line mid-conversation hands over to Gemini Live.
+                if wasReady && task.closeCode != .normalClosure {
+                    self.emit(.failed("socket dropped"))
+                } else {
+                    self.emit(.closed)
+                }
             case .success(let message):
                 let data: Data?
                 switch message {
@@ -240,6 +255,12 @@ final class ElevenAgentSession: @unchecked Sendable {
         default:
             break
         }
+    }
+
+    private var isReady: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return ready
     }
 
     /// Audio of a reply the user already talked over can still be in flight. Drop it.
