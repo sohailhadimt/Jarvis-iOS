@@ -584,7 +584,40 @@ export async function routeDeskApi(request: Request, env: Env, path: string): Pr
     return json(await ensureDeskAgent(env, origin, true));
   }
   if (request.method === "GET" && path === "/calls/desk") {
-    return json({ agent_ready: Boolean(await deskAgentId(env)), version: await getState(env, "desk_agent_version").catch(() => null) });
+    const id = await deskAgentId(env);
+    const apiKey = (env.ELEVENLABS_API_KEY ?? "").trim();
+    let agent: Record<string, unknown> | null = null;
+    if (id && apiKey) {
+      const got = await eleven(apiKey, "GET", `/v1/convai/agents/${encodeURIComponent(id)}`);
+      const config = isRecord(got.body) && isRecord(got.body.conversation_config) ? got.body.conversation_config : {};
+      const a = isRecord(config.agent) ? config.agent : {};
+      const p = isRecord(a.prompt) ? a.prompt : {};
+      const tts = isRecord(config.tts) ? config.tts : {};
+      const asr = isRecord(config.asr) ? config.asr : {};
+      agent = {
+        status: got.status,
+        name: isRecord(got.body) ? got.body.name : null,
+        first_message: a.first_message ?? null,
+        voice_is_george: tts.voice_id === JARVIS_VOICE_ID,
+        output_format: tts.agent_output_audio_format ?? null,
+        input_format: asr.user_input_audio_format ?? null,
+        tool_count: Array.isArray(p.tool_ids) ? p.tool_ids.length : 0,
+        llm: p.llm ?? null,
+        prompt_has_busy_line: typeof p.prompt === "string" && p.prompt.includes(BUSY_LINE),
+        error: got.ok ? null : got.detail,
+      };
+    }
+    return json({ agent_ready: Boolean(id), version: await getState(env, "desk_agent_version").catch(() => null), agent });
+  }
+  if (request.method === "POST" && path === "/debug/desk-session") {
+    // App-token only: a signed URL so a text-only test conversation can exercise the desk prompt and tools.
+    const id = await deskAgentId(env);
+    const apiKey = (env.ELEVENLABS_API_KEY ?? "").trim();
+    if (!id || !apiKey) return apiError(503, "not_ready", "Desk agent is not set up.");
+    const got = await eleven(apiKey, "GET", `/v1/convai/conversation/get-signed-url?agent_id=${encodeURIComponent(id)}`);
+    const url = isRecord(got.body) && typeof got.body.signed_url === "string" ? got.body.signed_url : "";
+    if (!url) return apiError(502, "eleven", got.detail || "No signed URL.");
+    return json({ signed_url: url });
   }
   if (request.method === "GET" && path === "/calls/requests") {
     await ensureDeskTables(env);
