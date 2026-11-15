@@ -143,6 +143,7 @@ describe("owner SMS conversation", () => {
 
   it("helpers", () => {
     expect(gsmText("It’s “fine” — really… 👍")).toBe(`It's "fine" - really...`);
+    expect(gsmText("a plan—perhaps tea. Let me know.A warm cup")).toBe("a plan - perhaps tea. Let me know. A warm cup");
     expect(chatBubbles("a ".repeat(400))).toHaveLength(1);
     expect(chatBubbles("a ".repeat(400))[0]!.length).toBeLessThanOrEqual(306);
     expect(chatBubbles("Word. ".repeat(150), true).length).toBe(3);

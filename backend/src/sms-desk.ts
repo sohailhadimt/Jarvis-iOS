@@ -137,12 +137,17 @@ export function gsmText(text: string): string {
   const swapped = text
     .replace(/[‘’ʼ′`]/g, "'")
     .replace(/[“”″]/g, '"')
-    .replace(/[–—−]/g, "-")
+    .replace(/\s*[–—]\s*/g, " - ")
+    .replace(/−/g, "-")
     .replace(/…/g, "...")
     .replace(/[\u00a0\t]/g, " ");
   let out = "";
   for (const char of swapped) out += GSM_SAFE.test(char) ? char : "";
-  return out.replace(/ {2,}/g, " ").replace(/\s+([.,!?])/g, "$1").trim();
+  return out
+    .replace(/ {2,}/g, " ")
+    .replace(/\s+([.,!?])/g, "$1")
+    .replace(/([a-z][.!?])([A-Z])/g, "$1 $2")
+    .trim();
 }
 
 /** Two GSM segments. A longer chat reply is cut at a sentence so it still reads as one text. */

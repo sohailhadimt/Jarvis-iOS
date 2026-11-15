@@ -58,6 +58,7 @@ export function brainSystem(channel: "sms" | "app", options?: { detail?: boolean
         ? "He asked for detail, so you may write up to about 800 characters. Plain text, no markdown."
         : "Keep it to one to three short sentences, under 300 characters in total.",
       "Plain text only: no emoji, no markdown, no bullet points, and do not include URLs.",
+      "Write one single reply. Do not offer to order, buy, book, or arrange anything unless he asks for it.",
       "If you are unsure about something current, say so briefly or use web_search. Never invent facts, prices, or phone numbers.",
       "You cannot dial from this chat. Never say you are calling now, ringing now, or that a call has been placed. The server places calls.",
       "A message that starts with call, ring, or phone waits until he replies YES. Replying 1, you call, or call him back to a call message is already approved.",
