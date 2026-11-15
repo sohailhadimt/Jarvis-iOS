@@ -48,14 +48,19 @@ export interface BrainAnswer {
 const LIMIT = 60;
 let ready = false;
 
-export function brainSystem(channel: "sms" | "app"): string {
+export function brainSystem(channel: "sms" | "app", options?: { detail?: boolean }): string {
   if (channel === "sms") {
     return [
       BRAIN_PERSONA,
-      "This reply is an SMS. Write two or three short sentences. Each sentence ends with a full stop and can stand alone as its own text.",
+      "This reply is an SMS. You are texting Sir directly, as his trusted British butler and a sharp, well-read companion.",
+      "Talk naturally, like a real conversation: answer his questions, give a view when he asks for one, keep a light dry wit, and follow on from the earlier texts in this thread. Do not list what you can do or offer menus unless he asks.",
+      options?.detail
+        ? "He asked for detail, so you may write up to about 800 characters. Plain text, no markdown."
+        : "Keep it to one to three short sentences, under 300 characters in total.",
+      "Plain text only: no emoji, no markdown, no bullet points, and do not include URLs.",
+      "If you are unsure about something current, say so briefly or use web_search. Never invent facts, prices, or phone numbers.",
       "You cannot dial from this chat. Never say you are calling now, ringing now, or that a call has been placed. The server places calls.",
       "A message that starts with call, ring, or phone waits until he replies YES. Replying 1, you call, or call him back to a call message is already approved.",
-      "Do not include URLs.",
     ].join("\n");
   }
   return [
@@ -63,6 +68,9 @@ export function brainSystem(channel: "sms" | "app"): string {
     "This reply is for the iPhone app and is spoken in George's voice. One to three short sentences. No markdown and no URLs.",
   ].join("\n");
 }
+
+/** Texts kept per phone for the SMS conversation. */
+export const SMS_HISTORY = 20;
 
 /** Rewrites a claim that a call is already ringing when no tool placed one. */
 export function guardUnplacedCall(text: string): string {
@@ -202,20 +210,36 @@ export async function createReminder(env: Env, text: string, dueAt: string | nul
   return "Reminder saved, Sir. Nothing was sent.";
 }
 
-/** Answer from the shared history. The caller stores the user line first. */
-export async function brainReply(env: Env, channel: "sms" | "app"): Promise<BrainAnswer> {
-  await syncCalls(env);
+/**
+ * Answer from history. The caller stores the user line first.
+ * SMS with a phone reads that phone's own last 20 texts, so a reply follows on from the thread
+ * and never picks up another caller's transcript or a test thread. The app keeps the shared brain.
+ */
+export async function brainReply(
+  env: Env,
+  channel: "sms" | "app",
+  options?: { phone?: string; detail?: boolean },
+): Promise<BrainAnswer> {
+  const phone = channel === "sms" ? options?.phone ?? "" : "";
+  if (!phone) await syncCalls(env);
   const facts = await dbAll<{ detail: string }>(env, "SELECT detail FROM owner_facts ORDER BY created_at DESC LIMIT 12").catch(() => []);
   const reminders = await openReminders(env).catch(() => []);
-  const turns = await dbAll<{ role: string; body: string }>(
-    env,
-    "SELECT role, body FROM brain_turns ORDER BY created_at DESC LIMIT 16",
-  ).catch(() => []);
+  const turns = phone
+    ? await dbAll<{ role: string; body: string }>(
+        env,
+        "SELECT role, body FROM sms_turns WHERE phone = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+        [phone, SMS_HISTORY],
+      ).catch(() => [])
+    : await dbAll<{ role: string; body: string }>(
+        env,
+        "SELECT role, body FROM brain_turns ORDER BY created_at DESC LIMIT 16",
+      ).catch(() => []);
   const messages: ChatMessage[] = [
     {
       role: "system",
       content: [
-        brainSystem(channel),
+        brainSystem(channel, { detail: options?.detail }),
+        `It is ${londonNow()} in London.`,
         facts.length ? `Known facts:\n${facts.map((fact) => `- ${fact.detail}`).join("\n")}` : "No saved facts yet.",
         reminders.length ? `Open reminders:\n${reminders.map((item) => `- ${item}`).join("\n")}` : "No open reminders.",
       ].join("\n"),
@@ -226,13 +250,15 @@ export async function brainReply(env: Env, channel: "sms" | "app"): Promise<Brai
     if (!turn.body) continue;
     messages.push({ role: turn.role, content: turn.body });
   }
+  const finish = (raw: string | null): string => {
+    const text = phone ? smsAnswer(raw ?? "", Boolean(options?.detail)) : spokenAnswer(raw ?? "");
+    return guardUnplacedCall(text ?? "I've noted that, Sir.");
+  };
   const tools = brainTools();
   const first = await completeChat(env, messages, tools);
   if (!first.ok) return { text: CHAT_FALLBACK, error: `${first.code}: ${first.message}` };
   const calls = first.message.tool_calls ?? [];
-  if (calls.length === 0) {
-    return { text: guardUnplacedCall(spokenAnswer(first.message.content ?? "") ?? "I've noted that, Sir."), error: null };
-  }
+  if (calls.length === 0) return { text: finish(first.message.content), error: null };
   messages.push(first.message);
   for (const call of calls.slice(0, 3)) {
     const result = await runBrainTool(env, call.function.name, call.function.arguments, channel);
@@ -245,7 +271,31 @@ export async function brainReply(env: Env, channel: "sms" | "app"): Promise<Brai
   }
   const second = await completeChat(env, messages, null);
   if (!second.ok) return { text: "I've noted that, Sir.", error: `${second.code}: ${second.message}` };
-  return { text: guardUnplacedCall(spokenAnswer(second.message.content ?? "") ?? "I've noted that, Sir."), error: null };
+  return { text: finish(second.message.content), error: null };
+}
+
+/** SMS chat text: no links or markdown, and short unless he asked for detail. */
+export function smsAnswer(raw: string, detail: boolean): string | null {
+  if (!detail) return spokenAnswer(raw.replace(/[*_#`]+/g, ""));
+  const text = raw
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/[*_#`]+/g, "")
+    .replace(/^\s*[-•]\s+/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length < 2 ? null : text.slice(0, 900);
+}
+
+function londonNow(): string {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date());
 }
 
 export function brainTools(): LlmTool[] {

@@ -130,6 +130,61 @@ export function smsBubbles(text: string): string[] {
   return bubbles.slice(0, 3);
 }
 
+/** Characters a phone sends in the cheap GSM-7 alphabet. Anything else turns the text into 70-character segments. */
+const GSM_SAFE = /[A-Za-z0-9 \n@£$¥èéùìòÇØøÅå_ÆæßÉ!"#¤%&'()*+,\-./:;<=>?¡ÄÖÑÜ§¿äöñüà]/;
+
+export function gsmText(text: string): string {
+  const swapped = text
+    .replace(/[‘’ʼ′`]/g, "'")
+    .replace(/[“”″]/g, '"')
+    .replace(/[–—−]/g, "-")
+    .replace(/…/g, "...")
+    .replace(/[\u00a0\t]/g, " ");
+  let out = "";
+  for (const char of swapped) out += GSM_SAFE.test(char) ? char : "";
+  return out.replace(/ {2,}/g, " ").replace(/\s+([.,!?])/g, "$1").trim();
+}
+
+/** Two GSM segments. A longer chat reply is cut at a sentence so it still reads as one text. */
+export const CHAT_SMS_MAX = 306;
+
+/** A chat reply goes out as one text (up to two segments). With detail it may run to three texts. */
+export function chatBubbles(text: string, detail = false): string[] {
+  const clean = gsmText(text.replace(/https?:\/\/\S+/gi, " ").replace(/\s+/g, " "));
+  if (!clean) return ["I'm here, Sir."];
+  const parts: string[] = [];
+  let rest = clean;
+  const limit = detail ? 3 : 1;
+  while (rest && parts.length < limit) {
+    if (rest.length <= CHAT_SMS_MAX) {
+      parts.push(rest);
+      rest = "";
+      break;
+    }
+    const window = rest.slice(0, CHAT_SMS_MAX);
+    const stop = Math.max(window.lastIndexOf(". "), window.lastIndexOf("? "), window.lastIndexOf("! "));
+    const cut = stop >= 80 ? stop + 1 : window.lastIndexOf(" ") > 80 ? window.lastIndexOf(" ") : CHAT_SMS_MAX;
+    parts.push(rest.slice(0, cut).trim());
+    rest = rest.slice(cut).trim();
+  }
+  return parts.filter(Boolean);
+}
+
+/** He asked for the long version. */
+export function wantsDetail(text: string): boolean {
+  return /\b(?:in detail|more detail|full detail|details|explain|elaborate|in depth|step by step|break(?: it)? down|full (?:list|breakdown|version|story)|go into|longer)\b/i.test(text);
+}
+
+/** "Should I buy...?" is a question for chat, not a payment request. */
+export function adviceQuestion(text: string): boolean {
+  return /^(?:should|would|is|are|was|were|what|which|how|why|when|where|do|does|did|who|whats|what's)\b/i.test(text.trim());
+}
+
+/** Test threads for /debug/sms-simulate. Ofcom drama numbers, which never ring a real phone. */
+export function simulatedPhone(phone: string): boolean {
+  return /^\+447700900\d{3}$/.test(phone);
+}
+
 const CALLBACK_KEY = "sms_callback";
 const OUTBOUND_KEY = "sms_outbound_yes";
 /** One pending call per sender. Older global keys are still read so a proposal already saved can be approved. */
@@ -703,7 +758,7 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
     return;
   }
   await rememberFacts(env, text);
-  if (paymentAsk(text)) {
+  if (paymentAsk(text) && !adviceQuestion(text)) {
     await queueApproval(env, "payment", explicitSummary(text), "explicit_authorisation", { kind: "payment" });
     await reply(env, phone, "That needs your approval, Sir. I have not paid anything or minted a card.");
     return;
@@ -747,7 +802,7 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
     await reply(env, phone, await offerCallback(env, phone, text));
     return;
   }
-  if (follow === "detail") {
+  if (follow === "detail" && (await callContext(env, phone, text))) {
     try {
       await reply(env, phone, await describeLatestCall(env));
     } catch (err) {
@@ -756,7 +811,21 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
     }
     return;
   }
-  await reply(env, phone, await chatReply(env, phone));
+  const detail = wantsDetail(text);
+  await replyChat(env, phone, await chatReply(env, phone, detail), detail);
+}
+
+/** "more" or "details" only means the last call when the thread was about a call. Otherwise it is chat. */
+async function callContext(env: Env, phone: string, text: string): Promise<boolean> {
+  const clean = text.toLowerCase().replace(/[?!.,'"’]/g, " ").replace(/\s+/g, " ").trim();
+  if (!/^(?:more|details|more details|tell me more)$/.test(clean)) return true;
+  const last = await dbFirst<{ body: string }>(
+    env,
+    "SELECT body FROM sms_turns WHERE phone = ? AND role = 'assistant' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    [phone],
+  ).catch(() => null);
+  if (!last) return true;
+  return /\b(?:called|rang|rung|caller|calling|message from|call back|call them|call him|call her)\b/i.test(last.body);
 }
 
 interface LatestCall {
@@ -1177,9 +1246,23 @@ async function reply(env: Env, phone: string, text: string, brain = "reply"): Pr
   const lines = smsCapture.get(env);
   if (lines) {
     lines.push(text);
+    await rememberTurn(env, phone, "assistant", text);
     return;
   }
   await sendBubbles(env, phone, smsBubbles(text));
+}
+
+/** A conversational reply: one text, two segments at most, unless he asked for detail. */
+async function replyChat(env: Env, phone: string, text: string, detail: boolean): Promise<void> {
+  const bubbles = chatBubbles(text, detail);
+  await noteSmsLog(env, { direction: "out", status: "reply", errorCode: "", brain: "chat", detail: bubbles.join(" "), sid: "" });
+  const lines = smsCapture.get(env);
+  if (lines) {
+    lines.push(...bubbles);
+    for (const bubble of bubbles) await rememberTurn(env, phone, "assistant", bubble);
+    return;
+  }
+  await sendBubbles(env, phone, bubbles);
 }
 
 async function sendBubbles(env: Env, phone: string, bubbles: string[]): Promise<void> {
@@ -1332,14 +1415,19 @@ export async function simulateSmsRoute(request: Request, env: Env): Promise<Resp
   if (!isRecord(body.value)) return apiError(400, "bad_request", "text is required.");
   const text = asString(body.value.text, 500);
   if (!text) return apiError(400, "bad_request", "text is required.");
+  // A thread is a separate Ofcom drama number, so a test conversation keeps its own history.
+  const thread = typeof body.value.thread === "string" && /^\d{1,3}$/.test(body.value.thread) ? body.value.thread : "0";
+  const phone = `+447700900${thread.padStart(3, "0")}`;
+  if (body.value.reset === true) await dbRun(env, "DELETE FROM sms_turns WHERE phone = ?", [phone]).catch(() => 0);
   const lines: string[] = [];
   smsCapture.set(env, lines);
   try {
-    await answerOwner(env, "+447700900000", text);
+    await answerOwner(env, phone, text);
   } finally {
     smsCapture.delete(env);
   }
-  return json({ ok: true, reply: lines.join(" "), sent: false });
+  const history = await dbFirst<{ n: number }>(env, "SELECT count(*) AS n FROM sms_turns WHERE phone = ?", [phone]).catch(() => null);
+  return json({ ok: true, reply: lines.join(" "), texts: lines, history: Number(history?.n ?? 0), sent: false });
 }
 
 export async function lastSmsErrors(env: Env): Promise<Response> {
@@ -1363,9 +1451,8 @@ function redactSmsDetail(text: string): string {
     .slice(0, 400);
 }
 
-async function chatReply(env: Env, phone: string): Promise<string> {
-  void phone;
-  const answered = await brainReply(env, "sms");
+async function chatReply(env: Env, phone: string, detail = false): Promise<string> {
+  const answered = await brainReply(env, "sms", { phone, detail });
   if (answered.error) await recordSmsError(env, "chat", answered.error);
   return guardUnplacedCall(answered.text);
 }
@@ -1438,6 +1525,7 @@ async function rememberTurn(env: Env, phone: string, role: "user" | "assistant",
     clip(body, 1000),
     nowIso(),
   ]);
+  if (simulatedPhone(phone)) return;
   await rememberLine(env, { source: "sms", role, body }).catch(() => undefined);
 }
 
