@@ -149,3 +149,23 @@ if (!/fish|chips|yellow fisherman/i.test(third)) console.error("sms chat did not
 NODE
   rm -f /tmp/live-chat_*.json
 fi
+
+# Voice notes. Each simulated request runs once per nonce (in voice-check.nonce), so a deploy does not
+# spend ElevenLabs credits twice. The clip links are public by design: the link is the key to one clip.
+if [ -n "$token" ]; then
+  here="$(cd "$(dirname "$0")" && pwd)"
+  nonce="$(tr -dc 'A-Za-z0-9_-' < "$here/voice-check.nonce" 2>/dev/null || true)"
+  if [ -n "$nonce" ]; then
+    CURL_MAX=60 hit voice_beatbox POST /debug/voice-once "{\"nonce\":\"${nonce}-beatbox\",\"text\":\"Send me a voice message of you beatboxing\"}" yes
+    CURL_MAX=60 hit voice_speech POST /debug/voice-once "{\"nonce\":\"${nonce}-speech\",\"text\":\"Send me a voice note saying good night\"}" yes
+    CURL_MAX=60 hit voice_rap POST /debug/voice-once "{\"nonce\":\"${nonce}-rap\",\"text\":\"Can you rap for me about fish and chips\"}" yes
+  fi
+  if [ -f "$here/voice-proof.on" ]; then
+    CURL_MAX=60 hit voice_proof POST /debug/voice-proof '{}' yes
+  fi
+  hit voice_notes GET /debug/voice-notes "" yes
+  for f in voice_beatbox voice_speech voice_rap voice_proof voice_notes; do
+    [ -f "/tmp/live-$f.json" ] && echo "$f $(sed -E 's/\+[0-9]{6,}/[number]/g' "/tmp/live-$f.json" | cut -c1-700)"
+  done
+  rm -f /tmp/live-voice_*.json
+fi

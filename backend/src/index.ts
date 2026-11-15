@@ -24,6 +24,7 @@ export default {
         sweepMemoryNudges(env),
         sweepHunts(env),
         sweepInboundCalls(env),
+        import("./voice-notes").then((m) => m.sweepVoiceNotes(env)).catch(() => null),
         import("./desk")
           .then(async (m) => {
             const { readCallSettings } = await import("./owner-alert");

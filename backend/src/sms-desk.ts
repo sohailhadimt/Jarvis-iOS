@@ -5,6 +5,7 @@ import { isRecord, json, newId, nowIso, apiError, asString, readJson } from "./h
 import { CHAT_FALLBACK } from "./llm";
 import { inQuietHours, londonDay, londonMinutes, readCallSettings, readOwnerMobile } from "./owner-alert";
 import { webSearch } from "./search";
+import { callOwnerWithNote, makeVoiceNote, noteFailure, noteLine, voiceAsk, type VoiceAsk } from "./voice-notes";
 import { parseToolArgs } from "./tools";
 import type { Env } from "./types";
 
@@ -738,6 +739,11 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
     await reply(env, phone, choiceReply === "dial" ? await placeLatestCallback(env, phone) : await sendCallerNumber(env));
     return;
   }
+  const voice = voiceAsk(text);
+  if (voice) {
+    await deliverVoiceNote(env, phone, text, voice);
+    return;
+  }
   const asked = outboundAsk(text) ?? looseCall(text);
   if (asked) {
     await reply(env, phone, await offerOutbound(env, phone, asked), "offer");
@@ -818,6 +824,93 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
   }
   const detail = wantsDetail(text);
   await replyChat(env, phone, await chatReply(env, phone, detail), detail);
+}
+
+/** Makes the audio and texts one line plus the link. "Call me and say it" rings his own number instead. */
+async function deliverVoiceNote(env: Env, phone: string, text: string, ask: VoiceAsk): Promise<void> {
+  const history = await dbAll<{ role: string; body: string }>(
+    env,
+    "SELECT role, body FROM sms_turns WHERE phone = ? ORDER BY created_at DESC, rowid DESC LIMIT 8",
+    [phone],
+  ).catch(() => []);
+  const made = await makeVoiceNote(env, ask, text, [...history].reverse());
+  if (!made.ok || !made.note) {
+    await recordSmsError(env, "voice", made.error ?? "voice note failed");
+    await reply(env, phone, noteFailure(made), "voice-failed");
+    return;
+  }
+  const url = made.note.url;
+  if (ask.byCall) {
+    if (smsCapture.get(env)) {
+      await replyLine(env, phone, `Simulation: I would ring you now to play it, Sir. Nothing was dialled. ${url}`, "voice-call-sim");
+      return;
+    }
+    const owner = await readOwnerMobile(env);
+    if (owner && toE164(phone) === owner) {
+      const call = await callOwnerWithNote(env, owner, url);
+      if (call.ok) {
+        await replyLine(env, phone, `Ringing you now to play it, Sir. If you miss it: ${url}`, "voice-call");
+        return;
+      }
+      await recordSmsError(env, "voice-call", call.error);
+      await replyLine(env, phone, `I couldn't ring you just now, Sir, so here it is to play: ${url}`, "voice-call-failed");
+      return;
+    }
+  }
+  await replyLine(env, phone, noteLine(ask, url), "voice");
+}
+
+/** One text sent as written, link included. */
+async function replyLine(env: Env, phone: string, line: string, brain: string): Promise<void> {
+  await noteSmsLog(env, { direction: "out", status: "reply", errorCode: "", brain, detail: line, sid: "" });
+  const lines = smsCapture.get(env);
+  if (lines) {
+    lines.push(line);
+    await rememberTurn(env, phone, "assistant", line);
+    return;
+  }
+  await sendBubbles(env, phone, [line]);
+}
+
+/** Generates a beatbox note and texts it to Sir once ever, as live proof. Later calls only report. */
+export async function voiceProofRoute(env: Env): Promise<Response> {
+  const key = "voice_proof_sent";
+  const prior = await getState(env, key).catch(() => null);
+  if (prior) return json({ ok: true, already: true, ...JSON.parse(prior) });
+  const owner = await readOwnerMobile(env);
+  if (!owner) return apiError(409, "no_owner", "No owner mobile is saved.");
+  const ask: VoiceAsk = { kind: "beatbox", byCall: false, prompt: "" };
+  const made = await makeVoiceNote(env, ask, "Send me a voice message of you beatboxing");
+  if (!made.ok || !made.note) return json({ ok: false, sent: false, error: redactSmsDetail(made.error ?? "failed") });
+  await setState(env, key, JSON.stringify({ url: made.note.url, at: new Date().toISOString(), pending: true }));
+  const result = await sendSmsResult(env, owner, noteLine(ask, made.note.url));
+  const record = { url: made.note.url, at: new Date().toISOString(), sid: result.sid, status: result.status, error: result.error, bytes: made.note.bytes };
+  await setState(env, key, JSON.stringify(record));
+  await rememberTurn(env, owner, "assistant", noteLine(ask, made.note.url)).catch(() => undefined);
+  return json({ ok: result.ok, sent: result.ok, ...record });
+}
+
+/** Runs one simulated voice request per nonce, so a deploy check does not spend credits twice. */
+export async function voiceOnceRoute(request: Request, env: Env): Promise<Response> {
+  const body = await readJson(request);
+  if (!body.ok) return body.response;
+  if (!isRecord(body.value)) return apiError(400, "bad_request", "nonce and text are required.");
+  const nonce = asString(body.value.nonce, 40);
+  const text = asString(body.value.text, 300);
+  if (!nonce || !text || !/^[A-Za-z0-9_-]+$/.test(nonce)) return apiError(400, "bad_request", "nonce and text are required.");
+  const key = `voice_once:${nonce}`;
+  const prior = await getState(env, key).catch(() => null);
+  if (prior) return json({ ok: true, already: true, ...JSON.parse(prior) });
+  const lines: string[] = [];
+  smsCapture.set(env, lines);
+  try {
+    await answerOwner(env, "+447700900777", text);
+  } finally {
+    smsCapture.delete(env);
+  }
+  const record = { texts: lines, at: new Date().toISOString() };
+  await setState(env, key, JSON.stringify(record));
+  return json({ ok: true, sent: false, ...record });
 }
 
 /** "more" or "details" only means the last call when the thread was about a call. Otherwise it is chat. */

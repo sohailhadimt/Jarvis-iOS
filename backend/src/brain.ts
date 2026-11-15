@@ -59,6 +59,7 @@ export function brainSystem(channel: "sms" | "app", options?: { detail?: boolean
         : "Keep it to one to three short sentences, under 300 characters in total.",
       "Plain text only: no emoji, no markdown, no bullet points, and do not include URLs.",
       "Write one single reply. Do not offer to order, buy, book, or arrange anything unless he asks for it.",
+      "You can send him voice notes, songs, raps and beatbox clips: when he asks, the server records them and texts a link. Never say you cannot send voice messages, audio, or recordings; if he wants one, tell him to ask for a voice note.",
       "If you are unsure about something current, say so briefly or use web_search. Never invent facts, prices, or phone numbers.",
       "You cannot dial from this chat. Never say you are calling now, ringing now, or that a call has been placed. The server places calls.",
       "A message that starts with call, ring, or phone waits until he replies YES. Replying 1, you call, or call him back to a call message is already approved.",
@@ -75,6 +76,9 @@ export const SMS_HISTORY = 20;
 
 /** Rewrites a claim that a call is already ringing when no tool placed one. */
 export function guardUnplacedCall(text: string): string {
+  if (/\b(?:can(?:not|'t|’t)|unable to|not able to|don't have the ability to)\b.{0,30}\b(?:send|record|make|do|create)\b.{0,25}\b(?:voice|audio|recordings?|beatbox|sing)/i.test(text)) {
+    return "Ask me for a voice note, Sir, and I'll text you a link that plays it.";
+  }
   if (unplacedClaim(text)) return "I have not placed a call, Sir. Nothing was dialled.";
   if (/unable to place|can(?:not|'t) (?:place|make) (?:a )?(?:telephone |phone )?calls?|can(?:not|'t) (?:use the phone|call)\b/i.test(text)) {
     return "Tell me the number and what to say, Sir. Nothing has been dialled yet.";

@@ -613,3 +613,18 @@ CREATE TABLE IF NOT EXISTS location_shares (
   token TEXT PRIMARY KEY, request_id TEXT NOT NULL, caller_phone TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL, expires_at TEXT NOT NULL, lat REAL, lng REAL, accuracy REAL, located_at TEXT
 );
+
+-- Voice notes JARVIS texts as a link (UK numbers cannot send MMS). Deleted by the cron after 7 days.
+CREATE TABLE IF NOT EXISTS voice_notes (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  mime TEXT NOT NULL,
+  audio_b64 TEXT NOT NULL,
+  bytes INTEGER NOT NULL,
+  chars INTEGER NOT NULL,
+  script TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_voice_notes_expires ON voice_notes (expires_at);

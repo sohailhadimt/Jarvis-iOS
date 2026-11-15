@@ -75,6 +75,10 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (streamId && request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
       return handleCallStream(request, env, streamId[1]);
     }
+    {
+      const vn = await import("./voice-notes");
+      if (vn.isVoiceNotePath(request.method, path)) return vn.serveVoiceNote(request, env, path);
+    }
     if (isOwnerWebhook(request.method, path)) return handleOwnerWebhook(request, env, path);
     if (isScreenWebhook(request.method, path)) return handleScreenWebhook(request, env, path, ctx);
     const asgVoice = /^\/asg\/voice\/(call_[A-Za-z0-9]+)$/.exec(path);
@@ -107,6 +111,13 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "GET" && path === "/debug/last-sms-errors") return lastSmsErrors(env);
     if (request.method === "GET" && path === "/debug/last-sms") return lastSmsLog(env);
     if (request.method === "POST" && path === "/debug/sms-simulate") return simulateSmsRoute(request, env);
+    if (request.method === "POST" && path === "/debug/voice-proof") return (await import("./sms-desk")).voiceProofRoute(env);
+    if (request.method === "POST" && path === "/debug/voice-once") return (await import("./sms-desk")).voiceOnceRoute(request, env);
+    if (request.method === "GET" && path === "/debug/voice-notes") {
+      const vn = await import("./voice-notes");
+      const [notes, credits] = await Promise.all([vn.recentNotes(env).catch(() => []), vn.elevenCredits(env)]);
+      return json({ notes, credits });
+    }
     if (request.method === "POST" && path === "/debug/voice") return saveVoiceDebug(request, env);
     if (request.method === "POST" && path === "/voice/live-token") return liveTokenResponse(env);
     if (path === "/briefing/call-settings" && (request.method === "GET" || request.method === "POST")) {
