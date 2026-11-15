@@ -298,3 +298,55 @@ describe("forwarded calls", () => {
     expect(xml).not.toContain("Who's calling");
   });
 });
+
+describe("owner ringing his own line", () => {
+  it("hands Sir straight to the ElevenLabs George agent with valid TwiML, no Twilio Say and no screening card", async () => {
+    clearElevenLabsTelephonyCache();
+    const env = callingEnv();
+    env.ELEVENLABS_FORCE_POLLY = "false";
+    const sqls: string[] = [];
+    const db = env.DB;
+    env.DB = {
+      prepare(sql: string) {
+        sqls.push(sql);
+        return db.prepare(sql);
+      },
+    } as unknown as Env["DB"];
+    const params = { CallSid: "CAowner1", From: "+1 555 765 4321", To: "+447700900000", Called: "+447700900000" };
+    const signature = await twilioSignature(signedInbound, params, "twilio-auth-token-example");
+    const seen: Array<{ url: string; body: string }> = [];
+    const twiml = '<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="wss://api.elevenlabs.io/v1/convai/conversation?agent_id=agent_example"><Parameter name="x" value="y"/></Stream></Connect></Response>';
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      seen.push({ url, body: String(init?.body ?? "") });
+      if (url.includes("register-call")) return new Response(JSON.stringify(twiml), { status: 200 });
+      return new Response("no", { status: 500 });
+    }) as typeof fetch;
+    try {
+      const { ctx, done } = heldCtx();
+      const response = await route(inbound(params, signature), env, ctx);
+      await done();
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).toBe(twiml);
+      expect(body).toMatch(/^<\?xml[^>]*\?><Response><Connect><Stream url="wss:\/\/[^"]+"/);
+      expect(body).not.toContain("<Say");
+      expect(body).not.toContain("<Gather");
+      const registered = seen.find((call) => call.url.includes("register-call"));
+      expect(registered).toBeTruthy();
+      const payload = JSON.parse(registered?.body ?? "{}") as {
+        agent_id?: string;
+        conversation_initiation_client_data?: { dynamic_variables?: { opening_line?: string; contact_name?: string } };
+      };
+      expect(payload.agent_id).toBe("agent_example");
+      expect(payload.conversation_initiation_client_data?.dynamic_variables?.contact_name).toBe("Master Hadi");
+      expect(payload.conversation_initiation_client_data?.dynamic_variables?.opening_line).toContain("Sir");
+      expect(sqls.some((sql) => sql.includes("INSERT INTO call_screen"))).toBe(false);
+      expect(seen.some((call) => call.url.includes("push.apple.com") || call.url.includes("Messages.json"))).toBe(false);
+      expect(seen.some((call) => call.url.includes("/briefing/call/ask"))).toBe(false);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});

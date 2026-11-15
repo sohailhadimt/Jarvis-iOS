@@ -166,6 +166,10 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
       const { hangUpEverything } = await import("./hangup");
       return hangUpEverything(env);
     }
+    if (request.method === "POST" && path === "/debug/owner-line") {
+      const { ownerLinePreview } = await import("./screening");
+      return ownerLinePreview(env);
+    }
     if (request.method === "POST" && path === "/calls/settle") {
       const { settleOpenCalls } = await import("./call-settle");
       return settleOpenCalls(env);

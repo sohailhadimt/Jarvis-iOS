@@ -102,11 +102,8 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
   if (!caller || (ours && caller === ours)) return xml("<Response><Hangup/></Response>", 200);
   const owner = await readOwnerMobile(env).catch(() => null);
   if (isOwnerCaller(caller, owner)) {
-    // Sir ringing his own JARVIS line is not a caller to screen: no card, no push, JARVIS answers him.
-    const { askTwiml } = await import("./briefing-call");
-    const origin = new URL(request.url).origin;
-    await recordHandoff(env, { callId: `owner_${(params.CallSid || "").slice(-8)}`, path: "owner", ok: true, reason: "owner_line" }).catch(() => undefined);
-    return xml(askTwiml(origin, 1, "JARVIS here, Sir. What can I do for you?"), 200);
+    // Sir ringing his own JARVIS line is not a caller to screen: no card, no push, George answers him.
+    return ownerOnLine(request, env, caller, dialed || ours || caller, params.CallSid ?? "");
   }
   if (asgLineOn(env) && !pollyInbound(env) && owner && caller !== owner) {
     const asgId = newId("call");
@@ -217,6 +214,78 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
     ]).catch(() => undefined);
   }
   return new Response(connected.twiml, { status: 200, headers: { "content-type": "text/xml; charset=utf-8" } });
+}
+
+export const OWNER_LINE_GREETING = "JARVIS here, Sir. How can I help?";
+
+export function ownerLinePrompt(): string {
+  return [
+    "You are JARVIS, the personal assistant of Master Hadi (Sohail). The caller is Master Hadi himself, your owner, ringing his own JARVIS line.",
+    "Speak as a British butler. Address him as Sir. Keep every answer to one to three short spoken sentences. No lists or markdown.",
+    "Help him directly: answer questions, take notes and reminders, and tell him what you can do. Do not screen him, do not ask who is calling, and do not take a message for him.",
+    "Never claim a call, text, booking or payment has happened unless a tool result says so. Anything that spends money or contacts someone else waits for his approval in the app.",
+  ].join(" ");
+}
+
+/** The owner's own call: the same ElevenLabs George hand-off as every inbound call, with the owner brief, and no screening card. */
+async function ownerOnLine(request: Request, env: Env, caller: string, to: string, sid: string): Promise<Response> {
+  const id = newId("call");
+  const now = nowIso();
+  await dbRun(
+    env,
+    `INSERT INTO outbound_calls
+      (id, contact_name, to_number, brief, status, twilio_sid, conversation_id, transcript_json, summary, error, created_at, updated_at)
+     VALUES (?, 'Master Hadi', ?, 'Owner on his JARVIS line', 'in_progress', ?, NULL, '[]', NULL, NULL, ?, ?)`,
+    [id, caller, sid || null, now, now],
+  ).catch(() => undefined);
+  const connected = await registerElevenLabsCall(env, {
+    id,
+    from: caller,
+    to,
+    direction: "inbound",
+    first: OWNER_LINE_GREETING,
+    prompt: ownerLinePrompt(),
+    contact: "Master Hadi",
+    brief: "Master Hadi is calling his own JARVIS line. Help him directly as his assistant. Do not screen him.",
+  });
+  if (connected.twiml) {
+    await recordHandoff(env, { callId: id, path: "owner", ok: true, reason: "twiml" }).catch(() => undefined);
+    if (connected.conversationId) {
+      await dbRun(env, "UPDATE outbound_calls SET conversation_id = ?, updated_at = ? WHERE id = ?", [connected.conversationId, nowIso(), id]).catch(
+        () => undefined,
+      );
+    }
+    return new Response(connected.twiml, { status: 200, headers: { "content-type": "text/xml; charset=utf-8" } });
+  }
+  const reason = connected.reason || "no_twiml";
+  await recordHandoff(env, { callId: id, path: "owner", ok: false, reason, detail: connected.error || "" }).catch(() => undefined);
+  await dbRun(env, "UPDATE outbound_calls SET transcript_json = ?, error = ?, updated_at = ? WHERE id = ?", [
+    JSON.stringify([{ role: "assistant", text: OWNER_LINE_GREETING }]),
+    connected.error || reason,
+    nowIso(),
+    id,
+  ]).catch(() => undefined);
+  return xml(converseTwiml(OWNER_LINE_GREETING, converseAction(request, id)), 200);
+}
+
+/** App-token debug: the TwiML the owner's call would get right now, with any token or URL secret masked. */
+export async function ownerLinePreview(env: Env): Promise<Response> {
+  const owner = await readOwnerMobile(env).catch(() => null);
+  const ours = toE164(env.TWILIO_FROM_NUMBER ?? "");
+  if (!owner || !ours) return apiError(503, "not_configured", "Owner mobile or Twilio number is not set.");
+  const id = newId("call");
+  const connected = await registerElevenLabsCall(env, {
+    id,
+    from: owner,
+    to: ours,
+    direction: "inbound",
+    first: OWNER_LINE_GREETING,
+    prompt: ownerLinePrompt(),
+    contact: "Master Hadi",
+    brief: "Preview only.",
+  });
+  const masked = (connected.twiml ?? "").replace(/(token|signature|auth|key)=([^&"'<\s]+)/gi, "$1=***").replace(/\+\d{8,15}/g, "[number]");
+  return json({ ok: Boolean(connected.twiml), reason: connected.reason ?? null, error: connected.error ? "set" : null, twiml: masked });
 }
 
 async function inboundStatus(request: Request, env: Env): Promise<Response> {
