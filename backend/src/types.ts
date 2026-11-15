@@ -78,6 +78,9 @@ export interface Env {
   ASG_AGENT_ID?: string;
   /** "off" sends every caller to JARVIS again. */
   ASG_LINE?: string;
+  /** "off" sends non-owner callers back to the old agents. */
+  CALL_DESK?: string;
+  DESK_AGENT_ID?: string;
   /** Bearer key for POST /alert (proactive JARVIS alert calls). Worker secret. */
   ALERT_KEY?: string;
   /** "off" stops proactive alert calls and texts. */

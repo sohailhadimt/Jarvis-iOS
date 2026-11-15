@@ -1347,8 +1347,10 @@ export interface ElevenCallInput {
   prompt: string;
   contact: string;
   brief: string;
-  /** Use a different ElevenLabs agent (the ASG receptionist). */
+  /** Use a different ElevenLabs agent (the ASG receptionist or the call desk). */
   agentId?: string;
+  /** Extra dynamic variables, e.g. jarvis_call_id for the desk agent's tools. */
+  variables?: Record<string, string>;
 }
 
 export interface ElevenCallResult {
@@ -1549,6 +1551,7 @@ function registerPayload(agentId: string, input: ElevenCallInput, overrides: boo
       contact_name: input.contact,
       brief: input.brief,
       opening_line: input.first,
+      ...(input.variables ?? {}),
     },
   };
   if (overrides) {

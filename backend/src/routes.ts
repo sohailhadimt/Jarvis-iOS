@@ -95,6 +95,11 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
       if (pa.isAlertWebhook(request.method, path)) return pa.alertWebhook(request, env, path);
     }
     if (isCallWebhook(request.method, path)) return handleCallWebhook(request, env, path);
+    {
+      const desk = await import("./desk");
+      if (desk.isDeskTool(request.method, path)) return desk.handleDeskTool(request, env, path);
+      if (desk.isShareLink(request.method, path)) return desk.handleShareLink(env, path);
+    }
     const auth = authorize(request, env.JARVIS_APP_TOKEN);
     if (!auth.ok) return auth.response;
     ctx.waitUntil(rememberOrigin(env, url.origin));
@@ -185,6 +190,11 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     const huntStart = /^\/calls\/hunts\/(hunt_[A-Za-z0-9]+)\/start$/.exec(path);
     if (request.method === "POST" && huntStart) return startHuntRoute(env, huntStart[1]);
     if (request.method === "POST" && path === "/calendar/busy") return saveBusy(request, env);
+    {
+      const { routeDeskApi } = await import("./desk");
+      const desked = await routeDeskApi(request, env, path);
+      if (desked) return desked;
+    }
     const owned = await routeOwnerApi(request, env, path);
     if (owned) return owned;
     const relayed = await routeRelay(request, env, path);

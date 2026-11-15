@@ -31,6 +31,7 @@ import type { Env } from "./types";
 import { asgLineOn, asgTwiml } from "./asg-phone";
 import { readOwnerMobile } from "./owner-alert";
 import { callIsLive, closeOpenRows, isOwnerCaller } from "./hangup";
+import { DESK_BRIEF, deskAgentId, ownerSmsDecision } from "./desk";
 
 const ACTIVE = ["screening", "listening", "handling", "message", "connecting", "ringing", "in_progress", "wrapping"];
 
@@ -105,7 +106,8 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
     // Sir ringing his own JARVIS line is not a caller to screen: no card, no push, George answers him.
     return ownerOnLine(request, env, caller, dialed || ours || caller, params.CallSid ?? "");
   }
-  if (asgLineOn(env) && !pollyInbound(env) && owner && caller !== owner) {
+  const desk = pollyInbound(env) ? null : await deskAgentId(env).catch(() => null);
+  if (!desk && asgLineOn(env) && !pollyInbound(env) && owner && caller !== owner) {
     const asgId = newId("call");
     const stamp = nowIso();
     await dbRun(
@@ -187,7 +189,14 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
     first,
     prompt,
     contact: "Caller",
-    brief: intercept ? "Take a message." : away ? away.instruction : "Find out who is calling and why. Do not reveal personal information.",
+    brief: intercept
+      ? "Take a message."
+      : away
+        ? away.instruction
+        : desk
+          ? DESK_BRIEF
+          : "Find out who is calling and why. Do not reveal personal information.",
+    ...(desk ? { agentId: desk, variables: { jarvis_call_id: id } } : {}),
   });
   if (!connected.twiml) {
     const reason = connected.reason || "no_twiml";
@@ -347,6 +356,9 @@ async function smsWebhook(request: Request, env: Env, ctx: ExecutionContext): Pr
   if (!valid) return xml("<Response></Response>", 403);
   const body = params.Body ?? "";
   const from = params.From ?? "";
+  if (await ownerSmsDecision(env, from, body, new URL(request.url).origin).catch(() => false)) {
+    return xml("<Response></Response>", 200);
+  }
   const action = smsAction(body);
   if (action) {
     const { readOwnerMobile } = await import("./owner-alert");
@@ -721,6 +733,7 @@ export async function pushNotice(
   body: string,
   extra: Record<string, string>,
   category = "JARVIS_CALL",
+  background = false,
 ): Promise<boolean> {
   const jwt = await apnsJwt(env);
   if (!jwt) return false;
@@ -744,7 +757,7 @@ export async function pushNotice(
         "apns-priority": "10",
       },
       body: JSON.stringify({
-        aps: { alert: { title, body }, sound: "default", category },
+        aps: { alert: { title, body }, sound: "default", category, ...(background ? { "content-available": 1 } : {}) },
         ...extra,
       }),
     }).catch(() => null);

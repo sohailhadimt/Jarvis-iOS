@@ -24,6 +24,13 @@ export default {
         sweepMemoryNudges(env),
         sweepHunts(env),
         sweepInboundCalls(env),
+        import("./desk")
+          .then(async (m) => {
+            const { readCallSettings } = await import("./owner-alert");
+            const origin = ((await readCallSettings(env)).worker_origin ?? "").replace(/^http:/, "https:");
+            return origin ? m.ensureDeskAgent(env, origin) : null;
+          })
+          .catch(() => null),
         import("./briefing-call").then((m) => m.sweepBriefingCall(env)).catch(() => "error"),
       ]),
     );

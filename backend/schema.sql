@@ -598,3 +598,18 @@ SELECT
   NULL,
   '1970-01-01T00:00:00.000Z'
 WHERE NOT EXISTS (SELECT 1 FROM scheduled_jobs WHERE id = 'job_pipeline_monitor');
+
+-- Call desk: Sir's live Allow/Deny for a caller's question or location request.
+CREATE TABLE IF NOT EXISTS owner_requests (
+  id TEXT PRIMARY KEY, call_id TEXT NOT NULL, kind TEXT NOT NULL, question TEXT NOT NULL DEFAULT '',
+  caller_name TEXT NOT NULL DEFAULT '', caller_phone TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending',
+  answer TEXT NOT NULL DEFAULT '', share_token TEXT NOT NULL DEFAULT '', sms_sent INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL, decided_at TEXT, decided_via TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_owner_requests_status ON owner_requests (status, created_at);
+
+-- A 10-minute live location link. The token is the only key; coordinates are cleared after expiry.
+CREATE TABLE IF NOT EXISTS location_shares (
+  token TEXT PRIMARY KEY, request_id TEXT NOT NULL, caller_phone TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL, expires_at TEXT NOT NULL, lat REAL, lng REAL, accuracy REAL, located_at TEXT
+);

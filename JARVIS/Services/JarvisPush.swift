@@ -22,7 +22,29 @@ final class JarvisPush: NSObject, UIApplicationDelegate, UNUserNotificationCente
         )
         let question = UNNotificationCategory(identifier: "JARVIS_QUESTION", actions: [reply], intentIdentifiers: [], options: [])
         let message = UNNotificationCategory(identifier: "JARVIS_MESSAGE", actions: [], intentIdentifiers: [], options: [])
-        center.setNotificationCategories([category, question, message])
+        let askActions = [
+            UNNotificationAction(identifier: "ask_allow", title: "Allow", options: []),
+            UNTextInputNotificationAction(
+                identifier: "ask_reply",
+                title: "Allow and tell them…",
+                options: [],
+                textInputButtonTitle: "Send",
+                textInputPlaceholder: "What JARVIS may say"
+            ),
+            UNNotificationAction(identifier: "ask_deny", title: "Say I'm busy", options: [.destructive]),
+        ]
+        let ask = UNNotificationCategory(identifier: "JARVIS_ASK", actions: askActions, intentIdentifiers: [], options: [])
+        // Location: Allow opens JARVIS, because iOS only starts location updates from the foreground.
+        let whereActions = [
+            UNNotificationAction(identifier: "ask_allow", title: "Allow for 10 minutes", options: [.foreground]),
+            UNNotificationAction(identifier: "ask_deny", title: "Say I'm busy", options: [.destructive]),
+        ]
+        let whereAsk = UNNotificationCategory(identifier: "JARVIS_ASK_LOCATION", actions: whereActions, intentIdentifiers: [], options: [])
+        center.setNotificationCategories([category, question, message, ask, whereAsk])
+        // Scene-based apps never get applicationDidBecomeActive; pick up a share allowed by text while JARVIS was closed.
+        NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
+            Task { @MainActor in await LocationShare.shared.resumeIfOpen() }
+        }
         center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in
             DispatchQueue.main.async {
                 application.registerForRemoteNotifications()
@@ -43,7 +65,25 @@ final class JarvisPush: NSObject, UIApplicationDelegate, UNUserNotificationCente
         _ = error
     }
 
+    /// The worker's silent nudge when Sir allowed a location share by text while JARVIS was closed.
+    func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any]) async -> UIBackgroundFetchResult {
+        guard userInfo["kind"] as? String == "location_share" else { return .noData }
+        await startShare(userInfo)
+        return .newData
+    }
+
+    private func startShare(_ info: [AnyHashable: Any]) async {
+        let end = LocationShare.parseDate(info["expires_at"] as? String)
+        await MainActor.run {
+            if let end { LocationShare.shared.start(until: end) }
+        }
+        if end == nil { await LocationShare.shared.resumeIfOpen() }
+    }
+
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        if notification.request.content.userInfo["kind"] as? String == "location_share" {
+            await startShare(notification.request.content.userInfo)
+        }
         if notification.request.content.userInfo["kind"] as? String == "call_message" {
             CallMessageLink.post(notification.request.content.userInfo)
             return [.banner, .sound]
@@ -64,6 +104,24 @@ final class JarvisPush: NSObject, UIApplicationDelegate, UNUserNotificationCente
             return
         }
         guard let client = try? await MainActor.run(body: { try JarvisCloudAPI.client() }) else { return }
+        if info["kind"] as? String == "owner_request", let requestId = info["request_id"] as? String {
+            let typed = (response as? UNTextInputNotificationResponse)?.userText.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let allow: Bool
+            switch response.actionIdentifier {
+            case "ask_allow", "ask_reply": allow = true
+            case "ask_deny": allow = false
+            default: return
+            }
+            let result = await client.decideOwnerRequest(id: requestId, allow: allow, answer: allow ? typed : "")
+            if let end = result.shareExpiresAt {
+                await MainActor.run { LocationShare.shared.start(until: end) }
+            }
+            return
+        }
+        if info["kind"] as? String == "location_share" {
+            await startShare(info)
+            return
+        }
         if let typed = response as? UNTextInputNotificationResponse,
            let callId = info["call_id"] as? String,
            let questionId = info["question_id"] as? String {

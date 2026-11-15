@@ -1175,6 +1175,33 @@ struct CloudClient: Sendable {
         return envelope.questions
     }
 
+    /// Sir's Allow or Deny for a caller's question or location request. Returns when the share ends, if one started.
+    func decideOwnerRequest(id: String, allow: Bool, answer: String) async -> (ok: Bool, shareExpiresAt: Date?) {
+        guard let body = try? JSONSerialization.data(withJSONObject: ["allow": allow, "answer": answer]) else { return (false, nil) }
+        guard let reply = try? await raw(method: "POST", path: "/calls/requests/\(Self.path(id))", authorize: true, body: body, query: []),
+              (200..<300).contains(reply.1) else { return (false, nil) }
+        let object = (try? JSONSerialization.jsonObject(with: reply.0)) as? [String: Any]
+        return (true, LocationShare.parseDate(object?["share_expires_at"] as? String))
+    }
+
+    /// The end of the live location share the worker has open, or nil.
+    func activeLocationShare() async -> Date? {
+        guard let reply = try? await raw(method: "GET", path: "/location/active", authorize: true, body: nil, query: []),
+              (200..<300).contains(reply.1) else { return nil }
+        let object = (try? JSONSerialization.jsonObject(with: reply.0)) as? [String: Any]
+        guard object?["sharing"] as? Bool == true else { return nil }
+        return LocationShare.parseDate(object?["expires_at"] as? String)
+    }
+
+    /// One position for the open share. False once the worker has no live share.
+    func sendLocation(lat: Double, lng: Double, accuracy: Double) async -> Bool {
+        guard let body = try? JSONSerialization.data(withJSONObject: ["lat": lat, "lng": lng, "accuracy": accuracy]) else { return false }
+        guard let reply = try? await raw(method: "POST", path: "/location/update", authorize: true, body: body, query: []),
+              (200..<300).contains(reply.1) else { return false }
+        let object = (try? JSONSerialization.jsonObject(with: reply.0)) as? [String: Any]
+        return object?["sharing"] as? Bool == true
+    }
+
     func answerCallQuestion(callId: String, questionId: String, text: String) async -> ScreenResult {
         await postCallAction(path: "/calls/\(Self.path(callId))/answer", body: ["question_id": questionId, "text": text])
     }
