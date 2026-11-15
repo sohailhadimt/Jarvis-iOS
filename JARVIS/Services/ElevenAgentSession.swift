@@ -54,7 +54,7 @@ final class ElevenAgentSession: @unchecked Sendable {
             "conversation_config_override": [
                 "agent": ["prompt": ["prompt": prompt], "first_message": firstMessage, "language": "en"],
             ],
-            "source_info": ["source": "jarvis-ios", "version": "1"],
+            // ElevenLabs closes the socket (1008 "Invalid message received") when source_info carries an unknown source.
         ]
         let opened = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             lock.lock()

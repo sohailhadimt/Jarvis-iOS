@@ -30,6 +30,7 @@ import { forcePolly } from "./outbound-speech";
 import type { Env } from "./types";
 import { asgLineOn, asgTwiml } from "./asg-phone";
 import { readOwnerMobile } from "./owner-alert";
+import { callIsLive, closeOpenRows, isOwnerCaller } from "./hangup";
 
 const ACTIVE = ["screening", "listening", "handling", "message", "connecting", "ringing", "in_progress", "wrapping"];
 
@@ -100,6 +101,13 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
   const dialed = toE164(params.To ?? "") ?? ours;
   if (!caller || (ours && caller === ours)) return xml("<Response><Hangup/></Response>", 200);
   const owner = await readOwnerMobile(env).catch(() => null);
+  if (isOwnerCaller(caller, owner)) {
+    // Sir ringing his own JARVIS line is not a caller to screen: no card, no push, JARVIS answers him.
+    const { askTwiml } = await import("./briefing-call");
+    const origin = new URL(request.url).origin;
+    await recordHandoff(env, { callId: `owner_${(params.CallSid || "").slice(-8)}`, path: "owner", ok: true, reason: "owner_line" }).catch(() => undefined);
+    return xml(askTwiml(origin, 1, "JARVIS here, Sir. What can I do for you?"), 200);
+  }
   if (asgLineOn(env) && !pollyInbound(env) && owner && caller !== owner) {
     const asgId = newId("call");
     const stamp = nowIso();
@@ -314,7 +322,7 @@ async function joinWebhook(request: Request, env: Env, id: string): Promise<Resp
   const room = `jarvis-${id}`;
   const flag = muted ? ' muted="true"' : "";
   return xml(
-    `<Response><Dial><Conference beep="false" startConferenceOnEnter="true" endConferenceOnExit="true"${flag}>${escapeXml(room)}</Conference></Dial></Response>`,
+    `<Response><Dial><Conference beep="false" waitUrl="" startConferenceOnEnter="true" endConferenceOnExit="true"${flag}>${escapeXml(room)}</Conference></Dial></Response>`,
     200,
   );
 }
@@ -372,6 +380,11 @@ async function applyDecision(
     };
   }
   if (!call.twilio_sid) return { ok: false, response: apiError(409, "not_ready", "The call is not connected yet.") };
+  if (!(await callIsLive(env, call.twilio_sid))) {
+    // The caller has gone. Never ring Sir's mobile into an empty room.
+    await mark(env, id, "completed", action).catch(() => undefined);
+    return { ok: false, response: apiError(409, "call_ended", "That caller has already hung up.") };
+  }
   if (action === "decline") {
     const updated = await updateTwiml(env, call.twilio_sid, say("I'm sorry, Master Hadi can't take your call. Goodbye."));
     if (!updated.ok) return { ok: false, response: apiError(502, "twilio", updated.error) };
@@ -387,14 +400,18 @@ async function applyDecision(
   }
   if (action === "takeover") {
     const room = `jarvis-${id}`;
-    const dialed = await createCall(env, mobile ?? "", from ?? "", `<?xml version="1.0" encoding="UTF-8"?><Response>${joinTwiml(room, false)}</Response>`);
-    if (!dialed.ok) return { ok: false, response: apiError(502, "twilio", dialed.error) };
+    // Move the caller first. If that fails, Sir's mobile is never rung.
     const moved = await updateTwiml(
       env,
       call.twilio_sid,
       `<Response><Say language="en-GB" voice="${FALLBACK_SAY_VOICE}">Connecting you to Master Hadi.</Say>${joinTwiml(room, false)}</Response>`,
     );
     if (!moved.ok) return { ok: false, response: apiError(502, "twilio", moved.error) };
+    const dialed = await createCall(env, mobile ?? "", from ?? "", `<?xml version="1.0" encoding="UTF-8"?><Response>${joinTwiml(room, false)}</Response>`);
+    if (!dialed.ok) {
+      await updateTwiml(env, call.twilio_sid, say("I'm sorry, Master Hadi can't take your call just now. Goodbye.")).catch(() => undefined);
+      return { ok: false, response: apiError(502, "twilio", dialed.error) };
+    }
     await mark(env, id, "connecting", "takeover");
     return { ok: true, audio: "mobile" };
   }
@@ -434,7 +451,11 @@ async function redirectCall(env: Env, callSid: string, id: string, mode: string,
   return twilioPost(account, token, `/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls/${encodeURIComponent(callSid)}.json`, form);
 }
 
+const STALE_CARD_MS = 30 * 60 * 1000;
+
 async function activeCalls(env: Env): Promise<Response> {
+  // A row whose hang-up webhook never arrived must not live on as a ghost card.
+  await closeOpenRows(env, STALE_CARD_MS);
   try {
     const rows = await dbAll<{
       id: string;
@@ -463,8 +484,15 @@ async function activeCalls(env: Env): Promise<Response> {
        ORDER BY c.created_at DESC LIMIT 10`,
       ACTIVE,
     );
+    const seen = new Set<string>();
+    const latest = rows.filter((row) => {
+      const key = row.to_number || row.id;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
     return json({
-      calls: rows.map((row) => ({
+      calls: latest.map((row) => ({
         id: row.id,
         contact_name: row.contact_name,
         to: row.to_number,
@@ -752,7 +780,7 @@ async function mark(env: Env, id: string, status: string, decision: string): Pro
 
 function joinTwiml(room: string, muted: boolean): string {
   const flag = muted ? ' muted="true"' : "";
-  return `<Dial><Conference beep="false" startConferenceOnEnter="true" endConferenceOnExit="true"${flag}>${escapeXml(room)}</Conference></Dial>`;
+  return `<Dial><Conference beep="false" waitUrl="" startConferenceOnEnter="true" endConferenceOnExit="true"${flag}>${escapeXml(room)}</Conference></Dial>`;
 }
 
 async function readBody(request: Request): Promise<{ ok: true; value: Record<string, unknown> } | { ok: false; response: Response }> {
