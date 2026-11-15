@@ -162,6 +162,10 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "GET" && path === "/calls/hunts") return listHunts(env);
     if (request.method === "POST" && path === "/calls/hunts") return createHuntRoute(request, env);
     if (request.method === "GET" && path === "/calls/messages") return listCallMessages(env, url);
+    if (request.method === "POST" && (path === "/calls/hangup" || path === "/calls/end-all")) {
+      const { hangUpEverything } = await import("./hangup");
+      return hangUpEverything(env);
+    }
     if (request.method === "POST" && path === "/calls/settle") {
       const { settleOpenCalls } = await import("./call-settle");
       return settleOpenCalls(env);
