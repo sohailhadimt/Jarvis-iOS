@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { guardUnplacedCall } from "../src/brain";
 import { handleInboundSms, simulateSmsRoute } from "../src/sms-desk";
 import type { Env } from "../src/types";
-import { isVoiceNotePath, noteId, serveVoiceNote, stripTags, voiceAsk } from "../src/voice-notes";
+import { explicitWords, isVoiceNotePath, noteId, refusal, serveVoiceNote, stripTags, voiceAsk } from "../src/voice-notes";
 import { sqliteD1 } from "./helpers/sqlite-d1";
 
 const OWNER = "+447700900555";
@@ -160,6 +160,22 @@ describe("voice notes by link", () => {
     expect(noteId()).toMatch(/^[A-Za-z0-9]{20}$/);
     expect(isVoiceNotePath("GET", "/v/short")).toBe(false);
     expect(stripTags("[sings] la la [laughs] la")).toBe("la la la");
+  });
+
+  it("does not record a refusal as the voice note", async () => {
+    expect(refusal("I'm sorry sir, but I can't comply with that.")).toBe(true);
+    expect(explicitWords("Send me a voice note saying good night")).toBe("Good night, Sir.");
+    expect(explicitWords("say it")).toBeNull();
+    const { env, seen } = voiceEnv();
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("groq.com")) {
+        return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "I'm sorry, but I can't comply with that." } }] }), { status: 200 });
+      }
+      return real(input, init);
+    }) as typeof fetch;
+    await handleInboundSms(env, OWNER, "Send me a voice note saying good night");
+    expect(seen.tts[0]?.body.text).toBe("Good night, Sir.");
   });
 
   it("never tells Sir it cannot send voice messages", () => {

@@ -171,14 +171,38 @@ export async function writeScript(env: Env, ask: VoiceAsk, request: string, hist
     if ((turn.role === "user" || turn.role === "assistant") && turn.body) messages.push({ role: turn.role, content: turn.body });
   }
   if (!history.length || history[history.length - 1]?.body !== request) messages.push({ role: "user", content: request });
-  const answer = await completeChat(env, messages, null, { timeoutMs: 8_000, budgetMs: 14_000, maxTokens: 900 });
-  const raw = answer.ok ? answer.message.content ?? "" : "";
-  const clean = raw
-    .replace(/https?:\/\/\S+/gi, " ")
-    .replace(/[*_#`"]+/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  return (clean || "Good evening, Sir. JARVIS here. Text me any time.").slice(0, VOICE_NOTE_MAX_CHARS);
+  const tidy = (raw: string): string =>
+    raw.replace(/https?:\/\/\S+/gi, " ").replace(/[*_#`"]+/g, "").replace(/\s+/g, " ").trim();
+  const first = await completeChat(env, messages, null, { timeoutMs: 8_000, budgetMs: 12_000, maxTokens: 900 });
+  let script = first.ok ? tidy(first.message.content ?? "") : "";
+  if (!script || refusal(script)) {
+    // Some models refuse a bare "send me a voice note". Ask again plainly, without the history.
+    const retry = await completeChat(
+      env,
+      [
+        messages[0] as ChatMessage,
+        { role: "user", content: `Write the short, friendly voice note JARVIS sends Sir for this request: "${request.slice(0, 200)}"` },
+      ],
+      null,
+      { timeoutMs: 6_000, budgetMs: 8_000, maxTokens: 900 },
+    );
+    const second = retry.ok ? tidy(retry.message.content ?? "") : "";
+    script = second && !refusal(second) ? second : "";
+  }
+  if (!script) script = explicitWords(request) ?? "Good evening, Sir. JARVIS here, just checking in. Text me any time.";
+  return script.slice(0, VOICE_NOTE_MAX_CHARS);
+}
+
+export function refusal(text: string): boolean {
+  return /\b(?:can(?:no|'|’)t|unable to|won't) (?:comply|help with|assist with|do that)|I'm sorry,? (?:Sir,? )?but I can|as an AI\b/i.test(text);
+}
+
+/** "voice note saying good night" -> "Good night, Sir." */
+export function explicitWords(request: string): string | null {
+  const match = /\b(?:saying|that says|to say|say)\s+(.{2,300})$/i.exec(request.trim());
+  const words = (match?.[1] ?? "").replace(/[.?!]+$/, "").trim();
+  if (!words || /^(?:it|that|this|something)\b/i.test(words)) return null;
+  return `${words.charAt(0).toUpperCase()}${words.slice(1)}, Sir.`;
 }
 
 async function elevenAudio(env: Env, url: string, body: Record<string, unknown>): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; error: string; status: number }> {
