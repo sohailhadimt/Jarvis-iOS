@@ -256,7 +256,10 @@ export async function brainReply(
     return guardUnplacedCall(text ?? "I've noted that, Sir.");
   };
   const tools = brainTools();
-  const first = await completeChat(env, messages, tools);
+  // An SMS reply runs inside the webhook's waitUntil, so a slow Gemini must hand over to Groq in time.
+  const started = Date.now();
+  const budget = phone ? { timeoutMs: 9_000, budgetMs: 24_000 } : undefined;
+  const first = await completeChat(env, messages, tools, budget);
   if (!first.ok) return { text: CHAT_FALLBACK, error: `${first.code}: ${first.message}` };
   const calls = first.message.tool_calls ?? [];
   if (calls.length === 0) return { text: finish(first.message.content), error: null };
@@ -270,7 +273,12 @@ export async function brainReply(
       name: call.function.name,
     });
   }
-  const second = await completeChat(env, messages, null);
+  const second = await completeChat(
+    env,
+    messages,
+    null,
+    budget ? { timeoutMs: 9_000, budgetMs: Math.max(3_000, budget.budgetMs - (Date.now() - started)) } : undefined,
+  );
   if (!second.ok) return { text: "I've noted that, Sir.", error: `${second.code}: ${second.message}` };
   return { text: finish(second.message.content), error: null };
 }

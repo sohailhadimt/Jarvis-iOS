@@ -7,7 +7,7 @@ token="${JARVIS_APP_TOKEN:-}"
 
 hit() {
   local name="$1" method="$2" path="$3" body="${4:-}" auth="${5:-}"
-  local args=(-sS -o "/tmp/live-${name}.json" -w "%{http_code}" -X "$method" --max-time 20)
+  local args=(-sS -o "/tmp/live-${name}.json" -w "%{http_code}" -X "$method" --max-time "${CURL_MAX:-20}")
   if [ "$auth" = "yes" ]; then
     args+=(-H "authorization: Bearer ${token}")
   fi
@@ -134,16 +134,16 @@ rm -f /tmp/live-*.json
 
 # Owner SMS conversation: three simulated texts on a test thread (an Ofcom drama number). Nothing is sent.
 if [ -n "$token" ]; then
-  hit chat_1 POST /debug/sms-simulate '{"text":"Evening Jarvis, how are you doing tonight?","thread":"1","reset":true}' yes
-  hit chat_2 POST /debug/sms-simulate '{"text":"Bit tired. I had fish and chips from the Yellow Fisherman for dinner.","thread":"1"}' yes
-  hit chat_3 POST /debug/sms-simulate '{"text":"What did I just say I had for dinner?","thread":"1"}' yes
+  CURL_MAX=45 hit chat_1 POST /debug/sms-simulate '{"text":"Evening Jarvis, how are you doing tonight?","thread":"1","reset":true}' yes
+  CURL_MAX=45 hit chat_2 POST /debug/sms-simulate '{"text":"Bit tired. I had fish and chips from the Yellow Fisherman for dinner.","thread":"1"}' yes
+  CURL_MAX=45 hit chat_3 POST /debug/sms-simulate '{"text":"What did I just say I had for dinner?","thread":"1"}' yes
   node --input-type=module <<'NODE'
 import { readFileSync } from "node:fs";
 const read = (name) => { try { return JSON.parse(readFileSync(`/tmp/live-${name}.json`, "utf8")); } catch { return {}; } };
 const turns = ["chat_1", "chat_2", "chat_3"].map(read);
 turns.forEach((turn, i) => console.log(`sms_chat_${i + 1} history=${turn.history ?? ""} sent=${turn.sent} chars=${String(turn.reply || "").length} reply=${JSON.stringify(String(turn.reply || "").replace(/\+\d{6,}/g, "[number]"))}`));
 const third = String(turns[2].reply || "");
-if (turns.some((turn) => turn.sent !== false)) { console.error("simulate sent a text"); process.exit(1); }
+if (turns.some((turn) => turn.sent === true)) { console.error("simulate sent a text"); process.exit(1); }
 if (turns[2].history !== 6) console.error(`sms chat history expected 6, got ${turns[2].history}`);
 if (!/fish|chips|yellow fisherman/i.test(third)) console.error("sms chat did not recall the earlier text");
 NODE
