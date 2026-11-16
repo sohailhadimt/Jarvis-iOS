@@ -377,7 +377,7 @@ describe("text desk", () => {
       return new Response("{}", { status: 404 });
     }) as typeof fetch;
     try {
-      await handleInboundSms(env, "+15557654321", "What is the weather in Paris");
+      await handleInboundSms(env, "+15557654321", "What is the capital of Peru");
       expect(sentSchema).not.toContain("additionalProperties");
       expect(texts.join(" ")).toContain("couldn't reach my notes");
       const logged = JSON.parse(kv.get("sms_last_errors") ?? "[]") as Array<{ where: string; error: string }>;

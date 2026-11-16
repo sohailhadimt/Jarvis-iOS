@@ -100,6 +100,10 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     }
     if (isCallWebhook(request.method, path)) return handleCallWebhook(request, env, path);
     {
+      const own = await import("./owner-agent");
+      if (own.isOwnerTool(request.method, path)) return own.handleOwnerTool(request, env, path);
+    }
+    {
       const desk = await import("./desk");
       if (desk.isDeskTool(request.method, path)) return desk.handleDeskTool(request, env, path);
       if (desk.isShareLink(request.method, path)) return desk.handleShareLink(env, path);
@@ -107,6 +111,14 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     const auth = authorize(request, env.JARVIS_APP_TOKEN);
     if (!auth.ok) return auth.response;
     ctx.waitUntil(rememberOrigin(env, url.origin));
+    if (path === "/owner/agent" || path === "/owner/agent/ensure" || path === "/debug/owner-tool") {
+      const handled = await (await import("./owner-agent")).ownerAgentRoute(request, env, path);
+      if (handled) return handled;
+    }
+    if (path.startsWith("/contacts/")) {
+      const handled = await (await import("./contacts")).contactsRoute(request, env, path);
+      if (handled) return handled;
+    }
     if (request.method === "GET" && path === "/debug/last-calls") return lastCallDebug(env);
     if (request.method === "GET" && path === "/debug/last-sms-errors") return lastSmsErrors(env);
     if (request.method === "GET" && path === "/debug/last-sms") return lastSmsLog(env);

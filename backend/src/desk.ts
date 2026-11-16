@@ -217,14 +217,14 @@ export async function ensureDeskAgent(env: Env, origin: string, force = false): 
   return { ok: true, agent, tools };
 }
 
-interface Template {
+export interface Template {
   llm?: unknown;
   temperature?: unknown;
   tts: Record<string, unknown>;
   turn?: unknown;
 }
 
-async function templateFromMainAgent(env: Env, apiKey: string): Promise<Template> {
+export async function templateFromMainAgent(env: Env, apiKey: string): Promise<Template> {
   const main = (env.ELEVENLABS_AGENT_ID ?? "").trim();
   const out: Template = { tts: {} };
   if (!main) return out;
@@ -257,7 +257,7 @@ export function deskAgentBody(toolIds: string[], template: Template = { tts: {} 
   return { name: DESK_AGENT_NAME, conversation_config: conversation };
 }
 
-async function eleven(apiKey: string, method: string, path: string, body?: unknown): Promise<{ ok: boolean; status: number; body: unknown; detail: string }> {
+export async function eleven(apiKey: string, method: string, path: string, body?: unknown): Promise<{ ok: boolean; status: number; body: unknown; detail: string }> {
   try {
     const response = await fetch(`https://api.elevenlabs.io${path}`, {
       method,

@@ -80,7 +80,13 @@ export async function callIsLive(env: Env, callSid: string): Promise<boolean> {
 
 export function isOwnerCaller(caller: string | null, owner: string | null): boolean {
   if (!caller || !owner) return false;
-  return toE164(caller) === toE164(owner);
+  // Caller ID only. "+44 07…", "0044…", "447…" and "07…" are the same UK line.
+  const canon = (raw: string) => {
+    const e164 = toE164(raw);
+    return e164 ? e164.replace(/^\+440(?=\d{9,10}$)/, "+44") : null;
+  };
+  const a = canon(caller);
+  return Boolean(a) && a === canon(owner);
 }
 
 async function twilioGet<T>(url: string, auth: string): Promise<T | null> {

@@ -760,6 +760,11 @@ async function answerOwner(env: Env, phone: string, text: string, media: string[
     );
     return;
   }
+  const picked = await contactPick(env, phone, text);
+  if (picked) {
+    await replyLine(env, phone, picked, "ring-picked");
+    return;
+  }
   const choiceReply = callChoice(text);
   const numbered = text.trim() === "1" || text.trim() === "2";
   if (choiceReply && (!numbered || (await loadLatestCall(env)))) {
@@ -793,6 +798,21 @@ async function answerOwner(env: Env, phone: string, text: string, media: string[
   }
   const byName = extras.ringByName(text);
   if (byName) {
+    const people = await import("./contacts");
+    const spoken = byName.place ? `${byName.name} ${byName.place}` : byName.name;
+    let known = await people.resolveContact(env, byName.name).catch(() => ({ kind: "none" as const }) as Awaited<ReturnType<typeof people.resolveContact>>);
+    if (known.kind === "none" && byName.place) known = await people.resolveContact(env, spoken).catch(() => known);
+    if (known.kind === "one") {
+      const c = known.contact;
+      const offer = await offerOutbound(env, phone, { name: c.name, phone: c.phone, purpose: byName.purpose, verb: byName.verb });
+      await replyLine(env, phone, `${c.name} from your contacts: ${people.maskPhone(c.phone)}. ${offer}`, "ring-contact");
+      return;
+    }
+    if (known.kind === "many") {
+      await setState(env, contactPickKey(phone), JSON.stringify({ options: known.options.map((o) => ({ name: o.name, phone: o.phone })), purpose: byName.purpose, verb: byName.verb, until: Date.now() + 10 * 60_000 }));
+      await replyLine(env, phone, `Which one, Sir? ${people.optionsLine(known.options)}. Reply 1, 2 or 3.`, "ring-pick");
+      return;
+    }
     if (extras.personalContact(byName.name)) {
       await reply(env, phone, `I only ring personal contacts on a number you type, Sir. Send it like: call 07... and ${byName.verb} ${byName.purpose}`, "ring-personal");
       return;
@@ -882,6 +902,31 @@ async function answerOwner(env: Env, phone: string, text: string, media: string[
     return;
   }
   await replyChat(env, phone, answer, detail);
+}
+
+function contactPickKey(phone: string): string {
+  return `contact_pick:${phone}`;
+}
+
+/** "1", "2" or "3" after a "Which one, Sir?" list. Offers the call; it still waits for YES. */
+async function contactPick(env: Env, phone: string, text: string): Promise<string | null> {
+  const n = /^\s*([123])\s*[.!)]?\s*$/.exec(text)?.[1];
+  if (!n) return null;
+  const raw = await getState(env, contactPickKey(phone)).catch(() => null);
+  if (!raw) return null;
+  let saved: { options?: { name: string; phone: string }[]; purpose?: string; verb?: "ask" | "tell"; until?: number } = {};
+  try {
+    saved = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  await setState(env, contactPickKey(phone), "").catch(() => undefined);
+  if (!saved.until || saved.until < Date.now()) return null;
+  const choice = saved.options?.[Number(n) - 1];
+  if (!choice || !saved.purpose) return null;
+  const { maskPhone } = await import("./contacts");
+  const offer = await offerOutbound(env, phone, { name: choice.name, phone: choice.phone, purpose: saved.purpose, verb: saved.verb === "tell" ? "tell" : "ask" });
+  return `${choice.name}: ${maskPhone(choice.phone)}. ${offer}`;
 }
 
 /** The thread's latest voice note: its kind, and its link when the last reply carried one. */
@@ -1717,7 +1762,13 @@ export async function runSmsTool(env: Env, name: string, raw: string): Promise<u
   const parsed = parseToolArgs(raw);
   if (!parsed.ok) return { ok: false, error: parsed.error };
   if (name === "web_search") {
-    const found = await webSearch(env, typeof parsed.value.query === "string" ? parsed.value.query : "");
+    const query = typeof parsed.value.query === "string" ? parsed.value.query : "";
+    const { liveSearch } = await import("./live-tools");
+    const live = await liveSearch(env, query).catch(() => null);
+    if (live && live.ok && live.provider !== "search") {
+      return { ok: true, answer: live.answer, phones: parsePhones(live.answer, 3), source: live.provider };
+    }
+    const found = await webSearch(env, query);
     if (!found.ok) return { ok: false, error: found.error };
     const blob = found.results.map((hit) => `${hit.title} ${hit.snippet}`).join("\n");
     return {

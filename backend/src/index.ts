@@ -47,6 +47,7 @@ export default {
             return origin ? m.ensureDeskAgent(env, origin) : null;
           })
           .catch(() => null),
+        import("./owner-agent").then((m) => m.ensureOwnerAgent(env)).catch(() => null),
         import("./briefing-call").then((m) => m.sweepBriefingCall(env)).catch(() => "error"),
       ]),
     );

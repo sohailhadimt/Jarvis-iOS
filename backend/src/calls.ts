@@ -1338,6 +1338,8 @@ export interface ElevenCallInput {
   agentId?: string;
   /** Extra dynamic variables, e.g. jarvis_call_id for the desk agent's tools. */
   variables?: Record<string, string>;
+  /** Send first_message and prompt overrides even on an inbound call (Sir's own line). */
+  forceOverrides?: boolean;
 }
 
 export interface ElevenCallResult {
@@ -1388,7 +1390,7 @@ export async function registerElevenLabsCall(env: Env, input: ElevenCallInput): 
   // replace first_message and the prompt on this call. A refused override
   // returns no TwiML so the Polly path speaks the same brief.
   // A dedicated agent (ASG) carries its own prompt, so it registers bare.
-  const overrides = !input.agentId && (input.direction === "outbound" || callOverridesEnabled(env));
+  const overrides = !input.agentId && (input.direction === "outbound" || input.forceOverrides === true || callOverridesEnabled(env));
   const prepare = input.agentId ? "skipped" : await prepareTelephonyAgent(apiKey, agentId);
   let attempt = await postRegister(apiKey, agentId, input, overrides, 6_000);
   if (!attempt.twiml && (attempt.reason === "network" || attempt.reason === "timeout")) {

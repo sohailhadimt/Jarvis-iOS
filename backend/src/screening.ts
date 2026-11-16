@@ -250,7 +250,10 @@ export function ownerLinePrompt(): string {
   ].join(" ");
 }
 
-/** The owner's own call: the same ElevenLabs George hand-off as every inbound call, with the owner brief, and no screening card. */
+/**
+ * The owner's own call, matched by caller ID only. He gets his personal agent (greeting by name, context,
+ * live tools). If that agent is not set up yet, the main agent with forced owner overrides. Never the desk.
+ */
 async function ownerOnLine(request: Request, env: Env, caller: string, to: string, sid: string, existing: string | null = null): Promise<Response> {
   const id = existing ?? newId("call");
   const now = nowIso();
@@ -261,18 +264,9 @@ async function ownerOnLine(request: Request, env: Env, caller: string, to: strin
      VALUES (?, 'Master Hadi', ?, 'Owner on his JARVIS line', 'in_progress', ?, NULL, '[]', NULL, NULL, ?, ?)`,
     [id, caller, sid || null, now, now],
   ).catch(() => undefined);
-  const connected = await registerElevenLabsCall(env, {
-    id,
-    from: caller,
-    to,
-    direction: "inbound",
-    first: OWNER_LINE_GREETING,
-    prompt: ownerLinePrompt(),
-    contact: "Master Hadi",
-    brief: "Master Hadi is calling his own JARVIS line. Help him directly as his assistant. Do not screen him.",
-  });
+  const { connected, greeting, path } = await registerOwner(env, id, caller, to);
   if (connected.twiml) {
-    await recordHandoff(env, { callId: id, path: "owner", ok: true, reason: "twiml" }).catch(() => undefined);
+    await recordHandoff(env, { callId: id, path, ok: true, reason: "twiml" }).catch(() => undefined);
     if (connected.conversationId) {
       await dbRun(env, "UPDATE outbound_calls SET conversation_id = ?, updated_at = ? WHERE id = ?", [connected.conversationId, nowIso(), id]).catch(
         () => undefined,
@@ -281,14 +275,43 @@ async function ownerOnLine(request: Request, env: Env, caller: string, to: strin
     return new Response(connected.twiml, { status: 200, headers: { "content-type": "text/xml; charset=utf-8" } });
   }
   const reason = connected.reason || "no_twiml";
-  await recordHandoff(env, { callId: id, path: "owner", ok: false, reason, detail: connected.error || "" }).catch(() => undefined);
+  await recordHandoff(env, { callId: id, path, ok: false, reason, detail: connected.error || "" }).catch(() => undefined);
   await dbRun(env, "UPDATE outbound_calls SET transcript_json = ?, error = ?, updated_at = ? WHERE id = ?", [
-    JSON.stringify([{ role: "assistant", text: OWNER_LINE_GREETING }]),
+    JSON.stringify([{ role: "assistant", text: greeting }]),
     connected.error || reason,
     nowIso(),
     id,
   ]).catch(() => undefined);
-  return xml(converseTwiml(OWNER_LINE_GREETING, converseAction(request, id)), 200);
+  return xml(converseTwiml(greeting, converseAction(request, id)), 200);
+}
+
+/** Register Sir's call: the personal agent first; the main agent with forced owner overrides as the fallback. */
+export async function registerOwner(env: Env, id: string, caller: string, to: string) {
+  const own = await import("./owner-agent");
+  const greeting = own.ownerGreeting();
+  const variables = await own.ownerVariables(env, id);
+  const agentId = await own.ownerAgentId(env).catch(() => null);
+  const base = {
+    id,
+    from: caller,
+    to,
+    direction: "inbound" as const,
+    first: greeting,
+    contact: "Master Hadi",
+    brief: "Sir is calling his own JARVIS line. Help him directly. Do not screen him.",
+  };
+  if (agentId) {
+    const connected = await registerElevenLabsCall(env, { ...base, prompt: "", agentId, variables });
+    if (connected.twiml) return { connected, greeting, path: "owner-agent" };
+    console.error("owner agent hand-off failed, falling back", JSON.stringify({ reason: connected.reason ?? "" }));
+  }
+  const connected = await registerElevenLabsCall(env, {
+    ...base,
+    prompt: own.ownerFallbackPrompt(variables),
+    variables: { jarvis_call_id: id },
+    forceOverrides: true,
+  });
+  return { connected, greeting, path: "owner" };
 }
 
 /** App-token debug: the TwiML the owner's call would get right now, with any token or URL secret masked. */
@@ -297,18 +320,9 @@ export async function ownerLinePreview(env: Env): Promise<Response> {
   const ours = toE164(env.TWILIO_FROM_NUMBER ?? "");
   if (!owner || !ours) return apiError(503, "not_configured", "Owner mobile or Twilio number is not set.");
   const id = newId("call");
-  const connected = await registerElevenLabsCall(env, {
-    id,
-    from: owner,
-    to: ours,
-    direction: "inbound",
-    first: OWNER_LINE_GREETING,
-    prompt: ownerLinePrompt(),
-    contact: "Master Hadi",
-    brief: "Preview only.",
-  });
+  const { connected, greeting, path } = await registerOwner(env, id, owner, ours);
   const masked = (connected.twiml ?? "").replace(/(token|signature|auth|key)=([^&"'<\s]+)/gi, "$1=***").replace(/\+\d{8,15}/g, "[number]");
-  return json({ ok: Boolean(connected.twiml), reason: connected.reason ?? null, error: connected.error ? "set" : null, twiml: masked });
+  return json({ ok: Boolean(connected.twiml), path, greeting, reason: connected.reason ?? null, error: connected.error ? "set" : null, twiml: masked });
 }
 
 async function inboundStatus(request: Request, env: Env): Promise<Response> {

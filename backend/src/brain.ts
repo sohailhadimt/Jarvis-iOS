@@ -335,6 +335,13 @@ export function brainTools(): LlmTool[] {
       due: { type: "string" },
     }, ["title"]),
     tool("get_briefing", "Read the briefing and the open reminders.", {}, []),
+    tool("get_weather", "Live weather for any place: current conditions and the forecast. Defaults to Ashford, Kent.", {
+      place: { type: "string" },
+      when: { type: "string", description: "today, tomorrow, a weekday, this weekend, or this week" },
+    }, []),
+    tool("lookup_contact", "Look up a name in Sir's own phone contacts. Returns up to three matches with numbers.", {
+      name: { type: "string" },
+    }, ["name"]),
   ];
 }
 
@@ -381,6 +388,18 @@ export async function runBrainTool(env: Env, name: string, raw: string, channel:
       const extra = reminders.length ? ` Open reminders: ${reminders.join("; ")}.` : "";
       return { ok: true, briefing: `Briefing is not available just now.${extra}` };
     }
+  }
+  if (name === "get_weather") {
+    const { weatherFor } = await import("./live-tools");
+    const got = await weatherFor(typeof args.place === "string" ? args.place : "", typeof args.when === "string" ? args.when : "");
+    return { ok: got.ok, weather: got.text };
+  }
+  if (name === "lookup_contact") {
+    const { findContacts, maskPhone } = await import("./contacts");
+    const q = typeof args.name === "string" ? args.name : "";
+    const found = await findContacts(env, q, 3).catch(() => []);
+    if (!found.length) return { ok: true, matches: [], message: `No contact matches ${q}. He can tap Sync contacts in the app.` };
+    return { ok: true, matches: found.map((f) => ({ name: f.name, phone: maskPhone(f.phone), label: f.label })) };
   }
   if (name === "web_search" || name === "draft_document" || name === "request_approval") {
     const desk = await import("./sms-desk");

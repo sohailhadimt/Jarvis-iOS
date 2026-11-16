@@ -598,8 +598,20 @@ export async function stockQuote(symbol: string): Promise<number | null> {
 /** Search hits as text blobs: snippets first, then the top pages read in full when snippets say nothing. */
 async function searchBlobs(env: Env, query: string, wanted: RegExp): Promise<{ text: string; host: string }[]> {
   const { webSearch, fetchPublicPage } = await import("./search");
+  const { liveSearch } = await import("./live-tools");
+  // A grounded answer first (Gemini Search grounding, then Groq browser search): it reads live pages.
+  const live = await liveSearch(env, query).catch(() => null);
+  const hostOf = (url: string) => {
+    try {
+      return new URL(url).hostname.replace(/^www\./, "");
+    } catch {
+      return url.slice(0, 40);
+    }
+  };
+  const liveBlob = live && live.ok && live.provider !== "search" ? [{ text: live.answer, host: live.sources[0] ? hostOf(live.sources[0]) : "web search" }] : [];
+  if (liveBlob.length && new RegExp(wanted.source, wanted.flags.replace("g", "")).test(liveBlob[0]!.text)) return liveBlob;
   const found = await webSearch(env, query);
-  if (!found.ok) return [];
+  if (!found.ok) return liveBlob;
   const host = (url: string) => {
     try {
       return new URL(url).hostname.replace(/^www\./, "");
@@ -607,7 +619,7 @@ async function searchBlobs(env: Env, query: string, wanted: RegExp): Promise<{ t
       return "";
     }
   };
-  const blobs = found.results.slice(0, 8).map((r) => ({ text: `${r.title ?? ""} ${r.snippet ?? ""}`, host: host(r.url) }));
+  const blobs = [...liveBlob, ...found.results.slice(0, 8).map((r) => ({ text: `${r.title ?? ""} ${r.snippet ?? ""}`, host: host(r.url) }))];
   if (blobs.some((b) => new RegExp(wanted.source, wanted.flags.replace("g", "")).test(b.text))) return blobs;
   const pages = await Promise.all(
     found.results.slice(0, 3).map(async (r) => {
@@ -950,6 +962,41 @@ export function ringByName(text: string): { name: string; place: string; verb: "
   return { name, place, verb, purpose };
 }
 
+/** "what's Mum's number", "Dominos Ashford number", "number for Ali". Null otherwise. */
+export function numberAsk(text: string): string | null {
+  const clean = text.replace(/\s+/g, " ").trim().replace(/[?!.]+$/, "");
+  if (clean.length > 80 || /^(?:call|ring|phone|text|remind|watch|prank)\b/i.test(clean)) return null;
+  if (/\b(?:my|your|jarvis'?s?) (?:own )?number\b|\bwrong number\b|\bnumber is\b|\bthe number\b/i.test(clean)) return null;
+  let m = /^(?:what(?:'s| is)|whats|give me|send me|get me|find(?: me)?|i need|do you have)?\s*(?:the\s+)?(?:phone |contact |telephone )?number (?:for|of) (.{2,50})$/i.exec(clean);
+  if (m) return m[1]!.trim();
+  m = /^(?:what(?:'s| is)|whats|give me|send me|get me|find(?: me)?|i need|do you have)?\s*(?:the\s+)?(.{2,50}?)(?:'s|s')? (?:phone |contact |telephone |mobile )?(?:number|no\.?)$/i.exec(clean);
+  if (m) return m[1]!.trim();
+  return null;
+}
+
+function clipSms(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (flat.length <= 320) return flat;
+  const cut = flat.slice(0, 320);
+  const stop = cut.lastIndexOf(". ");
+  return stop > 120 ? cut.slice(0, stop + 1) : `${cut.replace(/\s+\S*$/, "")}…`;
+}
+
+/** Contacts first (Sir's phone book), then a business search. */
+export async function numberLine(env: Env, who: string): Promise<string> {
+  const { resolveContact, maskPhone, optionsLine } = await import("./contacts");
+  const found = await resolveContact(env, who).catch(() => ({ kind: "none" as const }));
+  if (found.kind === "one") return `${found.contact.name}: ${maskPhone(found.contact.phone)}${found.contact.label ? ` (${found.contact.label})` : ""}, Sir.`;
+  if (found.kind === "many") return `A few matches, Sir: ${optionsLine(found.options)}`;
+  if (personalContact(who)) return `${who} isn't in the contacts I have, Sir. Open the JARVIS app and tap Sync contacts, then ask again.`;
+  const at = /^(.+?)\s+(?:in|at)\s+([A-Z][\w' -]{2,40})$/.exec(who);
+  const name = at ? at[1]!.trim() : who;
+  const place = at ? at[2]!.trim() : "";
+  const business = await findBusinessPhone(env, name, place).catch(() => null);
+  if (business) return `${who}: ${maskPhone(business.phone)}${business.source ? ` (${business.source})` : ""}. Text 'ring ${who} and ask …' and I'll offer the call.`;
+  return `I couldn't find a number for ${who}, Sir.`;
+}
+
 export function personalContact(name: string): boolean {
   return /\b(?:mum|mom|mam|dad|mother|father|bro|brother|sis|sister|cousin|nan|nana|gran|grandma|grandad|wife|husband|girlfriend|boyfriend|missus|mate|friend|uncle|auntie|aunt|my|his|her)\b/i.test(name);
 }
@@ -1079,6 +1126,29 @@ export async function smsExtras(env: Env, phone: string, text: string, media: st
   if (/^prank\b/i.test(clean)) {
     await ctx.send("Send the number with it, Sir: 'prank 07... with a fake award for best kettle in Kent'. I only ring numbers you type, and it reveals it's you at the end.");
     return true;
+  }
+
+  const weather = (await import("./live-tools")).weatherAsk(clean);
+  if (weather) {
+    const { weatherFor } = await import("./live-tools");
+    await ctx.send((await weatherFor(weather.place, weather.when)).text);
+    return true;
+  }
+
+  const numberOf = numberAsk(clean);
+  if (numberOf) {
+    await ctx.send(await numberLine(env, numberOf));
+    return true;
+  }
+
+  const live = await import("./live-tools");
+  if (live.currentFactAsk(clean) && !nearbyAsk(clean)) {
+    const found = await live.liveSearch(env, clean);
+    if (found.ok) {
+      await ctx.send(clipSms(found.answer));
+      return true;
+    }
+    // No live answer: fall through to the chat brain, which says it is unsure.
   }
 
   const near = nearbyAsk(clean);
