@@ -958,12 +958,15 @@ const UK_PHONE = /(?:\+44\s?\(?0?\)?\s?|\b0)(?:\d[\s-]?){9,10}\b/g;
 
 export async function findBusinessPhone(env: Env, name: string, place: string): Promise<{ phone: string; source: string } | null> {
   const { toE164, isBlockedNumber } = await import("./calls");
-  const blobs = await searchBlobs(env, `${name} ${place || "Ashford Kent"} phone number`, UK_PHONE);
-  for (const blob of blobs) {
-    for (const m of blob.text.matchAll(UK_PHONE)) {
-      const e164 = toE164(m[0].replace(/[\s()-]/g, ""));
-      if (!e164 || isBlockedNumber(e164) || /^\+44(?:9|87|84|70)/.test(e164)) continue;
-      return { phone: e164, source: blob.host };
+  const where = place || "Ashford Kent";
+  for (const query of [`${name} ${where} phone number`, `"${name}" ${where} contact telephone`]) {
+    const blobs = await searchBlobs(env, query, UK_PHONE);
+    for (const blob of blobs) {
+      for (const m of blob.text.matchAll(UK_PHONE)) {
+        const e164 = toE164(m[0].replace(/[\s()-]/g, ""));
+        if (!e164 || isBlockedNumber(e164) || /^\+44(?:9|87|84|70)/.test(e164)) continue;
+        return { phone: e164, source: blob.host };
+      }
     }
   }
   return null;

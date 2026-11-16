@@ -222,6 +222,11 @@ if [ -n "$token" ]; then
   sim ring_personal "ring my mum and ask if she wants dinner" 26
   sim diss_bad "make a diss track about how fat my cousin is" 27
   sim chat_still "how are you doing?" 27
+  for biz in "Halfords|Ashford" "Ashford Borough Council|Ashford" "Dominos|Ashford"; do
+    n="${biz%%|*}"; p="${biz##*|}"
+    CURL_MAX=40 hit x_phone POST /debug/extras "{\"action\":\"find-phone\",\"name\":\"${n}\",\"place\":\"${p}\"}" yes
+    echo "x_phone_result ${n}: $(cut -c1-200 /tmp/live-x_phone.json)"
+  done
   CURL_MAX=40 hit x_quote POST /debug/extras '{"action":"quote","symbol":"TSLA"}' yes
   echo "x_quote_result $(cut -c1-300 /tmp/live-x_quote.json)"
   CURL_MAX=40 hit x_morning POST /debug/extras '{"action":"morning"}' yes
