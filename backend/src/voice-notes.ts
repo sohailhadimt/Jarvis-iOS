@@ -51,8 +51,10 @@ export function voiceAsk(text: string): VoiceAsk | null {
 }
 
 /** The beatbox JARVIS sends. Chosen by the voice lab listening check (see /debug/voice-lab). */
+// Lab run lab1 (16 Nov): sound v3 had the tightest groove (onset periodicity 0.56 vs 0.32 for v2,
+// 5 hits a second, widest spread of kick/snare/hat timbres); George reading syllables on eleven_v3 was words, not a beat.
 export const BEATBOX = {
-  model: "eleven_text_to_sound_v2",
+  model: "eleven_text_to_sound_v3",
   seconds: 12,
   influence: 0.7,
 };
