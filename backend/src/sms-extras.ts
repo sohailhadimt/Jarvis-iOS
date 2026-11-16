@@ -1146,6 +1146,7 @@ export async function extrasDebugRoute(request: Request, env: Env): Promise<Resp
       ok: found.ok,
       provider: found.ok ? found.provider : "",
       error: found.ok ? "" : found.error,
+      attempted: found.ok ? [] : found.attempted.map((a) => a.slice(0, 160)),
       results: found.ok ? found.results.slice(0, 6).map((r) => ({ url: r.url.slice(0, 100), text: `${r.title} ${r.snippet}`.slice(0, 220) })) : [],
     });
   }
