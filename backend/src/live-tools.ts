@@ -293,7 +293,7 @@ async function groqBrowser(key: string, q: string, fetcher: typeof fetch): Promi
     const got = await groqBrowserModel(key, q, fetcher, model);
     if (got.ok) return got;
     errors.push(`${model}: ${got.error}`);
-    if (!/http (?:429|503|500|413)/.test(got.error)) break;
+    if (!/http (?:429|503|500|413)/.test(got.error ?? "")) break;
   }
   return { ok: false, error: errors.join("; ") };
 }
