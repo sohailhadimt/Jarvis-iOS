@@ -56,7 +56,7 @@ export async function closeOpenRows(env: Env, maxAgeMs: number): Promise<number>
       env,
       `UPDATE outbound_calls SET status = 'completed', updated_at = ?
        WHERE status IN (${OPEN_ROWS.map(() => "?").join(", ")}) AND created_at <= ?
-         AND id IN (SELECT call_id FROM call_screen WHERE direction = 'inbound')`,
+         AND (id IN (SELECT call_id FROM call_screen WHERE direction = 'inbound') OR brief = 'Owner on his JARVIS line')`,
       [nowIso(), ...OPEN_ROWS, cutoff],
     );
   } catch {

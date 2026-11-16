@@ -250,9 +250,13 @@ final class SpeechListener {
         let engine = try makeEngine()
         enableVoiceProcessing(engine)
         removeTapIfInstalled()
+        guard !CellularCall.active else { throw ListenerError.noInput }
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { throw ListenerError.noInput }
+        // The hardware side must be live too; a 0 Hz input during a call or route change crashes installTap.
+        let hardware = input.inputFormat(forBus: 0)
+        guard hardware.sampleRate > 0, hardware.channelCount > 0 else { throw ListenerError.noInput }
         input.installTap(onBus: 0, bufferSize: bufferSize, format: format, block: block)
         tapInstalled = true
         currentTap = block

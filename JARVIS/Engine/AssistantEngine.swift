@@ -1395,6 +1395,9 @@ final class AssistantEngine {
             Task { await self.shareTurn(role: "assistant", text: spoken) }
             pushActivity()
         case .audio(let pcm):
+            // A phone call or Siri holds the audio hardware. Building a player now crashes the app,
+            // so George's audio is dropped until the interruption ends and the engine is rebuilt.
+            if audioInterrupted || CellularCall.active { return }
             if phase != .speaking {
                 phase = .speaking
                 pushActivity()
@@ -2819,6 +2822,7 @@ final class AssistantEngine {
 
     private func refreshDesk() {
         let now = Date()
+        CallLogStore.settleStale(now: now)
         let rows = CallLogStore.entries().filter { call in
             let stage = CallDeskStage.of(call)
             if stage != .ended { return true }
@@ -2830,7 +2834,17 @@ final class AssistantEngine {
         let recent = rows.filter { call in
             CallDeskStage.of(call) == .ended && call.callbackNeeded != true && call.delegationStatus != "awaiting_decision"
         }
-        deskCalls = Array((live + held + recent).prefix(3))
+        var seenIDs = Set<String>()
+        var liveCallers = Set<String>()
+        let unique = (live + held + recent).filter { call in
+            guard seenIDs.insert(call.id).inserted else { return false }
+            // One live card per caller: the same number cannot be on two live calls to JARVIS at once.
+            if CallDeskStage.of(call) != .ended, !call.number.isEmpty {
+                return liveCallers.insert(call.number).inserted
+            }
+            return true
+        }
+        deskCalls = Array(unique.prefix(3))
         VoiceMeter.shared.interceptor = interceptor
     }
 
@@ -3166,6 +3180,15 @@ final class AssistantEngine {
             inboundIDs.remove(id)
             if let record = try? await client.outboundCall(id: id) {
                 absorb(record, announce: true)
+            }
+        }
+        // Inbound cards saved before a relaunch are not in inboundIDs. The server no longer lists them as
+        // active, so ask once for their final state; if the server has nothing, end the card here.
+        for orphan in CallLogStore.openInbound() where !seen.contains(orphan.id) && !gone.contains(orphan.id) {
+            if let record = try? await client.outboundCall(id: orphan.id), record.isFinished {
+                absorb(record, announce: false)
+            } else if Date().timeIntervalSince(orphan.updatedAt) > 90 {
+                CallLogStore.end(id: orphan.id)
             }
         }
         inboundCall = calls.first

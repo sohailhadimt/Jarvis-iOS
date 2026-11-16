@@ -808,7 +808,19 @@ export async function settleDisconnectedCall(env: Env, sid: string, twilioStatus
   const found = await dbFirst<{ id: string }>(env, "SELECT id FROM outbound_calls WHERE twilio_sid = ?", [sid]).catch(() => null);
   if (!found?.id) return;
   const row = await loadOpenRow(env, found.id);
-  if (!row || row.conversation_id || !OPEN_STATUSES.includes(row.status)) return;
+  if (!row || !OPEN_STATUSES.includes(row.status)) return;
+  if (row.conversation_id) {
+    // ElevenLabs owns the transcript. The line is down, so the card must end now; the post-call
+    // webhook or the sweep still fills the summary and the message for a completed row.
+    const status = twilioStatus === "completed" ? "completed" : "failed";
+    await dbRun(env, "UPDATE outbound_calls SET status = ?, error = COALESCE(error, ?), updated_at = ? WHERE id = ?", [
+      status,
+      status === "failed" ? twilioStatus : null,
+      new Date().toISOString(),
+      row.id,
+    ]).catch(() => undefined);
+    return;
+  }
   await finishLocal(env, row, twilioStatus);
 }
 

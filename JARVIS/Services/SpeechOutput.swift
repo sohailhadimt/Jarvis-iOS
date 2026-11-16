@@ -1,4 +1,5 @@
 import AVFoundation
+import CallKit
 import Foundation
 
 /// Speaks replies with ElevenLabs streaming PCM. The British device voice is the fallback when that cannot start.
@@ -351,7 +352,12 @@ final class SpeechOutput: NSObject {
     /// Playback engine. Voice processing and a mic tap are attached only when the listener
     /// engine is not already holding the microphone.
     private func openEngine(monitorMicrophone: Bool) throws -> AVAudioPlayerNode {
+        // During a phone call iOS owns the audio hardware and the output format reads 0 Hz / 0 channels.
+        // Connecting a player or tapping the mixer then raises an Objective-C exception that kills the app.
+        guard !CellularCall.active else { throw ListenerError.noInput }
         let engine = AVAudioEngine()
+        let hardware = engine.outputNode.outputFormat(forBus: 0)
+        guard hardware.sampleRate > 0, hardware.channelCount > 0 else { throw ListenerError.noInput }
         var monitoring = false
         if monitorMicrophone {
             do {
@@ -444,6 +450,10 @@ final class SpeechOutput: NSObject {
             guard levels.allow() else { return }
             Task { @MainActor in self?.onLevel?(value) }
         }
+        let format = mixer.outputFormat(forBus: 0)
+        guard format.sampleRate > 0, format.channelCount > 0 else { return }
+        // A second tap on the same bus is an Objective-C exception, so clear any tap left by a rebuilt engine.
+        mixer.removeTap(onBus: 0)
         mixer.installTap(onBus: 0, bufferSize: 1024, format: nil, block: AudioTaps.levelTap(levelHandler))
         sharedTapInstalled = true
     }
@@ -687,5 +697,14 @@ final class DeviceSpeech: NSObject, AVSpeechSynthesizerDelegate, @unchecked Send
         signal = nil
         lock.unlock()
         pending?.fire()
+    }
+}
+
+/// True while a cellular, FaceTime or VoIP call is up on this iPhone.
+enum CellularCall {
+    private static let observer = CXCallObserver()
+
+    static var active: Bool {
+        observer.calls.contains { !$0.hasEnded }
     }
 }
