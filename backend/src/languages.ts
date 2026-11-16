@@ -183,3 +183,16 @@ export async function ensureMainMultilingual(env: Env, force = false): Promise<{
   await setState(env, "main_agent_lang", stamp);
   return { ok: true, state: "updated" };
 }
+
+/** The last instruction before the reply when Sir has pinned Urdu, Punjabi or Turkish. Empty otherwise. */
+export function pinnedLanguageNudge(pref: LangCode | null, latest: string): string {
+  if (!pref || pref === "en") return "";
+  const script = scriptOf(latest);
+  const how =
+    pref === "tr"
+      ? "Turkish, with proper Turkish letters"
+      : pref === "ur"
+        ? script === "arabic" ? "Urdu script" : script === "latin" ? "Roman Urdu (Latin letters)" : "Urdu script"
+        : script === "gurmukhi" ? "Gurmukhi Punjabi" : script === "arabic" ? "Shahmukhi Punjabi" : "Roman Punjabi (Latin letters)";
+  return `Sir switched JARVIS to ${LANG_NAMES[pref]}. Write this reply in ${how}, even though his message may be in English. Keep it short.`;
+}

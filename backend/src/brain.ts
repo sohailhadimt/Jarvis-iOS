@@ -240,10 +240,13 @@ export async function brainReply(
         "SELECT role, body FROM brain_turns ORDER BY created_at DESC LIMIT 16",
       ).catch(() => []);
   let languageLine = "";
+  let pinned = "";
   if (phone) {
-    const { readLanguage, smsLanguageRule } = await import("./languages");
+    const { readLanguage, smsLanguageRule, pinnedLanguageNudge } = await import("./languages");
     const latest = turns.find((t) => t.role === "user")?.body ?? "";
-    languageLine = smsLanguageRule(await readLanguage(env, phone).catch(() => null), latest);
+    const pref = await readLanguage(env, phone).catch(() => null);
+    languageLine = smsLanguageRule(pref, latest);
+    pinned = pinnedLanguageNudge(pref, latest);
   }
   const messages: ChatMessage[] = [
     {
@@ -261,6 +264,12 @@ export async function brainReply(
     if (turn.role !== "user" && turn.role !== "assistant") continue;
     if (!turn.body) continue;
     messages.push({ role: turn.role, content: turn.body });
+  }
+  // A pinned language goes last, right after his text, where the model cannot miss it.
+  if (pinned) {
+    const last = [...messages].reverse().find((m) => m.role === "user");
+    if (last && typeof last.content === "string") last.content = `${last.content}\n\n(${pinned})`;
+    else messages.push({ role: "user", content: `(${pinned})` });
   }
   const finish = (raw: string | null): string => {
     const text = phone ? smsAnswer(raw ?? "", Boolean(options?.detail)) : spokenAnswer(raw ?? "");
