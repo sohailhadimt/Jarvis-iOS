@@ -111,7 +111,7 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     const auth = authorize(request, env.JARVIS_APP_TOKEN);
     if (!auth.ok) return auth.response;
     ctx.waitUntil(rememberOrigin(env, url.origin));
-    if (path === "/owner/agent" || path === "/owner/agent/ensure" || path === "/debug/owner-tool") {
+    if (path === "/owner/agent" || path === "/owner/agent/ensure" || path === "/owner/agent/languages" || path === "/debug/owner-tool") {
       const handled = await (await import("./owner-agent")).ownerAgentRoute(request, env, path);
       if (handled) return handled;
     }

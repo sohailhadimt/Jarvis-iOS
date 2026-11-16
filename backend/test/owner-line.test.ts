@@ -64,7 +64,7 @@ function seedAgent(raw) {
   raw.prepare("INSERT INTO runtime_state (key, value, updated_at) VALUES (?, ?, ?)").run("owner_agent_id", "agent_personal", "2026-11-16T00:00:00Z");
   raw
     .prepare("INSERT INTO runtime_state (key, value, updated_at) VALUES (?, ?, ?)")
-    .run("owner_agent_version", "owner-1|https://jarvis-backend.jarvis-hadi.workers.dev", "2026-11-16T00:00:00Z");
+    .run("owner_agent_version", "owner-2|https://jarvis-backend.jarvis-hadi.workers.dev", "2026-11-16T00:00:00Z");
 }
 
 afterEach(() => {

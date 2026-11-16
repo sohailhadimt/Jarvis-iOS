@@ -4,6 +4,7 @@ import { eleven, templateFromMainAgent, type Template } from "./desk";
 import { apiError, asString, isRecord, json } from "./http";
 import { publicBase } from "./public-url";
 import type { Env } from "./types";
+import { LANGUAGE_DETECTION_TOOL, agentLanguageRule, languagePresets, multilingualModel } from "./languages";
 
 /**
  * Sir's own ElevenLabs agent. When his mobile rings the JARVIS line (matched by caller ID only),
@@ -12,7 +13,7 @@ import type { Env } from "./types";
  */
 
 export const OWNER_AGENT_NAME = "JARVIS Personal";
-export const OWNER_AGENT_VERSION = "owner-1";
+export const OWNER_AGENT_VERSION = "owner-2";
 
 export function ownerGreeting(now = new Date()): string {
   const hour = Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", hour: "2-digit", hourCycle: "h23" }).format(now));
@@ -43,6 +44,7 @@ export function ownerAgentPrompt(): string {
     "Read phone numbers back in groups. Never read out a number from his contacts unless he asked for it.",
     "You cannot dial anyone, text anyone, buy or book from this call. If he wants you to ring or text someone, tell him to text the JARVIS line, for example 'ring Ali and ask if he is free', and it will wait for his YES.",
     "Never claim anything has been sent, called, booked or paid unless a tool result says so. When he says goodbye, say goodbye briefly and end the call.",
+    agentLanguageRule(false),
   ].join("\n");
 }
 
@@ -121,7 +123,10 @@ export function ownerAgentBody(toolIds: string[], template: Template = { tts: {}
   const prompt: Record<string, unknown> = { prompt: ownerAgentPrompt(), tool_ids: toolIds };
   if (template.llm) prompt.llm = template.llm;
   if (template.temperature !== undefined) prompt.temperature = template.temperature;
-  prompt.built_in_tools = { end_call: { name: "end_call", description: "", params: { system_tool_type: "end_call" } } };
+  prompt.built_in_tools = {
+    end_call: { name: "end_call", description: "", params: { system_tool_type: "end_call" } },
+    language_detection: LANGUAGE_DETECTION_TOOL,
+  };
   const conversation: Record<string, unknown> = {
     agent: {
       first_message: "{{opening_line}}",
@@ -138,8 +143,9 @@ export function ownerAgentBody(toolIds: string[], template: Template = { tts: {}
         },
       },
     },
-    tts: { ...template.tts, voice_id: JARVIS_VOICE_ID, agent_output_audio_format: "ulaw_8000" },
+    tts: { ...template.tts, model_id: multilingualModel(template.tts.model_id), voice_id: JARVIS_VOICE_ID, agent_output_audio_format: "ulaw_8000" },
     asr: { user_input_audio_format: "ulaw_8000" },
+    language_presets: languagePresets(),
   };
   if (template.turn) conversation.turn = template.turn;
   return { name: OWNER_AGENT_NAME, conversation_config: conversation };
@@ -280,6 +286,15 @@ export async function ownerAgentRoute(request: Request, env: Env, path: string):
   if (request.method === "POST" && path === "/owner/agent/ensure") {
     const raw = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     return json(await ensureOwnerAgent(env, raw?.force === true));
+  }
+  if (request.method === "POST" && path === "/owner/agent/languages") {
+    const { ensureMainMultilingual } = await import("./languages");
+    const { ensureDeskAgent } = await import("./desk");
+    return json({
+      owner: await ensureOwnerAgent(env, true),
+      desk: await ensureDeskAgent(env, publicBase(env), true),
+      main: await ensureMainMultilingual(env, true),
+    });
   }
   if (request.method === "GET" && path === "/owner/agent") {
     return json({ ok: true, agent_id: await ownerAgentId(env), version: await getState(env, "owner_agent_version").catch(() => null), greeting: ownerGreeting() });

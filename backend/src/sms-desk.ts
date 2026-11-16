@@ -1,6 +1,7 @@
 import { brainReply, guardUnplacedCall, rememberLine } from "./brain";
 import { delegatedBrief, isBlockedNumber, placeOutboundCall, safeError, toE164 } from "./calls";
 import { dbAll, dbFirst, dbRun, getState, setState } from "./db";
+import { UNICODE_SMS_MAX, needsUnicode } from "./languages";
 import { isRecord, json, newId, nowIso, apiError, asString, readJson } from "./http";
 import { CHAT_FALLBACK } from "./llm";
 import { inQuietHours, londonDay, londonMinutes, readCallSettings, readOwnerMobile } from "./owner-alert";
@@ -171,6 +172,7 @@ export const CHAT_SMS_MAX = 306;
 
 /** A chat reply goes out as one text (up to two segments). With detail it may run to three texts. */
 export function chatBubbles(text: string, detail = false): string[] {
+  if (needsUnicode(text)) return unicodeBubbles(text, detail);
   const clean = gsmText(text.replace(/https?:\/\/\S+/gi, " ").replace(/\s+/g, " ")).replace(/\s*:\s*$/, ".");
   if (!clean) return ["I'm here, Sir."];
   const parts: string[] = [];
@@ -185,6 +187,33 @@ export function chatBubbles(text: string, detail = false): string[] {
     const window = rest.slice(0, CHAT_SMS_MAX);
     const stop = Math.max(window.lastIndexOf(". "), window.lastIndexOf("? "), window.lastIndexOf("! "));
     const cut = stop >= 80 ? stop + 1 : window.lastIndexOf(" ") > 80 ? window.lastIndexOf(" ") : CHAT_SMS_MAX;
+    parts.push(rest.slice(0, cut).trim());
+    rest = rest.slice(cut).trim();
+  }
+  return parts.filter(Boolean);
+}
+
+/** Urdu, Punjabi, Turkish: keep the letters, tidy punctuation, and cap at two Unicode segments (three texts with detail). */
+export function unicodeBubbles(text: string, detail = false): string[] {
+  const clean = text
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/[*_#`]+/g, "")
+    .replace(/[\u200b\u00a0\t]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\s*:\s*$/, ".");
+  if (!clean) return ["I'm here, Sir."];
+  const parts: string[] = [];
+  let rest = clean;
+  const limit = detail ? 3 : 1;
+  while (rest && parts.length < limit) {
+    if (rest.length <= UNICODE_SMS_MAX) {
+      parts.push(rest);
+      break;
+    }
+    const window = rest.slice(0, UNICODE_SMS_MAX);
+    const stop = Math.max(window.lastIndexOf(". "), window.lastIndexOf("۔ "), window.lastIndexOf("। "), window.lastIndexOf("? "), window.lastIndexOf("؟ "), window.lastIndexOf("! "));
+    const cut = stop >= 40 ? stop + 1 : window.lastIndexOf(" ") > 40 ? window.lastIndexOf(" ") : UNICODE_SMS_MAX;
     parts.push(rest.slice(0, cut).trim());
     rest = rest.slice(cut).trim();
   }
@@ -747,6 +776,15 @@ async function answerOwner(env: Env, phone: string, text: string, media: string[
       return;
     }
   }
+  {
+    const langs = await import("./languages");
+    const asked = langs.languageCommand(text);
+    if (asked) {
+      await langs.saveLanguage(env, phone, asked);
+      await reply(env, phone, langs.confirmLanguage(asked), `lang-${asked}`);
+      return;
+    }
+  }
   const extras = await import("./sms-extras");
   if (await extras.smsExtras(env, phone, text, media, { sim, send: (line) => replyLine(env, phone, line, "extra") })) return;
   const corrected = numberCorrection(text);
@@ -1029,7 +1067,8 @@ async function deliverVoiceNote(env: Env, phone: string, text: string, ask: Voic
     "SELECT role, body FROM sms_turns WHERE phone = ? ORDER BY created_at DESC, rowid DESC LIMIT 8",
     [phone],
   ).catch(() => []);
-  const made = await makeVoiceNote(env, ask, text, [...history].reverse());
+  const lang = await (await import("./languages")).readLanguage(env, phone).catch(() => null);
+  const made = await makeVoiceNote(env, ask, text, [...history].reverse(), lang);
   if (!made.ok || !made.note) {
     await recordSmsError(env, "voice", made.error ?? "voice note failed");
     await reply(env, phone, noteFailure(made), "voice-failed");

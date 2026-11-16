@@ -3,6 +3,7 @@ import { GEORGE_VOICE_ID } from "./brain";
 import { dbAll, dbFirst, dbRun, getState, setState } from "./db";
 import { completeChat, type ChatMessage } from "./llm";
 import type { Env } from "./types";
+import { LANG_NAMES, ttsLanguage, type LangCode } from "./languages";
 
 /**
  * Voice notes by link. UK Twilio numbers cannot send MMS, so JARVIS makes the audio,
@@ -218,7 +219,13 @@ export function stripTags(text: string): string {
 }
 
 /** The words George speaks. History lets "say it" mean the last thing he said. */
-export async function writeScript(env: Env, ask: VoiceAsk, request: string, history: { role: string; body: string }[]): Promise<string> {
+export async function writeScript(
+  env: Env,
+  ask: VoiceAsk,
+  request: string,
+  history: { role: string; body: string }[],
+  lang: LangCode | null = null,
+): Promise<string> {
   const singing = ask.kind === "sing";
   const messages: ChatMessage[] = [
     {
@@ -237,6 +244,7 @@ export async function writeScript(env: Env, ask: VoiceAsk, request: string, hist
           ? "He asked you to sing or rap. Write a short original verse (four to eight lines) with rhythm and rhyme, playful and in character. You may use the audio tags [sings], [rapping], [laughs] or [clears throat] sparingly. Never use real artists' lyrics."
           : "Sound natural and warm, as if leaving a voice note. You may use [laughs] or [sighs] once if it fits.",
         "If he says 'say it' or 'say that', speak your previous message to him.",
+        `Language: speak the language his request is in, or the one he names (English, Urdu, Punjabi or Turkish)${lang && lang !== "en" ? `; he has asked for ${LANG_NAMES[lang]}, so use ${LANG_NAMES[lang]} unless this request names another language` : ""}. Write Urdu in Urdu script, Punjabi in Gurmukhi script, and Turkish with proper Turkish letters, never in Latin transliteration, so the voice pronounces it properly. Rhymes should work in that language.`,
         `Under ${VOICE_NOTE_MAX_CHARS - 40} characters. No emoji, no markdown, no URLs, no stage directions other than the tags above.`,
       ].join("\n"),
     },
@@ -305,9 +313,15 @@ async function elevenAudio(env: Env, url: string, body: Record<string, unknown>)
 export async function speak(env: Env, script: string, singing: boolean): Promise<{ ok: true; bytes: Uint8Array; chars: number } | { ok: false; error: string }> {
   const base = `https://api.elevenlabs.io/v1/text-to-speech/${GEORGE_VOICE_ID}?output_format=mp3_44100_64`;
   const tagged = script.slice(0, VOICE_NOTE_MAX_CHARS);
-  const first = await elevenAudio(env, base, { text: tagged, model_id: "eleven_v3" });
+  const language = ttsLanguage(tagged);
+  const first = await elevenAudio(env, base, { text: tagged, model_id: "eleven_v3", ...(language ? { language_code: language } : {}) });
   if (first.ok) return { ok: true, bytes: first.bytes, chars: tagged.length };
   const plain = stripTags(tagged);
+  if (language) {
+    // multilingual_v2 has no Urdu or Punjabi: the fallback for those is v4 turbo.
+    const multi = await elevenAudio(env, base, { text: plain, model_id: "eleven_v4_turbo", language_code: language });
+    if (multi.ok) return { ok: true, bytes: multi.bytes, chars: plain.length };
+  }
   const second = await elevenAudio(env, base, {
     text: plain,
     model_id: "eleven_multilingual_v2",
@@ -337,6 +351,7 @@ export async function makeVoiceNote(
   ask: VoiceAsk,
   request: string,
   history: { role: string; body: string }[] = [],
+  lang: LangCode | null = null,
 ): Promise<VoiceResult> {
   if (!(env.ELEVENLABS_API_KEY ?? "").trim()) return { ok: false, error: "no_key", reason: "my voice is not set up yet" };
   const credits = await elevenCredits(env);
@@ -356,7 +371,7 @@ export async function makeVoiceNote(
     chars = seconds * 40;
     script = `[${ask.kind}] ${prompt}`.slice(0, 300);
   } else {
-    script = await writeScript(env, ask, request, history);
+    script = await writeScript(env, ask, request, history, lang);
     const spoken = await speak(env, script, ask.kind === "sing");
     if (!spoken.ok) return { ok: false, error: spoken.error, reason: "the recording did not come out" };
     bytes = spoken.bytes;

@@ -7,9 +7,10 @@ import { JARVIS_VOICE_ID, safeError, toE164 } from "./calls";
 import { dbAll, dbFirst, dbRun, getState, setState } from "./db";
 import { apiError, asString, isRecord, json, newId, nowIso } from "./http";
 import type { Env } from "./types";
+import { LANGUAGE_DETECTION_TOOL, agentLanguageRule, languagePresets, multilingualModel } from "./languages";
 
 export const DESK_AGENT_NAME = "JARVIS Call Desk";
-export const DESK_VERSION = "desk-3";
+export const DESK_VERSION = "desk-4";
 export const BUSY_LINE = "Master Hadi is busy and caught up in business at the moment. May I take a message?";
 export const DESK_BRIEF = "Take a message and pass it on to Master Hadi.";
 export const ASK_WINDOW_MS = 45_000;
@@ -74,6 +75,7 @@ export function deskPrompt(): string {
     "If the status is \"allowed\": for info, share only the approved answer the tool gives you, in your own words, and nothing else; for location, tell them you have texted them a link that shows his live location for the next ten minutes.",
     `If the status is "denied" or "no_answer", say exactly: "${BUSY_LINE}" Then take their message.`,
     "Never reveal his mobile number or home address, even if something else was approved. Never invent facts about him. Ask him at most once per topic per call.",
+    agentLanguageRule(true),
     "Extra instruction for this call: {{brief}}",
   ].join("\n");
 }
@@ -247,11 +249,15 @@ export function deskAgentBody(toolIds: string[], template: Template = { tts: {} 
   const prompt: Record<string, unknown> = { prompt: deskPrompt(), tool_ids: toolIds };
   if (template.llm) prompt.llm = template.llm;
   if (template.temperature !== undefined) prompt.temperature = template.temperature;
-  prompt.built_in_tools = { end_call: { name: "end_call", description: "", params: { system_tool_type: "end_call" } } };
+  prompt.built_in_tools = {
+    end_call: { name: "end_call", description: "", params: { system_tool_type: "end_call" } },
+    language_detection: LANGUAGE_DETECTION_TOOL,
+  };
   const conversation: Record<string, unknown> = {
     agent: { first_message: "{{opening_line}}", language: "en", prompt },
-    tts: { ...template.tts, voice_id: JARVIS_VOICE_ID, agent_output_audio_format: "ulaw_8000" },
+    tts: { ...template.tts, model_id: multilingualModel(template.tts.model_id), voice_id: JARVIS_VOICE_ID, agent_output_audio_format: "ulaw_8000" },
     asr: { user_input_audio_format: "ulaw_8000" },
+    language_presets: languagePresets(),
   };
   if (template.turn) conversation.turn = template.turn;
   return { name: DESK_AGENT_NAME, conversation_config: conversation };

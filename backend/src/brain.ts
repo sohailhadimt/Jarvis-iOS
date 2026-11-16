@@ -239,11 +239,18 @@ export async function brainReply(
         env,
         "SELECT role, body FROM brain_turns ORDER BY created_at DESC LIMIT 16",
       ).catch(() => []);
+  let languageLine = "";
+  if (phone) {
+    const { readLanguage, smsLanguageRule } = await import("./languages");
+    const latest = turns.find((t) => t.role === "user")?.body ?? "";
+    languageLine = smsLanguageRule(await readLanguage(env, phone).catch(() => null), latest);
+  }
   const messages: ChatMessage[] = [
     {
       role: "system",
       content: [
         brainSystem(channel, { detail: options?.detail }),
+        ...(languageLine ? [languageLine] : []),
         `It is ${londonNow()} in London.`,
         facts.length ? `Known facts:\n${facts.map((fact) => `- ${fact.detail}`).join("\n")}` : "No saved facts yet.",
         reminders.length ? `Open reminders:\n${reminders.map((item) => `- ${item}`).join("\n")}` : "No open reminders.",
