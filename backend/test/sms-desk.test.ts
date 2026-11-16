@@ -741,8 +741,8 @@ describe("text desk", () => {
       await handleInboundSms(env, "+447700900123", ask);
       expect(calls).toHaveLength(1);
       const failed = texts.join(" ");
-      expect(failed).toContain("21211");
-      expect(failed).toContain("The number is not valid.");
+      expect(failed).toContain("isn't one I can ring");
+      expect(failed).not.toMatch(/21211|Twilio/);
       expect(failed.toLowerCase()).not.toMatch(/\bcalling\b/);
 
       calls.length = 0;

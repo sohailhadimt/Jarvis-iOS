@@ -1266,7 +1266,7 @@ function callingNow(who: string): string {
 /** Friendly words for Sir. Twilio codes and URLs stay in the worker log, never in a text. */
 export function dialFailure(error: string): string {
   console.error("text-line call not placed", publicSmsError(error));
-  if (/not a valid phone number|cannot be called/i.test(error)) {
+  if (/not a valid phone number|cannot be called|number is not valid|\b2121[1478]\b/i.test(error)) {
     return "That number isn't one I can ring, Sir. Nothing was dialled.";
   }
   if (/not set up/i.test(error)) return "Calling isn't set up on my line just now, Sir. Nothing was dialled.";
