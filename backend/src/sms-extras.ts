@@ -927,7 +927,7 @@ export async function placePendingPrank(env: Env, owner: string, sim: boolean): 
     twiml = `<Response><Pause length="1"/><Say voice="Polly.Brian" language="en-GB">${escapeXml(`${pending.script} ${PRANK_REVEAL}`)}</Say><Hangup/></Response>`;
   }
   const call = await callAndPlay(env, pending.to, twiml, 60);
-  return call.ok ? `Ringing ${pending.to} now, Sir. 60 seconds max, and it reveals it's you at the end.` : `The prank call didn't go through, Sir: ${call.error}.`;
+  return call.ok ? `Ringing ${pending.to} now, Sir. 60 seconds max, and it reveals it's you at the end.` : (console.error("prank call not placed", call.error), "The prank call didn't go through on my side, Sir. Nothing was dialled. Text it again in a minute and I'll retry.");
 }
 
 // ---------------------------------------------------------------- ring a business by name

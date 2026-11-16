@@ -1,3 +1,4 @@
+import { createTwilioCall, twilioUrl } from "./public-url";
 import { BRAIN_IDENTITY, GEORGE_VOICE_ID } from "./brain";
 import { recordHandoff } from "./stream";
 import {
@@ -1164,30 +1165,14 @@ export async function placeOutboundCall(env: Env, order: OutboundOrder): Promise
   if (needsDelegation(brief)) {
     await openDelegation(env, { callId: id, contact, to, goal: brief }).catch(() => undefined);
   }
-  const base = await outboundOrigin(env, order.origin);
-  const form = new URLSearchParams();
-  form.set("To", to);
-  form.set("From", from);
-  form.set("Url", `${base}/calls/voice/${id}`);
-  form.set("Method", "POST");
-  form.set("StatusCallback", `${base}/calls/twilio-status/${id}`);
-  form.set("StatusCallbackMethod", "POST");
-  for (const event of ["initiated", "ringing", "answered", "completed"]) form.append("StatusCallbackEvent", event);
-  form.set("Record", "true");
   try {
-    const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls.json`, {
-      method: "POST",
-      redirect: "manual",
-      signal: AbortSignal.timeout(20_000),
-      headers: {
-        authorization: `Basic ${btoa(`${account}:${token}`)}`,
-        "content-type": "application/x-www-form-urlencoded",
-      },
-      body: form.toString(),
+    const attempt = await createTwilioCall(env, (base) => outboundForm(base, id, to, from), {
+      fallbackOrigin: order.origin ?? null,
     });
-    const text = await response.text();
-    if (!response.ok) {
+    const text = attempt.body;
+    if (!attempt.ok) {
       const reason = twilioFailure(text);
+      console.error("outbound call refused by Twilio", attempt.status, reason, attempt.retried ? "after retry" : "");
       await updateCall(env, id, { status: "failed", error: reason });
       return { ok: false, id, error: reason };
     }
@@ -1207,16 +1192,18 @@ export async function placeOutboundCall(env: Env, order: OutboundOrder): Promise
   }
 }
 
-async function outboundOrigin(env: Env, given?: string): Promise<string> {
-  if (given && given.startsWith("http")) return given.replace(/\/$/, "");
-  let saved = "";
-  try {
-    saved = (await dbFirst<{ worker_origin: string }>(env, "SELECT worker_origin FROM call_settings WHERE id = 'default'"))?.worker_origin ?? "";
-  } catch {
-    saved = "";
-  }
-  if (saved.startsWith("http")) return saved.replace(/\/$/, "");
-  return `https://${PUBLIC_VOICE_HOST}`;
+/** The Calls.json form for one outbound call. Every URL is built and validated by twilioUrl. */
+export function outboundForm(base: string, id: string, to: string, from: string): URLSearchParams {
+  const form = new URLSearchParams();
+  form.set("To", to);
+  form.set("From", from);
+  form.set("Url", twilioUrl(base, `/calls/voice/${encodeURIComponent(id)}`));
+  form.set("Method", "POST");
+  form.set("StatusCallback", twilioUrl(base, `/calls/twilio-status/${encodeURIComponent(id)}`));
+  form.set("StatusCallbackMethod", "POST");
+  for (const event of ["initiated", "ringing", "answered", "completed"]) form.append("StatusCallbackEvent", event);
+  form.set("Record", "true");
+  return form;
 }
 
 export async function dialConfirm(env: Env, contact: string, to: string, brief: string): Promise<string | null> {

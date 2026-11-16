@@ -513,7 +513,8 @@ describe("text desk", () => {
       expect(calls).toHaveLength(1);
       expect(models).toHaveLength(0);
       const missed = texts.join(" ");
-      expect(missed).toContain("Twilio did not return a call SID");
+      expect(missed).toContain("didn't go through");
+      expect(missed).not.toMatch(/Twilio|SID|https?:/);
       expect(missed).toContain("Nothing was dialled");
       expect(missed.toLowerCase()).not.toMatch(/\bcalling\b/);
       expect(missed.toLowerCase()).not.toContain("has been placed");
@@ -730,7 +731,8 @@ describe("text desk", () => {
       expect(calls).toHaveLength(1);
       expect(models).toHaveLength(0);
       const missing = texts.join(" ");
-      expect(missing).toContain("Twilio did not return a call SID.");
+      expect(missing).toContain("Nothing was dialled");
+      expect(missing).not.toMatch(/Twilio|SID|https?:/);
       expect(missing.toLowerCase()).not.toMatch(/\bcalling\b/);
 
       calls.length = 0;

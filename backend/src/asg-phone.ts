@@ -1,3 +1,4 @@
+import { createTwilioCall, twilioUrl } from "./public-url";
 /**
  * ASG receptionist line. Callers other than the owner reach a separate ElevenLabs agent
  * (looked up by name, so no id is committed). Leads land in the asg_leads D1 table.
@@ -243,14 +244,13 @@ async function placeCallback(request: Request, env: Env): Promise<Response> {
      VALUES (?, ?, ?, ?, 'placing', NULL, NULL, '[]', NULL, NULL, ?, ?)`,
     [id, String(body?.name ?? "ASG callback").slice(0, 80), to, `ASG consented callback: ${consent.slice(0, 300)}`, now, now],
   );
-  const origin = new URL(request.url).origin.replace("http:", "https:");
-  const form = new URLSearchParams({ To: to, From: from, Url: `${origin}/asg/voice/${id}`, Method: "POST", TimeLimit: "360" });
-  const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Calls.json`, {
-    method: "POST",
-    headers: { authorization: `Basic ${btoa(`${sid}:${token}`)}`, "content-type": "application/x-www-form-urlencoded" },
-    body: form.toString(),
-  });
-  const text = await res.text();
+  const origin = new URL(request.url).origin;
+  const res = await createTwilioCall(
+    env,
+    (base) => new URLSearchParams({ To: to, From: from, Url: twilioUrl(base, `/asg/voice/${encodeURIComponent(id)}`), Method: "POST", TimeLimit: "360" }),
+    { fallbackOrigin: origin },
+  );
+  const text = res.body;
   if (!res.ok) {
     await dbRun(env, "UPDATE outbound_calls SET status = 'failed', error = ? WHERE id = ?", [text.slice(0, 300), id]);
     return apiError(502, "twilio_failed", text.slice(0, 300));

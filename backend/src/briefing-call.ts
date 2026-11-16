@@ -1,3 +1,4 @@
+import { createTwilioCall } from "./public-url";
 /**
  * Morning briefing phone call. Opt-in: the owner sets "Call me at" in the app (days + time, Europe/London).
  * The cron sweep (every 5 minutes) rings OWNER_PHONE once per chosen morning from the JARVIS Twilio number,
@@ -137,29 +138,28 @@ export async function sweepBriefingCall(env: Env, origin = "", now = new Date())
   await setState(env, `briefing_call_done:${day}`, "placing");
   const text = await briefingText(env, now);
   await rememberLine(env, { source: "call", role: "assistant", body: `Morning briefing call: ${text}` });
-  const sid = await placeCall(env, askTwiml(base, 1, text));
+  const sid = await placeCall(env, (callbackBase) => askTwiml(callbackBase, 1, text), base);
   await setState(env, `briefing_call_done:${day}`, sid ? "called" : "failed");
   return sid ? "called" : "failed";
 }
 
-async function placeCall(env: Env, twiml: string): Promise<string | null> {
+async function placeCall(env: Env, twimlFor: (base: string) => string, origin: string): Promise<string | null> {
   const to = (await readOwnerMobile(env)) ?? "";
   const from = toE164(env.TWILIO_FROM_NUMBER ?? "") ?? "";
   const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
   const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
   if (!to || !from || !account || !token) return null;
   try {
-    const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls.json`, {
-      method: "POST",
-      signal: AbortSignal.timeout(20_000),
-      headers: { authorization: `Basic ${btoa(`${account}:${token}`)}`, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ To: to, From: from, Twiml: twiml, TimeLimit: "300", Timeout: "30" }).toString(),
-    });
+    const r = await createTwilioCall(
+      env,
+      (base) => new URLSearchParams({ To: to, From: from, Twiml: twimlFor(base), TimeLimit: "300", Timeout: "30" }),
+      { fallbackOrigin: origin },
+    );
     if (!r.ok) {
-      console.error("briefing call failed", r.status, safeError((await r.text()).slice(0, 200)));
+      console.error("briefing call failed", r.status, safeError(r.body.slice(0, 200)));
       return null;
     }
-    return ((await r.json()) as { sid?: string }).sid ?? null;
+    return (JSON.parse(r.body) as { sid?: string }).sid ?? null;
   } catch (err) {
     console.error("briefing call error", safeError(err instanceof Error ? err.message : "call"));
     return null;

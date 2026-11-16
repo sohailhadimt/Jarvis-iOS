@@ -1,3 +1,4 @@
+import { createTwilioCall, publicBase, twilioUrl } from "./public-url";
 import { awayFirstMessage, awayPrompt, readActiveAway, rememberRecording } from "./call-desk";
 import {
   INTERCEPTOR_DECLINE,
@@ -546,7 +547,7 @@ async function redirectCall(env: Env, callSid: string, id: string, mode: string,
   const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
   const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
   const form = new URLSearchParams();
-  form.set("Url", `${origin.replace(/\/$/, "")}/calls/voice/${id}?mode=${mode}`);
+  form.set("Url", twilioUrl(publicBase(env, origin), `/calls/voice/${encodeURIComponent(id)}`, { mode }));
   form.set("Method", "POST");
   return twilioPost(account, token, `/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls/${encodeURIComponent(callSid)}.json`, form);
 }
@@ -819,8 +820,9 @@ async function sendSms(env: Env, body: string): Promise<void> {
 async function createCall(env: Env, to: string, from: string, twiml: string): Promise<{ ok: true } | { ok: false; error: string }> {
   const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
   const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
-  const form = new URLSearchParams({ To: to, From: from, Twiml: twiml });
-  return twilioPost(account, token, `/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls.json`, form);
+  if (!account || !token) return { ok: false, error: "Calling is not set up." };
+  const attempt = await createTwilioCall(env, () => new URLSearchParams({ To: to, From: from, Twiml: twiml }));
+  return attempt.ok ? { ok: true } : { ok: false, error: twilioMessage(attempt.body) };
 }
 
 async function updateTwiml(env: Env, callSid: string, twiml: string): Promise<{ ok: true } | { ok: false; error: string }> {

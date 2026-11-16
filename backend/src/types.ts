@@ -51,6 +51,8 @@ export const TOOL_NAMES = [
 export type ToolName = (typeof TOOL_NAMES)[number];
 
 export interface Env {
+  /** Public https origin Twilio and ElevenLabs call back on. Defaults to the workers.dev host. */
+  PUBLIC_BASE_URL?: string;
   DB: D1Database;
   /** Service binding to this same Worker. Lets agent lanes hand each step to a fresh invocation. */
   SELF?: Fetcher;

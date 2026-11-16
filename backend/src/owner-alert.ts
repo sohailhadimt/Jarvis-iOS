@@ -1,3 +1,4 @@
+import { normaliseOrigin, publicBase, createTwilioCall, twilioUrl } from "./public-url";
 import { ownerReach, readPresence, recordVoiceApproval } from "./call-desk";
 import { dbAll, dbFirst, dbRun, getState, setState } from "./db";
 import { FALLBACK_SAY_VOICE, registerElevenLabsCall, safeError, toE164, twilioRequestSigned, type CallLine } from "./calls";
@@ -101,14 +102,18 @@ export async function readOwnerMobile(env: Env): Promise<string | null> {
 export async function readCallSettings(env: Env): Promise<CallSettings> {
   try {
     const row = await dbFirst<CallSettings>(env, "SELECT * FROM call_settings WHERE id = 'default'");
-    return row ? { ...DEFAULTS, ...row } : DEFAULTS;
+    const merged = row ? { ...DEFAULTS, ...row } : { ...DEFAULTS };
+    return { ...merged, worker_origin: publicBase(env, merged.worker_origin) };
   } catch {
-    return DEFAULTS;
+    return { ...DEFAULTS, worker_origin: publicBase(env) };
   }
 }
 
-export async function rememberOrigin(env: Env, origin: string): Promise<void> {
-  if (!origin.startsWith("http://") && !origin.startsWith("https://")) return;
+export async function rememberOrigin(env: Env, raw: string): Promise<void> {
+  // Agent lanes reach the worker at https://jarvis-lane through a service binding. Only a public
+  // https origin may be saved, or Twilio rejects every callback built from it (error 21205).
+  const origin = normaliseOrigin(raw);
+  if (!origin) return;
   try {
     await dbRun(
       env,
@@ -333,25 +338,17 @@ async function placeOwnerCall(env: Env, settings: CallSettings, alertId: string,
   } catch {
     return false;
   }
-  const form = new URLSearchParams({
-    To: to,
-    From: from,
-    Url: `${origin}/calls/owner/${alertId}`,
-    Method: "POST",
-  });
   try {
-    const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls.json`, {
-      method: "POST",
-      redirect: "manual",
-      signal: AbortSignal.timeout(20_000),
-      headers: {
-        authorization: `Basic ${btoa(`${account}:${token}`)}`,
-        "content-type": "application/x-www-form-urlencoded",
-      },
-      body: form.toString(),
-    });
-    if (!response.ok) return false;
-    const parsed = (await response.json()) as { sid?: string };
+    const attempt = await createTwilioCall(
+      env,
+      (base) => new URLSearchParams({ To: to, From: from, Url: twilioUrl(base, `/calls/owner/${encodeURIComponent(alertId)}`), Method: "POST" }),
+      { fallbackOrigin: origin },
+    );
+    if (!attempt.ok) {
+      console.error("owner alert call failed", attempt.status, attempt.body.slice(0, 200));
+      return false;
+    }
+    const parsed = JSON.parse(attempt.body) as { sid?: string };
     if (parsed.sid) await dbRun(env, "UPDATE outbound_calls SET twilio_sid = ? WHERE id = ?", [parsed.sid, callId]);
     return true;
   } catch {

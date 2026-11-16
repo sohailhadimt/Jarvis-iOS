@@ -1,3 +1,4 @@
+import { createTwilioCall, normaliseOrigin } from "./public-url";
 import { GEORGE_VOICE_ID } from "./brain";
 import { dbAll, dbFirst, dbRun, getState, setState } from "./db";
 import { completeChat, type ChatMessage } from "./llm";
@@ -170,7 +171,7 @@ export async function noteOrigin(env: Env): Promise<string> {
   try {
     const { readCallSettings } = await import("./owner-alert");
     const saved = ((await readCallSettings(env)).worker_origin ?? "").trim().replace(/^http:/, "https:").replace(/\/+$/, "");
-    if (/^https:\/\/[A-Za-z0-9.-]+$/.test(saved)) return saved;
+    if (normaliseOrigin(saved)) return normaliseOrigin(saved);
   } catch {
     // fall through
   }
@@ -502,14 +503,17 @@ export async function callAndPlay(
   const from = (env.TWILIO_FROM_NUMBER ?? "").trim();
   if (!account || !token || !from || !owner) return { ok: false, sid: "", error: "calling is not set up" };
   try {
-    const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls.json`, {
-      method: "POST",
-      redirect: "manual",
-      signal: AbortSignal.timeout(15_000),
-      headers: { authorization: `Basic ${btoa(`${account}:${token}`)}`, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ To: owner, From: from, Twiml: twiml, Timeout: "30", ...(timeLimit > 0 ? { TimeLimit: String(timeLimit) } : {}) }).toString(),
-    });
-    const body = (await response.json().catch(() => ({}))) as { sid?: string; message?: string };
+    const response = await createTwilioCall(
+      env,
+      () => new URLSearchParams({ To: owner, From: from, Twiml: twiml, Timeout: "30", ...(timeLimit > 0 ? { TimeLimit: String(timeLimit) } : {}) }),
+      { timeoutMs: 15_000 },
+    );
+    let body: { sid?: string; message?: string } = {};
+    try {
+      body = JSON.parse(response.body) as { sid?: string; message?: string };
+    } catch {
+      body = {};
+    }
     if (!response.ok || !body.sid) return { ok: false, sid: "", error: (body.message ?? `HTTP ${response.status}`).slice(0, 120) };
     return { ok: true, sid: body.sid, error: "" };
   } catch (err) {

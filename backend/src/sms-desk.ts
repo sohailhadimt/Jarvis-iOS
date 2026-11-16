@@ -1263,11 +1263,14 @@ function callingNow(who: string): string {
   return `Calling ${who} now, Sir. I'll text you what they say.`;
 }
 
-function dialFailure(error: string): string {
-  const detail = publicSmsError(error);
-  return detail
-    ? `I couldn't place that call, Sir. ${detail} Nothing was dialled.`
-    : "I couldn't place that call, Sir. Nothing was dialled.";
+/** Friendly words for Sir. Twilio codes and URLs stay in the worker log, never in a text. */
+export function dialFailure(error: string): string {
+  console.error("text-line call not placed", publicSmsError(error));
+  if (/not a valid phone number|cannot be called/i.test(error)) {
+    return "That number isn't one I can ring, Sir. Nothing was dialled.";
+  }
+  if (/not set up/i.test(error)) return "Calling isn't set up on my line just now, Sir. Nothing was dialled.";
+  return "That call didn't go through on my side, Sir. Nothing was dialled. Text me the same request again in a minute and I'll retry.";
 }
 
 async function placeApprovedOutbound(env: Env, owner: string): Promise<string | null> {
