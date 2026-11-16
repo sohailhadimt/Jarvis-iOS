@@ -954,7 +954,7 @@ export function personalContact(name: string): boolean {
   return /\b(?:mum|mom|mam|dad|mother|father|bro|brother|sis|sister|cousin|nan|nana|gran|grandma|grandad|wife|husband|girlfriend|boyfriend|missus|mate|friend|uncle|auntie|aunt|my|his|her)\b/i.test(name);
 }
 
-const UK_PHONE = /(?:\+44\s?\(?0?\)?\s?|\b0)(?:\d[\s-]?){9,10}\b/g;
+const UK_PHONE = /(?:\+44\s?\(?0?\)?\s?|\(0|\b0)(?:\d[\s)-]{0,2}){9,10}(?!\d)/g;
 
 export async function findBusinessPhone(env: Env, name: string, place: string): Promise<{ phone: string; source: string } | null> {
   const { toE164, isBlockedNumber } = await import("./calls");
@@ -1138,6 +1138,16 @@ export async function extrasDebugRoute(request: Request, env: Env): Promise<Resp
     const threshold = Number(body.value.threshold ?? 0) || 100;
     const found = await checkWatch(env, { item, symbol, threshold }).catch(() => null);
     return json({ ok: Boolean(found), found });
+  }
+  if (action === "search") {
+    const { webSearch } = await import("./search");
+    const found = await webSearch(env, asString(body.value.q, 200) ?? "");
+    return json({
+      ok: found.ok,
+      provider: found.ok ? found.provider : "",
+      error: found.ok ? "" : found.error,
+      results: found.ok ? found.results.slice(0, 6).map((r) => ({ url: r.url.slice(0, 100), text: `${r.title} ${r.snippet}`.slice(0, 220) })) : [],
+    });
   }
   if (action === "find-phone") {
     const name = asString(body.value.name, 60) ?? "";

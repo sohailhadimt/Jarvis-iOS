@@ -227,6 +227,8 @@ if [ -n "$token" ]; then
     CURL_MAX=40 hit x_phone POST /debug/extras "{\"action\":\"find-phone\",\"name\":\"${n}\",\"place\":\"${p}\"}" yes
     echo "x_phone_result ${n}: $(cut -c1-200 /tmp/live-x_phone.json)"
   done
+  CURL_MAX=40 hit x_search POST /debug/extras '{"action":"search","q":"Halfords Ashford Kent phone number"}' yes
+  echo "x_search_result $(sed -E 's/\+[0-9]{6,}/[number]/g' /tmp/live-x_search.json | cut -c1-1500)"
   CURL_MAX=40 hit x_quote POST /debug/extras '{"action":"quote","symbol":"TSLA"}' yes
   echo "x_quote_result $(cut -c1-300 /tmp/live-x_quote.json)"
   CURL_MAX=40 hit x_morning POST /debug/extras '{"action":"morning"}' yes
