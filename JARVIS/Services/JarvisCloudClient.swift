@@ -694,6 +694,14 @@ struct CloudClient: Sendable {
         _ = try? await raw(method: "POST", path: "/voice/eleven-usage", authorize: true, body: body, query: [])
     }
 
+    struct Queued: Decodable, Sendable { var ok: Bool }
+
+    /// Runs a line as if Sir had texted JARVIS. The reply comes back by SMS.
+    func smsCommand(_ text: String) async throws -> Bool {
+        let result: Queued = try await sendJSON(method: "POST", path: "/sms/command", body: ["text": String(text.prefix(500))])
+        return result.ok
+    }
+
     struct ContactSyncResult: Decodable, Sendable {
         var ok: Bool
         var stored: Int

@@ -85,6 +85,15 @@ export function smsLanguageRule(pref: LangCode | null, latest: string): string {
     "Mixed Urdu/Punjabi with English words is normal: answer the same way. Keep the butler manner and still call him Sir.",
     "Non-English scripts cost more per text, so in Urdu script, Gurmukhi, Shahmukhi or Turkish keep the reply under 130 characters unless he asked for detail.",
   ];
+  if (script === "latin" && pref !== "ur" && pref !== "pa" && pref !== "tr") {
+    lines.push("His latest text is in Latin letters. If it is English, reply in English. If it is Roman Urdu or Roman Punjabi (e.g. 'kya haal hai', 'ki haal aa'), reply in the same Roman style using Latin letters only, never Urdu or Gurmukhi script.");
+  } else if (script === "arabic") {
+    lines.push("His latest text is in Arabic script. Decide Urdu or Punjabi from the words: Punjabi (Shahmukhi) uses words like تسی، کیویں، او، وچ، دا، نوں، توں، اے، کی حال. Reply in Shahmukhi Punjabi if it is Punjabi, otherwise in Urdu, in Arabic script.");
+  } else if (script === "gurmukhi") {
+    lines.push("His latest text is Punjabi in Gurmukhi: reply in Gurmukhi Punjabi.");
+  } else if (script === "turkish") {
+    lines.push("His latest text is Turkish: reply in Turkish.");
+  }
   if (pref && pref !== "en") {
     const plain = script === "latin";
     const native = pref === "ur" ? "Urdu script" : pref === "pa" ? "Gurmukhi" : "Turkish";

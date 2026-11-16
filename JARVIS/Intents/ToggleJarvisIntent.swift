@@ -39,6 +39,27 @@ struct JarvisShortcuts: AppShortcutsProvider {
                     ],
                     shortTitle: "Toggle JARVIS",
                     systemImageName: "waveform.circle.fill")
+        AppShortcut(intent: AskJarvisQuestionIntent(),
+                    phrases: [
+                        "Ask \(.applicationName) a question",
+                        "Question for \(.applicationName)",
+                    ],
+                    shortTitle: "Ask JARVIS",
+                    systemImageName: "questionmark.bubble.fill")
+        AppShortcut(intent: TextJarvisIntent(),
+                    phrases: [
+                        "Text \(.applicationName)",
+                        "Message \(.applicationName)",
+                    ],
+                    shortTitle: "Text JARVIS",
+                    systemImageName: "message.fill")
+        AppShortcut(intent: JarvisCallBackIntent(),
+                    phrases: [
+                        "\(.applicationName) call back",
+                        "Call back with \(.applicationName)",
+                    ],
+                    shortTitle: "JARVIS call back",
+                    systemImageName: "phone.arrow.up.right.fill")
     }
 }
 

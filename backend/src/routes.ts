@@ -111,6 +111,18 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     const auth = authorize(request, env.JARVIS_APP_TOKEN);
     if (!auth.ok) return auth.response;
     ctx.waitUntil(rememberOrigin(env, url.origin));
+    if (request.method === "POST" && path === "/sms/command") {
+      // Siri Shortcuts: run a line exactly as if Sir had texted it. Replies arrive by SMS; calls still wait for YES.
+      const body = (await request.json().catch(() => null)) as { text?: unknown } | null;
+      const text = typeof body?.text === "string" ? body.text.trim().slice(0, 500) : "";
+      if (!text) return apiError(400, "bad_request", "text is required.");
+      const { readOwnerMobile } = await import("./owner-alert");
+      const owner = await readOwnerMobile(env).catch(() => null);
+      if (!owner) return apiError(503, "not_configured", "Owner mobile is not set.");
+      const { handleInboundSms } = await import("./sms-desk");
+      ctx.waitUntil(handleInboundSms(env, owner, text).catch(() => undefined));
+      return json({ ok: true, queued: true });
+    }
     if (path === "/owner/agent" || path === "/owner/agent/ensure" || path === "/owner/agent/languages" || path === "/debug/owner-tool") {
       const handled = await (await import("./owner-agent")).ownerAgentRoute(request, env, path);
       if (handled) return handled;

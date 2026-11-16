@@ -145,3 +145,24 @@ describe("contacts", () => {
     expect(numberAsk("call 07700900111 and ask")).toBeNull();
   });
 });
+
+describe("Siri Shortcuts command route", () => {
+  it("needs the app token and a text", async () => {
+    const { db } = sqliteD1();
+    const env = { DB: db, JARVIS_APP_TOKEN: "secret-token", OWNER_PHONE: "+447700900555" };
+    const ctx = { waitUntil() {}, passThroughOnException() {}, props: {} };
+    const post = (auth, body) =>
+      route(
+        new Request("https://jarvis-backend.jarvis-hadi.workers.dev/sms/command", {
+          method: "POST",
+          headers: { "content-type": "application/json", ...(auth ? { authorization: `Bearer ${auth}` } : {}) },
+          body: JSON.stringify(body),
+        }),
+        env,
+        ctx,
+      );
+    expect((await post(null, { text: "hi" })).status).toBe(401);
+    expect((await post("secret-token", {})).status).toBe(400);
+    expect(await (await post("secret-token", { text: "weather tomorrow" })).json()).toMatchObject({ ok: true, queued: true });
+  });
+});
