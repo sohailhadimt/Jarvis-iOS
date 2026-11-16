@@ -284,13 +284,27 @@ async function geminiGrounded(key: string, q: string, fetcher: typeof fetch): Pr
   return { ok: true, provider: "gemini", answer: text.slice(0, 700), sources };
 }
 
+/** Each Groq model has its own daily token allowance: when the small one is spent, the large one answers. */
+const GROQ_SEARCH_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b"];
+
 async function groqBrowser(key: string, q: string, fetcher: typeof fetch): Promise<LiveAnswer | { ok: false; error: string }> {
+  const errors: string[] = [];
+  for (const model of GROQ_SEARCH_MODELS) {
+    const got = await groqBrowserModel(key, q, fetcher, model);
+    if (got.ok) return got;
+    errors.push(`${model}: ${got.error}`);
+    if (!/http (?:429|503|500|413)/.test(got.error)) break;
+  }
+  return { ok: false, error: errors.join("; ") };
+}
+
+async function groqBrowserModel(key: string, q: string, fetcher: typeof fetch, model: string): Promise<LiveAnswer | { ok: false; error: string }> {
   const response = await fetcher(GROQ_URL, {
     method: "POST",
     signal: AbortSignal.timeout(22_000),
     headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
     body: JSON.stringify({
-      model: "openai/gpt-oss-20b",
+      model,
       tools: [{ type: "browser_search" }],
       tool_choice: "required",
       temperature: 0.2,

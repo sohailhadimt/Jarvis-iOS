@@ -166,3 +166,21 @@ describe("Siri Shortcuts command route", () => {
     expect(await (await post("secret-token", { text: "weather tomorrow" })).json()).toMatchObject({ ok: true, queued: true });
   });
 });
+
+describe("live search fallback across Groq models", () => {
+  it("moves to gpt-oss-120b when the small model's daily tokens are spent", async () => {
+    const models = [];
+    vi.stubGlobal("fetch", async (input, init) => {
+      if (String(input).includes("api.groq.com")) {
+        const body = JSON.parse(String(init.body));
+        models.push(body.model);
+        if (body.model === "openai/gpt-oss-20b") return new Response("{}", { status: 429 });
+        return Response.json({ choices: [{ message: { content: "Answer from the big model." } }] });
+      }
+      return new Response("no", { status: 500 });
+    });
+    const got = await liveSearch({ GROQ_API_KEY: "q" }, "latest call of duty");
+    expect(got).toMatchObject({ ok: true, provider: "groq", answer: "Answer from the big model." });
+    expect(models).toEqual(["openai/gpt-oss-20b", "openai/gpt-oss-120b"]);
+  });
+});
