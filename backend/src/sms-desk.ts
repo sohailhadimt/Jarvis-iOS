@@ -5,7 +5,21 @@ import { isRecord, json, newId, nowIso, apiError, asString, readJson } from "./h
 import { CHAT_FALLBACK } from "./llm";
 import { inQuietHours, londonDay, londonMinutes, readCallSettings, readOwnerMobile } from "./owner-alert";
 import { webSearch } from "./search";
-import { callOwnerWithNote, makeVoiceNote, noteFailure, noteLine, voiceAsk, type VoiceAsk } from "./voice-notes";
+import {
+  callOwnerWithNote,
+  claimsAudio,
+  kindFromLine,
+  kindFromText,
+  makeVoiceNote,
+  noteFailure,
+  noteLine,
+  noteUrl,
+  voiceAsk,
+  voiceFollowUp,
+  voiceLab,
+  type VoiceAsk,
+  type VoiceKind,
+} from "./voice-notes";
 import { parseToolArgs } from "./tools";
 import type { Env } from "./types";
 
@@ -156,7 +170,7 @@ export const CHAT_SMS_MAX = 306;
 
 /** A chat reply goes out as one text (up to two segments). With detail it may run to three texts. */
 export function chatBubbles(text: string, detail = false): string[] {
-  const clean = gsmText(text.replace(/https?:\/\/\S+/gi, " ").replace(/\s+/g, " "));
+  const clean = gsmText(text.replace(/https?:\/\/\S+/gi, " ").replace(/\s+/g, " ")).replace(/\s*:\s*$/, ".");
   if (!clean) return ["I'm here, Sir."];
   const parts: string[] = [];
   let rest = clean;
@@ -744,6 +758,7 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
     await deliverVoiceNote(env, phone, text, voice);
     return;
   }
+  if (await voiceFollow(env, phone, text)) return;
   const asked = outboundAsk(text) ?? looseCall(text);
   if (asked) {
     await reply(env, phone, await offerOutbound(env, phone, asked), "offer");
@@ -823,7 +838,111 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
     return;
   }
   const detail = wantsDetail(text);
-  await replyChat(env, phone, await chatReply(env, phone, detail), detail);
+  const answer = await chatReply(env, phone, detail);
+  if (claimsAudio(answer)) {
+    // Chat cannot attach audio. Make the note it promised, or say plainly how to get one.
+    const kind = kindFromText(answer) ?? kindFromText(text) ?? (await recentVoice(env, phone)).kind;
+    if (kind) {
+      await deliverVoiceNote(env, phone, text, { kind, byCall: false, prompt: "" });
+      return;
+    }
+    await replyChat(env, phone, "Ask me for a voice note, Sir, and I'll text you a link that plays it.", false);
+    return;
+  }
+  await replyChat(env, phone, answer, detail);
+}
+
+/** The thread's latest voice note: its kind, and its link when the last reply carried one. */
+async function recentVoice(env: Env, phone: string): Promise<{ kind: VoiceKind | null; link: string | null; lastHadLink: boolean }> {
+  const rows = await dbAll<{ role: string; body: string }>(
+    env,
+    "SELECT role, body FROM sms_turns WHERE phone = ? ORDER BY created_at DESC, rowid DESC LIMIT 8",
+    [phone],
+  ).catch(() => []);
+  const assistant = rows.filter((row) => row.role === "assistant");
+  const last = assistant[0]?.body ?? "";
+  const linked = assistant.find((row) => kindFromLine(row.body));
+  const link = linked ? /https:\/\/\S+\/v\/([A-Za-z0-9]{20})/.exec(linked.body) : null;
+  const live = link?.[1] ? await noteUrl(env, link[1]).catch(() => null) : null;
+  const lastFour = rows.slice(0, 4).map((row) => row.body).join(" ");
+  const kind = (linked ? kindFromLine(linked.body) : null) ?? (assistant.slice(0, 2).some((row) => kindFromText(row.body)) ? kindFromText(lastFour) : null);
+  return { kind, link: live, lastHadLink: Boolean(kindFromLine(last)) };
+}
+
+/** "More complex plz", "again", "where is it" after a voice note go back to the voice desk. */
+async function voiceFollow(env: Env, phone: string, text: string): Promise<boolean> {
+  const follow = voiceFollowUp(text);
+  if (!follow) return false;
+  const recent = await recentVoice(env, phone);
+  if (!recent.kind) return false;
+  if (follow === "resend" && recent.lastHadLink && recent.link) {
+    await replyLine(env, phone, `Here it is again, Sir. Tap to play: ${recent.link}`, "voice-resend");
+    return true;
+  }
+  await deliverVoiceNote(env, phone, text, { kind: recent.kind, byCall: /\b(?:call|ring) me\b/i.test(text), prompt: "" });
+  return true;
+}
+
+/** Runs the beatbox candidates once per nonce and returns their links for the listening check. */
+export async function voiceLabRoute(request: Request, env: Env): Promise<Response> {
+  const body = await readJson(request);
+  if (!body.ok) return body.response;
+  const nonce = isRecord(body.value) ? asString(body.value.nonce, 40) : "";
+  if (!nonce || !/^[A-Za-z0-9_-]+$/.test(nonce)) return apiError(400, "bad_request", "nonce is required.");
+  const key = `voice_lab:${nonce}`;
+  const prior = await getState(env, key).catch(() => null);
+  if (prior) return json({ ok: true, already: true, ...JSON.parse(prior) });
+  const { elevenCredits } = await import("./voice-notes");
+  const before = await elevenCredits(env);
+  const clips = await voiceLab(env);
+  const after = await elevenCredits(env);
+  const record = { clips, before, after, at: new Date().toISOString() };
+  await setState(env, key, JSON.stringify(record));
+  return json({ ok: true, ...record });
+}
+
+/** Texts Sir one chosen note once per nonce, then reads Twilio's delivery status. */
+export async function voiceSendRoute(request: Request, env: Env): Promise<Response> {
+  const body = await readJson(request);
+  if (!body.ok) return body.response;
+  if (!isRecord(body.value)) return apiError(400, "bad_request", "nonce and id are required.");
+  const nonce = asString(body.value.nonce, 40);
+  const id = asString(body.value.id, 20) ?? "";
+  const lead = asString(body.value.lead, 120) || "Here you are, Sir. Tap to play:";
+  if (!nonce || !/^[A-Za-z0-9_-]+$/.test(nonce) || !/^[A-Za-z0-9]{20}$/.test(id)) return apiError(400, "bad_request", "nonce and id are required.");
+  const key = `voice_send:${nonce}`;
+  const prior = await getState(env, key).catch(() => null);
+  if (prior) {
+    const record = JSON.parse(prior) as { sid?: string };
+    return json({ ok: true, already: true, ...record, delivery: record.sid ? await twilioStatus(env, record.sid) : "" });
+  }
+  const owner = await readOwnerMobile(env);
+  const url = await noteUrl(env, id);
+  if (!owner || !url) return apiError(409, "not_ready", "No owner mobile or no such note.");
+  const line = `${lead} ${url}`;
+  await setState(env, key, JSON.stringify({ url, pending: true, at: new Date().toISOString() }));
+  const result = await sendSmsResult(env, owner, line);
+  await rememberTurn(env, owner, "assistant", line).catch(() => undefined);
+  const record = { url, sid: result.sid, status: result.status, error: result.error, at: new Date().toISOString() };
+  await setState(env, key, JSON.stringify(record));
+  await pause(8_000);
+  return json({ ok: result.ok, sent: result.ok, ...record, delivery: result.sid ? await twilioStatus(env, result.sid) : "" });
+}
+
+async function twilioStatus(env: Env, sid: string): Promise<string> {
+  if (!/^SM[0-9a-f]{32}$/i.test(sid)) return "";
+  const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
+  const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
+  try {
+    const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Messages/${sid}.json`, {
+      headers: { authorization: `Basic ${btoa(`${account}:${token}`)}` },
+      signal: AbortSignal.timeout(8_000),
+    });
+    const parsed = (await response.json()) as { status?: string; error_code?: number | null; num_segments?: string; price?: string | null };
+    return `${parsed.status ?? ""} error=${parsed.error_code ?? ""} segments=${parsed.num_segments ?? ""} price=${parsed.price ?? ""}`;
+  } catch {
+    return "unknown";
+  }
 }
 
 /** Makes the audio and texts one line plus the link. "Call me and say it" rings his own number instead. */

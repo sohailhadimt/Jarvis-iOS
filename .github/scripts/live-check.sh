@@ -170,3 +170,19 @@ if [ -n "$token" ]; then
   done
   rm -f /tmp/live-voice_*.json
 fi
+
+# Beatbox lab: candidates run once per nonce in voice-lab.nonce. voice-send.json texts Sir one chosen
+# note once per nonce (the worker refuses a repeat) and reports Twilio's delivery status.
+if [ -n "$token" ]; then
+  here="$(cd "$(dirname "$0")" && pwd)"
+  lab="$(tr -dc 'A-Za-z0-9_-' < "$here/voice-lab.nonce" 2>/dev/null || true)"
+  if [ -n "$lab" ]; then
+    CURL_MAX=120 hit voice_lab POST /debug/voice-lab "{\"nonce\":\"${lab}\"}" yes
+    echo "voice_lab_result $(cut -c1-1500 /tmp/live-voice_lab.json)"
+  fi
+  if [ -f "$here/voice-send.json" ]; then
+    CURL_MAX=60 hit voice_send POST /debug/voice-send "$(cat "$here/voice-send.json")" yes
+    echo "voice_send_result $(sed -E 's/\+[0-9]{6,}/[number]/g' /tmp/live-voice_send.json | cut -c1-600)"
+  fi
+  rm -f /tmp/live-voice_lab.json /tmp/live-voice_send.json
+fi

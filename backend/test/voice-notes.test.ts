@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { guardUnplacedCall } from "../src/brain";
 import { handleInboundSms, simulateSmsRoute } from "../src/sms-desk";
 import type { Env } from "../src/types";
-import { explicitWords, isVoiceNotePath, noteId, refusal, serveVoiceNote, stripTags, voiceAsk } from "../src/voice-notes";
+import { beatboxPrompt, claimsAudio, explicitWords, isVoiceNotePath, kindFromLine, noteId, refusal, voiceFollowUp, serveVoiceNote, stripTags, voiceAsk } from "../src/voice-notes";
 import { sqliteD1 } from "./helpers/sqlite-d1";
 
 const OWNER = "+447700900555";
@@ -18,14 +18,16 @@ interface Seen {
   sfx: Record<string, unknown>[];
 }
 
-function voiceEnv(opts: { v3Fails?: boolean; credits?: number } = {}): { env: Env; seen: Seen } {
+function voiceEnv(opts: { v3Fails?: boolean; credits?: number; chat?: string[] } = {}): { env: Env; seen: Seen } {
+  let chatCalls = 0;
   const { db } = sqliteD1();
   const seen: Seen = { texts: [], calls: [], tts: [], sfx: [] };
   const audio = new Uint8Array(6_000).map((_, i) => (i * 7) % 251);
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url.includes("groq.com") || url.includes("generativelanguage")) {
-      return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "Good evening, Sir. [laughs] JARVIS here." } }] }), { status: 200 });
+      const content = opts.chat ? opts.chat[chatCalls++] ?? "Very good, Sir." : "Good evening, Sir. [laughs] JARVIS here.";
+      return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content } }] }), { status: 200 });
     }
     if (url.includes("/v1/user/subscription")) {
       return new Response(JSON.stringify({ character_count: 30_000 - (opts.credits ?? 17_000), character_limit: 30_000 }), { status: 200 });
@@ -176,6 +178,50 @@ describe("voice notes by link", () => {
     }) as typeof fetch;
     await handleInboundSms(env, OWNER, "Send me a voice note saying good night");
     expect(seen.tts[0]?.body.text).toBe("Good night, Sir.");
+  });
+
+  it("routes 'more complex' and 'where is it' after a beatbox back to the voice desk with a link", async () => {
+    const { env, seen } = voiceEnv({ chat: ["Here's a richer beatbox for you, Sir:"] });
+    await handleInboundSms(env, OWNER, "Send me a voice message of u beatboxing");
+    await handleInboundSms(env, OWNER, "More complex beating plz that was cold but u can be fire");
+    expect(seen.sfx).toHaveLength(2);
+    expect(String(seen.sfx[1]?.text)).toMatch(/complex/);
+    expect(seen.sfx[1]?.duration_seconds).toBe(12);
+    const second = seen.texts[1]?.body ?? "";
+    expect(linkOf(second)).not.toBe("");
+    expect(linkOf(second)).not.toBe(linkOf(seen.texts[0]?.body ?? ""));
+    await handleInboundSms(env, OWNER, "Where is it");
+    expect(seen.sfx).toHaveLength(2);
+    expect(seen.texts[2]?.body).toBe(`Here it is again, Sir. Tap to play: ${linkOf(second)}`);
+    expect(seen.texts.every((t) => !/:\s*$/.test(t.body))).toBe(true);
+  });
+
+  it("makes the note when chat promises audio, and never ends a text on a colon", async () => {
+    const { env, seen } = voiceEnv({ chat: ["Very well, Sir. Here's a more intricate beatbox for you:", "Righto, Sir, that is all:"] });
+    await handleInboundSms(env, OWNER, "Hit me with something sick");
+    expect(seen.sfx).toHaveLength(1);
+    expect(linkOf(seen.texts[0]?.body ?? "")).not.toBe("");
+    await handleInboundSms(env, OWNER, "Thanks mate");
+    expect(seen.texts[1]?.body).toBe("Righto, Sir, that is all.");
+  });
+
+  it("leaves ordinary chat alone when no voice note is in the thread", async () => {
+    const { env, seen } = voiceEnv({ chat: ["Happy to tell you more, Sir."] });
+    await handleInboundSms(env, OWNER, "tell me more about Rome again");
+    expect(seen.sfx).toHaveLength(0);
+    expect(seen.tts).toHaveLength(0);
+    expect(seen.texts[0]?.body).toBe("Happy to tell you more, Sir.");
+  });
+
+  it("helpers for follow-ups", () => {
+    expect(voiceFollowUp("More complex beating plz that was cold but u can be fire")).toBe("again");
+    expect(voiceFollowUp("Where is it")).toBe("resend");
+    expect(voiceFollowUp("thanks")).toBeNull();
+    expect(claimsAudio("Here's a richer beatbox for you, Sir:")).toBe(true);
+    expect(claimsAudio("Good evening, Sir.")).toBe(false);
+    expect(kindFromLine("Beatbox, as requested, Sir. Tap to play: https://x.dev/v/AAAAAAAAAAAAAAAAAAAA")).toBe("beatbox");
+    expect(beatboxPrompt("faster")).toContain("105 bpm");
+    expect(beatboxPrompt("")).toMatch(/inward K snare/);
   });
 
   it("never tells Sir it cannot send voice messages", () => {

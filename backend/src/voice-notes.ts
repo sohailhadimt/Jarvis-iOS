@@ -50,8 +50,22 @@ export function voiceAsk(text: string): VoiceAsk | null {
   return { kind: "speech", byCall, prompt: "" };
 }
 
-export function beatboxPrompt(): string {
-  return "Solo human beatboxer, close mic vocal percussion only, punchy kick drum, sharp rimshot snare, crisp hi-hats and lip bass, steady 95 bpm hip hop groove, no music, no instruments, dry studio";
+/** The beatbox JARVIS sends. Chosen by the voice lab listening check (see /debug/voice-lab). */
+export const BEATBOX = {
+  model: "eleven_text_to_sound_v2",
+  seconds: 12,
+  influence: 0.7,
+};
+
+const BEATBOX_BASE =
+  "Skilled solo human beatboxer performing a complex, fire hip-hop beatbox routine into a close microphone, voice only: deep punchy kick, sharp rimshot snare, inward K snare, rapid crisp hi-hat rolls, lip-roll and throat bass, quick fills and a new variation every bar, tight swinging groove";
+
+/** Refinements in plain words; slang like "make it fire" just means the full routine. */
+export function beatboxPrompt(refinement = ""): string {
+  const r = refinement.toLowerCase();
+  const tempo = /\b(?:faster|quicker|speed it up|hype)\b/.test(r) ? "105 bpm" : /\b(?:slower|chill|calm)\b/.test(r) ? "85 bpm" : "95 bpm";
+  const extra = /\bbass|deeper\b/.test(r) ? ", heavy bass" : /\bhi.?hat|tss\b/.test(r) ? ", busy hi-hats" : "";
+  return `${BEATBOX_BASE}${extra}, ${tempo}, no instruments, no music, no background noise, dry studio`;
 }
 
 export interface VoiceNote {
@@ -244,12 +258,16 @@ export async function speak(env: Env, script: string, singing: boolean): Promise
 }
 
 /** A real generated sound, so a beatbox is a beatbox and not George saying "boots and cats". */
-export async function soundClip(env: Env, prompt: string): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; error: string }> {
+export async function soundClip(
+  env: Env,
+  prompt: string,
+  opts: { seconds?: number; model?: string; influence?: number } = {},
+): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; error: string }> {
   const result = await elevenAudio(env, "https://api.elevenlabs.io/v1/sound-generation?output_format=mp3_44100_64", {
-    text: prompt.slice(0, 400),
-    duration_seconds: SOUND_SECONDS,
-    prompt_influence: 0.6,
-    model_id: "eleven_text_to_sound_v2",
+    text: prompt.slice(0, 450),
+    duration_seconds: opts.seconds ?? SOUND_SECONDS,
+    prompt_influence: opts.influence ?? 0.6,
+    model_id: opts.model ?? "eleven_text_to_sound_v2",
   });
   return result.ok ? result : { ok: false, error: result.error };
 }
@@ -269,11 +287,13 @@ export async function makeVoiceNote(
   let chars = 0;
   let script = "";
   if (ask.kind === "beatbox" || ask.kind === "sound") {
-    const prompt = ask.kind === "beatbox" ? beatboxPrompt() : ask.prompt;
-    const clip = await soundClip(env, prompt);
+    const beat = ask.kind === "beatbox";
+    const prompt = beat ? beatboxPrompt(request) : ask.prompt;
+    const seconds = beat ? BEATBOX.seconds : SOUND_SECONDS;
+    const clip = await soundClip(env, prompt, beat ? { seconds, model: BEATBOX.model, influence: BEATBOX.influence } : {});
     if (!clip.ok) return { ok: false, error: clip.error, reason: "the recording did not come out" };
     bytes = clip.bytes;
-    chars = SOUND_SECONDS * 40;
+    chars = seconds * 40;
     script = `[${ask.kind}] ${prompt}`.slice(0, 300);
   } else {
     script = await writeScript(env, ask, request, history);
@@ -282,6 +302,11 @@ export async function makeVoiceNote(
     bytes = spoken.bytes;
     chars = spoken.chars;
   }
+  const note = await storeNote(env, ask.kind, bytes, chars, script);
+  return { ok: true, note };
+}
+
+export async function storeNote(env: Env, kind: VoiceKind, bytes: Uint8Array, chars: number, script: string): Promise<VoiceNote> {
   await ensureVoiceTable(env);
   const id = noteId();
   const now = new Date();
@@ -289,11 +314,81 @@ export async function makeVoiceNote(
   await dbRun(
     env,
     "INSERT INTO voice_notes (id, kind, mime, audio_b64, bytes, chars, script, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    [id, ask.kind, "audio/mpeg", toBase64(bytes), bytes.length, chars, script, now.toISOString(), expires.toISOString()],
+    [id, kind, "audio/mpeg", toBase64(bytes), bytes.length, chars, script, now.toISOString(), expires.toISOString()],
   );
   await noteUsage(env, chars);
   const url = `${await noteOrigin(env)}/v/${id}`;
-  return { ok: true, note: { id, url, kind: ask.kind, chars, bytes: bytes.length, script } };
+  return { id, url, kind, chars, bytes: bytes.length, script };
+}
+
+/** Beatbox candidates for the listening check. Each run costs about 1,100 ElevenLabs credits. */
+export async function voiceLab(env: Env): Promise<{ label: string; url: string; bytes: number; chars: number; error: string }[]> {
+  const prompt = beatboxPrompt("");
+  const out: { label: string; url: string; bytes: number; chars: number; error: string }[] = [];
+  const sfx = [
+    { label: "sfx-v2-12s", model: "eleven_text_to_sound_v2", seconds: 12, influence: 0.7 },
+    { label: "sfx-v3-12s", model: "eleven_text_to_sound_v3", seconds: 12, influence: 0.7 },
+  ];
+  for (const c of sfx) {
+    const clip = await soundClip(env, prompt, c);
+    if (!clip.ok) {
+      out.push({ label: c.label, url: "", bytes: 0, chars: 0, error: clip.error.slice(0, 160) });
+      continue;
+    }
+    const note = await storeNote(env, "beatbox", clip.bytes, c.seconds * 40, `[lab ${c.label}] ${prompt}`.slice(0, 300));
+    out.push({ label: c.label, url: note.url, bytes: note.bytes, chars: note.chars, error: "" });
+  }
+  const tagged =
+    "[beatboxing] Boom, ts-k, pff-ts, boom boom, ka-tss. Boom, ts-k, pff, brrrrr, boom, ka-tss! [beatboxing] Boom ts-ts k, boom-boom pff, ts-ts-ts-ts, krr-boom!";
+  const spoken = await elevenAudio(env, `https://api.elevenlabs.io/v1/text-to-speech/${GEORGE_VOICE_ID}?output_format=mp3_44100_64`, {
+    text: tagged,
+    model_id: "eleven_v3",
+  });
+  if (spoken.ok) {
+    const note = await storeNote(env, "beatbox", spoken.bytes, tagged.length, "[lab tts-v3] George beatbox with audio tags");
+    out.push({ label: "tts-v3", url: note.url, bytes: note.bytes, chars: note.chars, error: "" });
+  } else out.push({ label: "tts-v3", url: "", bytes: 0, chars: 0, error: spoken.error.slice(0, 160) });
+  return out;
+}
+
+export async function noteUrl(env: Env, id: string): Promise<string | null> {
+  await ensureVoiceTable(env);
+  const row = await dbFirst<{ id: string }>(env, "SELECT id FROM voice_notes WHERE id = ? AND expires_at > ?", [id, new Date().toISOString()]);
+  return row ? `${await noteOrigin(env)}/v/${row.id}` : null;
+}
+
+/** The kind of the voice note a reply line announces, from its lead words. */
+export function kindFromLine(line: string): VoiceKind | null {
+  if (!/\/v\/[A-Za-z0-9]{20}|tap to play/i.test(line)) return null;
+  if (/beatbox/i.test(line)) return "beatbox";
+  if (/little number|song|rap/i.test(line)) return "sing";
+  if (/your sound/i.test(line)) return "sound";
+  return "speech";
+}
+
+/** A follow-up about the last voice note: another, better, again, where is it. */
+export function voiceFollowUp(text: string): "again" | "resend" | null {
+  const clean = text.toLowerCase().replace(/[’']/g, "").replace(/\s+/g, " ").trim();
+  if (/\b(?:where is it|wheres it|where is the (?:link|beat|beatbox|song|note)|send it|send the link|no link|didnt (?:come|get|arrive|send)|not there|i cant see it|cant see (?:it|the link)|link\??$)\b/.test(clean)) return "resend";
+  if (/\b(?:more|another|again|better|harder|complex|complicated|fire|redo|remix|one more|try again|do it again|cold|mid|weak|louder|faster|slower|longer|level up|step it up|go harder)\b/.test(clean)) return "again";
+  return null;
+}
+
+/** A chat reply that says audio is attached or coming, which chat cannot deliver. */
+export function claimsAudio(text: string): boolean {
+  const t = text.trim();
+  if (/\b(?:here(?:'s| is|’s)|i(?:'ve| have) (?:made|recorded|got)|sending|coming (?:up|right up))\b.{0,50}\b(?:beatbox|beat|voice note|voice message|recording|song|rap|verse|clip|audio|track)\b/i.test(t)) return true;
+  if (/\bhere it is\b/i.test(t)) return true;
+  // A bare trailing colon only promises audio when the line is about audio; otherwise chatBubbles turns it into a full stop.
+  return /:\s*$/.test(t) && /\b(?:beat ?box|beat|voice|recording|song|rap|verse|clip|audio|track|listen)\b/i.test(t);
+}
+
+/** The voice kind a chat line talks about, if any. */
+export function kindFromText(text: string): VoiceKind | null {
+  if (/beat ?box|beat\b/i.test(text)) return "beatbox";
+  if (/\b(?:song|sing|rap|verse)\b/i.test(text)) return "sing";
+  if (/\b(?:voice (?:note|message)|recording|audio)\b/i.test(text)) return "speech";
+  return null;
 }
 
 async function noteUsage(env: Env, chars: number): Promise<void> {
