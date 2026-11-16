@@ -869,6 +869,8 @@ async function updateCall(env: Env, id: string, patch: CallPatch): Promise<void>
   if (stored && patch.status === "completed") {
     const { rememberInboundMessage } = await import("./call-messages");
     await rememberInboundMessage(env, id).catch(() => undefined);
+    const { ownerCallFollowUp } = await import("./owner-agent");
+    await ownerCallFollowUp(env, id).catch(() => undefined);
   }
 }
 

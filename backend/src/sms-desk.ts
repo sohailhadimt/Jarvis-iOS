@@ -1863,6 +1863,32 @@ async function rememberFacts(env: Env, text: string): Promise<void> {
   }
 }
 
+/**
+ * Text Sir from a call (or any server path): always his own number, split into at most three texts
+ * of two segments each (about six segments), each logged to his SMS thread so a follow-up text has context.
+ */
+export async function textOwnerLong(env: Env, owner: string, text: string, brain = "call-text"): Promise<{ ok: boolean; sent: number; segments: number; error: string }> {
+  const bubbles = chatBubbles(text, true);
+  let sent = 0;
+  let segments = 0;
+  let error = "";
+  for (let i = 0; i < bubbles.length; i++) {
+    const line = bubbles[i] ?? "";
+    if (!line) continue;
+    if (i > 0) await pause(600);
+    const result = await sendSmsResult(env, owner, line);
+    if (!result.ok) {
+      error = result.error || "send failed";
+      break;
+    }
+    sent += 1;
+    segments += needsUnicode(line) ? Math.ceil(line.length / 67) : line.length <= 160 ? 1 : Math.ceil(line.length / 153);
+    await rememberTurn(env, owner, "assistant", line).catch(() => undefined);
+  }
+  await noteSmsLog(env, { direction: "out", status: sent ? "reply" : "failed", errorCode: "", brain, detail: bubbles.join(" "), sid: "" }).catch(() => undefined);
+  return { ok: sent > 0 && !error, sent, segments, error };
+}
+
 async function rememberTurn(env: Env, phone: string, role: "user" | "assistant", body: string): Promise<void> {
   await dbRun(env, "INSERT INTO sms_turns (id, phone, role, body, created_at) VALUES (?, ?, ?, ?, ?)", [
     newId("sms"),

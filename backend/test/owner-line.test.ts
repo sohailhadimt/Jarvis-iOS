@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearElevenLabsTelephonyCache, twilioSignature } from "../src/calls";
 import { isOwnerCaller } from "../src/hangup";
-import { handleOwnerTool, ownerGreeting, ownerKey, ownerToolConfigs, ownerAgentBody } from "../src/owner-agent";
+import { OWNER_AGENT_VERSION, handleOwnerTool, ownerGreeting, ownerKey, ownerToolConfigs, ownerAgentBody } from "../src/owner-agent";
 import { route } from "../src/routes";
 import { sqliteD1 } from "./helpers/sqlite-d1";
 
@@ -64,7 +64,7 @@ function seedAgent(raw) {
   raw.prepare("INSERT INTO runtime_state (key, value, updated_at) VALUES (?, ?, ?)").run("owner_agent_id", "agent_personal", "2026-11-16T00:00:00Z");
   raw
     .prepare("INSERT INTO runtime_state (key, value, updated_at) VALUES (?, ?, ?)")
-    .run("owner_agent_version", "owner-2|https://jarvis-backend.jarvis-hadi.workers.dev", "2026-11-16T00:00:00Z");
+    .run("owner_agent_version", `${OWNER_AGENT_VERSION}|https://jarvis-backend.jarvis-hadi.workers.dev`, "2026-11-16T00:00:00Z");
 }
 
 afterEach(() => {
@@ -132,7 +132,7 @@ describe("Sir ringing his own JARVIS line", () => {
 describe("personal agent tools", () => {
   it("tools point at the public base with the owner key and carry the call id", async () => {
     const configs = ownerToolConfigs("https://jarvis-backend.jarvis-hadi.workers.dev", "k");
-    expect(Object.keys(configs).sort()).toEqual(["get_weather", "lookup_contact", "web_search"]);
+    expect(Object.keys(configs).sort()).toEqual(["get_weather", "lookup_contact", "send_sms_to_owner", "web_search"]);
     for (const c of Object.values(configs)) {
       expect(() => new URL(c.api_schema.url)).not.toThrow();
       expect(c.api_schema.url.startsWith("https://jarvis-backend.jarvis-hadi.workers.dev/owner/tool/")).toBe(true);
@@ -193,5 +193,93 @@ describe("personal agent tools", () => {
     expect(res.weather).toContain("Ashford, Kent");
     expect(res.weather).toContain("light rain");
     expect(res.weather).toContain("80% chance of rain");
+  });
+});
+
+describe("texting Sir from his call", () => {
+  function seedOwnerCall(raw, id, number, transcript = "[]") {
+    raw
+      .prepare(
+        `INSERT INTO outbound_calls (id, contact_name, to_number, brief, status, twilio_sid, conversation_id, transcript_json, summary, error, created_at, updated_at)
+         VALUES (?, 'Master Hadi', ?, 'Owner on his JARVIS line', 'in_progress', NULL, NULL, ?, NULL, NULL, '2026-11-16T23:00:00Z', '2026-11-16T23:00:00Z')`,
+      )
+      .run(id, number, transcript);
+  }
+  function twilio() {
+    const sms = [];
+    vi.stubGlobal("fetch", async (input, init) => {
+      const url = String(input);
+      if (url.includes("Messages.json")) {
+        sms.push(new URLSearchParams(String(init?.body ?? "")));
+        return Response.json({ sid: "SM0123456789abcdef0123456789abcdef", status: "queued" }, { status: 201 });
+      }
+      if (url.includes("chat/completions")) return Response.json({ choices: [{ message: { role: "assistant", content: "AK-74 build: Muzzle X, Barrel Y." } }] });
+      return new Response("{}", { status: 200 });
+    });
+    return sms;
+  }
+  async function tool(e, body) {
+    return (
+      await handleOwnerTool(
+        new Request("https://x/owner/tool/send_sms_to_owner", {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-jarvis-owner": await ownerKey(e) },
+          body: JSON.stringify(body),
+        }),
+        e,
+        "/owner/tool/send_sms_to_owner",
+      )
+    ).json();
+  }
+
+  it("is a tool on the personal agent, and the prompt says JARVIS can text", async () => {
+    const configs = ownerToolConfigs("https://jarvis-backend.jarvis-hadi.workers.dev", "k");
+    expect(configs.send_sms_to_owner.api_schema.request_body_schema.required).toEqual(["call_id", "text"]);
+    expect(configs.send_sms_to_owner.api_schema.request_body_schema.properties.to).toBeUndefined();
+    const { ownerAgentPrompt, ownerFallbackPrompt } = await import("../src/owner-agent");
+    expect(ownerAgentPrompt()).toContain("send_sms_to_owner");
+    expect(ownerAgentPrompt()).toContain("Never say you cannot text");
+    expect(ownerFallbackPrompt({ now_london: "x", owner_context: "y" })).toContain("texted to his phone automatically");
+  });
+
+  it("texts only Sir's number, split into up to three texts, and logs them to his thread", async () => {
+    const { env: e, raw } = env();
+    seedOwnerCall(raw, "call_owner2", OWNER);
+    const sms = twilio();
+    const long = Array.from({ length: 12 }, (_, i) => `Line ${i + 1}: attachment choice number ${i + 1} for the build.`).join(" ");
+    const res = await tool(e, { call_id: "call_owner2", text: long, to: "+447700900999" });
+    expect(res.ok).toBe(true);
+    expect(sms.length).toBeGreaterThanOrEqual(2);
+    expect(sms.length).toBeLessThanOrEqual(3);
+    for (const form of sms) {
+      expect(form.get("To")).toBe(OWNER);
+      expect(form.get("Body").length).toBeLessThanOrEqual(306);
+    }
+    const turns = raw.prepare("SELECT COUNT(*) AS n FROM sms_turns WHERE phone = ? AND role = 'assistant'").get(OWNER);
+    expect(turns.n).toBe(sms.length);
+  });
+
+  it("refuses on a call that is not from Sir's number", async () => {
+    const { env: e, raw } = env();
+    seedOwnerCall(raw, "call_fake1", "+447700900999");
+    const sms = twilio();
+    const res = await tool(e, { call_id: "call_fake1", text: "hello" });
+    expect(res.ok).toBe(false);
+    expect(sms.length).toBe(0);
+  });
+
+  it("after the call, texts what he asked for if nothing was texted during it, once", async () => {
+    const { env: e, raw } = env({ GROQ_API_KEY: "g" });
+    seedOwnerCall(raw, "call_owner3", OWNER, JSON.stringify([
+      { role: "assistant", text: "Good evening, Sir." },
+      { role: "them", text: "Give me a Modern Warfare gun build and text me the build" },
+      { role: "assistant", text: "AK-74 with Muzzle X and Barrel Y." },
+    ]));
+    const sms = twilio();
+    const { ownerCallFollowUp } = await import("../src/owner-agent");
+    expect(await ownerCallFollowUp(e, "call_owner3")).toBe("sent");
+    expect(sms[0].get("To")).toBe(OWNER);
+    expect(sms[0].get("Body")).toContain("AK-74");
+    expect(await ownerCallFollowUp(e, "call_owner3")).toBe("skipped");
   });
 });

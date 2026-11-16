@@ -13,7 +13,7 @@ import { LANGUAGE_DETECTION_TOOL, agentLanguageRule, languagePresets, multilingu
  */
 
 export const OWNER_AGENT_NAME = "JARVIS Personal";
-export const OWNER_AGENT_VERSION = "owner-2";
+export const OWNER_AGENT_VERSION = "owner-3";
 
 export function ownerGreeting(now = new Date()): string {
   const hour = Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", hour: "2-digit", hourCycle: "h23" }).format(now));
@@ -40,6 +40,7 @@ export function ownerAgentPrompt(): string {
     "Have a full, natural conversation. Follow on from what he says. If he wants to chat, chat.",
     "The time in London is {{now_london}}.",
     "What you know about his day and recent conversations: {{owner_context}}",
+    "You CAN text Sir during this call. You are not voice-only. When he says 'text me', 'send me that', 'message me the build', or asks for anything in writing (a list, a build, a number, an address, a recipe, a summary), call send_sms_to_owner with the full text, then say 'Sent to your phone, Sir.' Only say it was sent if the tool returns ok. Never say you cannot text or that you are voice-only.",
     "Tools: get_weather for any place and day (Ashford, Kent if he does not say). web_search for anything current: sport, news, opening hours, prices, phone numbers of businesses. lookup_contact for a name in his own phone contacts. Always use a tool for current facts; never guess a score, a price, a date or a number. Say a few words such as 'One moment, Sir' while a tool runs.",
     "Read phone numbers back in groups. Never read out a number from his contacts unless he asked for it.",
     "You cannot dial anyone, text anyone, buy or book from this call. If he wants you to ring or text someone, tell him to text the JARVIS line, for example 'ring Ali and ask if he is free', and it will wait for his YES.",
@@ -86,6 +87,13 @@ export function ownerToolConfigs(origin: string, key: string): Record<string, Re
       { query: prop("The question to search, in plain words, with the place if it matters.") },
       ["query"],
       30,
+    ),
+    send_sms_to_owner: webhook(
+      "send_sms_to_owner",
+      "Text Sir on his own mobile right now, during this call. Use whenever he asks you to text, send or message him something, or wants it in writing. Plain text, no markdown or links; up to about 900 characters.",
+      { text: prop("The full message to text him, written for reading on a phone (short lines, no markdown).") },
+      ["text"],
+      20,
     ),
     lookup_contact: webhook(
       "lookup_contact",
@@ -230,7 +238,8 @@ export function ownerFallbackPrompt(vars: Record<string, string>): string {
   return ownerAgentPrompt()
     .replace("{{now_london}}", vars.now_london ?? "")
     .replace("{{owner_context}}", vars.owner_context ?? "")
-    .replace(/^Tools:.*$/m, "You have no live tools on this call. If he asks for weather, news or a number, say you'll text it and suggest he texts the JARVIS line.");
+    .replace(/^Tools:.*$/m, "You have no live tools on this call. If he asks for weather, news or a number, say you'll text it straight after the call.")
+    .replace(/^You CAN text Sir during this call\..*$/m, "You CAN text Sir: whatever he asks you to text, send or message him is texted to his phone automatically straight after this call. Say 'I'll text that to you as soon as we hang up, Sir.' and make sure you said the full content on the call. Never say you cannot text or that you are voice-only.");
 }
 
 // ---------------------------------------------------------------- webhook tools
@@ -270,6 +279,20 @@ export async function runOwnerTool(env: Env, tool: string, body: Record<string, 
     const got = await liveSearch(env, query);
     return got.ok ? { ok: true, answer: got.answer } : { ok: false, answer: "I couldn't reach the web just now." };
   }
+  if (tool === "send_sms_to_owner") {
+    const text = (typeof body.text === "string" ? body.text : "").replace(/\*\*|__|`/g, "").trim().slice(0, 1200);
+    if (!text) return { ok: false, error: "text is required" };
+    const { readOwnerMobile } = await import("./owner-alert");
+    const owner = await readOwnerMobile(env).catch(() => null);
+    if (!owner) return { ok: false, error: "Sir's mobile is not set." };
+    const { textOwnerLong } = await import("./sms-desk");
+    const sent = await textOwnerLong(env, owner, text, "call-text");
+    const callId = typeof body.call_id === "string" ? body.call_id : "";
+    if (sent.ok && callId) await setState(env, `owner_call_texted:${callId}`, "1").catch(() => undefined);
+    return sent.ok
+      ? { ok: true, sent: true, texts: sent.sent, message: "Sent to Sir's phone." }
+      : { ok: false, sent: false, message: "The text did not go through. Tell Sir you'll text it after the call." };
+  }
   if (tool === "lookup_contact") {
     const name = asString(body.name, 80) ?? "";
     if (!name) return { ok: false, error: "name is required" };
@@ -305,4 +328,58 @@ export async function ownerAgentRoute(request: Request, env: Env, path: string):
     return json(await runOwnerTool(env, asString(raw.tool, 40) ?? "", raw));
   }
   return null;
+}
+
+// ---------------------------------------------------------------- after Sir's call
+
+const TEXT_ASK = /\b(?:text|message|sms|send|whatsapp)\s+(?:me|it|that|this|them|the)\b|\bin (?:a )?text\b|\bsend (?:it )?to my phone\b/i;
+const SUMMARY_ASK = /\b(?:text|send|message)\s+me\s+(?:a\s+)?(?:summary|recap|notes)\b|\bsummar(?:y|ise|ize)\b.*\b(?:text|send)\b/i;
+
+/** Once, when Sir's own call ends: text what he asked for if nothing was texted during the call, or a summary if he asked. */
+export async function ownerCallFollowUp(env: Env, callId: string): Promise<"sent" | "skipped" | "failed"> {
+  const row = await dbFirst<{ id: string; to_number: string; contact_name: string; brief: string; transcript_json: string | null }>(
+    env,
+    "SELECT id, to_number, contact_name, brief, transcript_json FROM outbound_calls WHERE id = ?",
+    [callId],
+  ).catch(() => null);
+  if (!row || row.brief !== "Owner on his JARVIS line") return "skipped";
+  const { readOwnerMobile } = await import("./owner-alert");
+  const owner = await readOwnerMobile(env).catch(() => null);
+  if (!owner || toE164(row.to_number) !== owner) return "skipped";
+  if (await getState(env, `owner_call_followup:${callId}`).catch(() => null)) return "skipped";
+  let lines: { role?: string; text?: string }[] = [];
+  try {
+    lines = JSON.parse(row.transcript_json ?? "[]");
+  } catch {
+    lines = [];
+  }
+  const his = lines.filter((l) => l.role !== "assistant" && typeof l.text === "string").map((l) => l.text as string);
+  const wantsSummary = his.some((t) => SUMMARY_ASK.test(t));
+  const texted = Boolean(await getState(env, `owner_call_texted:${callId}`).catch(() => null));
+  const wantsText = !texted && his.some((t) => TEXT_ASK.test(t));
+  if (!wantsSummary && !wantsText) return "skipped";
+  await setState(env, `owner_call_followup:${callId}`, new Date().toISOString());
+  const transcript = lines
+    .filter((l) => typeof l.text === "string" && l.text)
+    .map((l) => `${l.role === "assistant" ? "JARVIS" : "Sir"}: ${l.text}`)
+    .join("\n")
+    .slice(-6000);
+  const { completeChat } = await import("./llm");
+  const ask = wantsSummary
+    ? "Write a short text to Sir summarising this call: what he asked and the answers, with anything he asked to have in writing in full."
+    : "Sir asked during this call to have something texted to him. Write that text in full (the build, list, number or details he wanted), exactly as JARVIS gave it on the call.";
+  const out = await completeChat(
+    env,
+    [
+      { role: "system", content: `You are J.A.R.V.I.S. texting Sir after his call. ${ask} Plain text for a phone: short lines, no markdown, no links, under 850 characters. Start with nothing but the content (no greeting), in the language he spoke.` },
+      { role: "user", content: transcript || "(no transcript)" },
+    ],
+    null,
+    { timeoutMs: 15_000, budgetMs: 30_000, maxTokens: 700 },
+  );
+  const text = out.ok ? (out.message.content ?? "").trim() : "";
+  if (!text) return "failed";
+  const { textOwnerLong } = await import("./sms-desk");
+  const sent = await textOwnerLong(env, owner, text, wantsSummary ? "call-summary" : "call-text-after");
+  return sent.ok ? "sent" : "failed";
 }
