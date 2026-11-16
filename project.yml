@@ -74,7 +74,7 @@ targets:
         NSLocationWhenInUseUsageDescription: "JARVIS uses your location for the weather and places near you, and, only when you tap Allow, to share your live location with a caller for 10 minutes."
         NSLocationAlwaysAndWhenInUseUsageDescription: "JARVIS shares your live location with a caller for 10 minutes only after you tap Allow, even if the app is in the background."
         NSMotionUsageDescription: "JARVIS checks whether you are driving so a call from me stays short."
-        NSContactsUsageDescription: "JARVIS looks up contacts when you ask it to call, FaceTime or message someone, and adds its own contact card."
+        NSContactsUsageDescription: "JARVIS looks up contacts when you ask it to call, FaceTime or message someone, adds its own contact card, and syncs names and phone numbers to your private JARVIS server so texts and calls can find people by name."
         NSCalendarsFullAccessUsageDescription: "JARVIS reads and edits your calendar events when you ask it to."
         NSRemindersFullAccessUsageDescription: "JARVIS reads, creates and completes reminders when you ask it to."
         NSAppleMusicUsageDescription: "JARVIS plays music from your library when you ask it to."

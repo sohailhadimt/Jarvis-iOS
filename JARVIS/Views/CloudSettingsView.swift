@@ -6,6 +6,8 @@ struct CloudSettingsView: View {
     @State private var token = ""
     @State private var report = ""
     @State private var busy = false
+    @State private var contactsReport = ""
+    @State private var syncing = false
 
     private var cyan: Color { Color(red: 0, green: 0.898, blue: 0.949) }
 
@@ -45,6 +47,26 @@ struct CloudSettingsView: View {
                 }
             } footer: {
                 Text("Test connection calls GET /health and does not need the app token.")
+            }
+
+            Section {
+                Button(syncing ? "Syncing contacts…" : "Sync contacts") {
+                    syncing = true
+                    Task {
+                        contactsReport = await ContactSync.shared.sync(ask: true)
+                        syncing = false
+                    }
+                }
+                .disabled(syncing)
+                if !contactsReport.isEmpty {
+                    Text(contactsReport)
+                        .font(.footnote)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+            } header: {
+                Text("Contacts")
+            } footer: {
+                Text("Sends names and phone numbers only to your private JARVIS backend, so \"ring Ali\" or \"what's Mum's number\" works by text and on calls. Calls still wait for your YES. Re-syncs when the app opens.")
             }
         }
         .navigationTitle("JARVIS Cloud")

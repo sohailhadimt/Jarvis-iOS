@@ -694,6 +694,17 @@ struct CloudClient: Sendable {
         _ = try? await raw(method: "POST", path: "/voice/eleven-usage", authorize: true, body: body, query: [])
     }
 
+    struct ContactSyncResult: Decodable, Sendable {
+        var ok: Bool
+        var stored: Int
+        var people: Int
+    }
+
+    /// Names and numbers to the private owner_contacts table. Replaces the previous list.
+    func syncContacts(_ contacts: [[String: Any]]) async throws -> ContactSyncResult {
+        try await sendJSON(method: "POST", path: "/contacts/sync", body: ["contacts": contacts])
+    }
+
     /// "Call me at" morning briefing call settings. Time is HH:MM London, days 0 = Sunday.
     func briefingCallSettings() async -> (enabled: Bool, time: String, days: [Int])? {
         guard let (data, status) = try? await raw(method: "GET", path: "/briefing/call-settings", authorize: true, body: nil, query: []),
