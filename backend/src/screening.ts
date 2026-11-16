@@ -386,9 +386,15 @@ async function smsWebhook(request: Request, env: Env, ctx: ExecutionContext): Pr
       }
     }
   }
-  if (body.trim()) {
+  const media: string[] = [];
+  const count = Math.min(3, Number(params.NumMedia ?? "0") || 0);
+  for (let i = 0; i < count; i++) {
+    const url = params[`MediaUrl${i}`] ?? "";
+    if (/^https:\/\//.test(url) && /^image\//i.test(params[`MediaContentType${i}`] ?? "image/")) media.push(url);
+  }
+  if (body.trim() || media.length) {
     ctx.waitUntil(
-      import("./sms-desk").then((mod) => mod.handleInboundSms(env, from, body).catch(() => undefined)),
+      import("./sms-desk").then((mod) => mod.handleInboundSms(env, from, body, media).catch(() => undefined)),
     );
   }
   return xml("<Response></Response>", 200);

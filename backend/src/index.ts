@@ -13,6 +13,19 @@ export default {
     return route(request, env, ctx);
   },
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    if (controller.cron === "* * * * *") {
+      // Every minute: reminders, the 08:00 text and the 09:00 price check. Nothing else runs here.
+      ctx.waitUntil(
+        import("./sms-extras")
+          .then(async (m) => {
+            await m.fireDueReminders(env).catch((err) => console.error("reminders", err instanceof Error ? err.message : err));
+            await m.sweepMorningText(env).catch((err) => console.error("morning", err instanceof Error ? err.message : err));
+            await m.sweepPriceWatches(env).catch((err) => console.error("watches", err instanceof Error ? err.message : err));
+          })
+          .catch(() => null),
+      );
+      return;
+    }
     ctx.waitUntil(
       Promise.all([
         startLanes(env, `cron:${controller.cron}`),

@@ -186,3 +186,66 @@ if [ -n "$token" ]; then
   fi
   rm -f /tmp/live-voice_lab.json /tmp/live-voice_send.json
 fi
+
+# Text-line extras. Simulations send nothing (Ofcom drama numbers, capture mode). Voice notes and the
+# one reminder call to Sir run once per nonce in extras.nonce, so a rerun spends nothing.
+if [ -n "$token" ]; then
+  here="$(cd "$(dirname "$0")" && pwd)"
+  sim() {
+    local name="$1" text="$2" thread="${3:-20}" extra="${4:-}"
+    CURL_MAX=45 hit "x_${name}" POST /debug/sms-simulate "{\"text\":\"${text}\",\"thread\":\"${thread}\"${extra}}" yes
+    echo "x_${name}_reply $(sed -E 's/\+[0-9]{6,}/[number]/g' "/tmp/live-x_${name}.json" | cut -c1-700)"
+  }
+  sim help "help" 20 ',"reset":true'
+  sim remind "remind me in 2 mins to stretch" 20
+  sim remind_at "remind me at 6 to call mum" 20
+  sim remind_list "my reminders" 20
+  sim remind_cancel "cancel my reminders" 20
+  sim remind_soon "remind me in 1 min to drink water" 20
+  sim morning_stop "stop morning" 20
+  sim morning_start "start morning" 20
+  sim morning_view "morning text" 20
+  sim photo_link "what is this? https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png" 21
+  sim photo_mms "" 21 ',"media":["https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png"]'
+  sim near_pharmacy "nearest open pharmacy" 22
+  sim near_petrol "closest petrol station near Folkestone" 22
+  sim near_chippy "nearest chippy" 22
+  sim watch_stock "watch tesla stock and text me when it's under \$200" 23 ',"reset":true'
+  sim watch_item "watch PS5 and text me when under £400" 23
+  sim watch_list "my watches" 23
+  sim watch_stop "stop watching all" 23
+  sim agent "tell Project Money to find 5 leads in Ashford" 24
+  sim prank_bad "prank call 07700 900123 and say it's customs and their parcel is held" 25 ',"reset":true'
+  sim prank_ok "prank 07700 900123 with a fake award for best kettle in Kent" 25
+  sim prank_yes "YES" 25
+  sim ring_name "ring Dominos in Ashford and ask if they deliver to TN24 tonight" 26 ',"reset":true'
+  sim ring_personal "ring my mum and ask if she wants dinner" 26
+  sim diss_bad "make a diss track about how fat my cousin is" 27
+  sim chat_still "how are you doing?" 27
+  CURL_MAX=40 hit x_quote POST /debug/extras '{"action":"quote","symbol":"TSLA"}' yes
+  echo "x_quote_result $(cut -c1-300 /tmp/live-x_quote.json)"
+  CURL_MAX=40 hit x_morning POST /debug/extras '{"action":"morning"}' yes
+  echo "x_morning_result $(cut -c1-500 /tmp/live-x_morning.json)"
+  xn="$(tr -dc 'A-Za-z0-9_-' < "$here/extras.nonce" 2>/dev/null || true)"
+  if [ -n "$xn" ]; then
+    for kind in roast hype diss; do
+      case "$kind" in
+        roast) t="roast me" ;;
+        hype) t="hype me up for the gym" ;;
+        diss) t="make a diss track about my cousin's terrible cooking" ;;
+      esac
+      CURL_MAX=90 hit "x_voice_${kind}" POST /debug/voice-once "{\"nonce\":\"${xn}-${kind}\",\"text\":\"${t}\"}" yes
+      echo "x_voice_${kind}_result $(cut -c1-500 "/tmp/live-x_voice_${kind}.json")"
+    done
+    CURL_MAX=30 hit x_call_reminder POST /debug/extras "{\"action\":\"call-reminder\",\"nonce\":\"${xn}\",\"task\":\"this is the reminder call test. Reminders by call are working\"}" yes
+    echo "x_call_reminder_result $(cut -c1-300 /tmp/live-x_call_reminder.json)"
+    sleep 80
+  fi
+  CURL_MAX=30 hit x_state POST /debug/extras '{"action":"state"}' yes
+  echo "x_state_result $(sed -E 's/\+[0-9]{6,}/[number]/g' /tmp/live-x_state.json | cut -c1-3000)"
+  if [ -f "$here/extras-summary.json" ]; then
+    CURL_MAX=30 hit x_summary POST /debug/extras "$(cat "$here/extras-summary.json")" yes
+    echo "x_summary_result $(sed -E 's/\+[0-9]{6,}/[number]/g' /tmp/live-x_summary.json | cut -c1-400)"
+  fi
+  rm -f /tmp/live-x_*.json
+fi

@@ -25,6 +25,15 @@ export interface VoiceAsk {
   byCall: boolean;
   /** For a sound: what it should sound like. */
   prompt: string;
+  /** Roast, hype, diss track or rap over a beat. */
+  style?: VoiceStyle;
+}
+
+export type VoiceStyle = "roast" | "hype" | "diss" | "rap";
+
+/** Diss tracks stay playful: no threats, slurs or digs at who someone is. */
+export function dissUnsafe(text: string): boolean {
+  return /\b(?:kill|stab|shoot|murder|die|dead|hurt|beat (?:him|her|them) up|bomb|rape|race|racist|religion|muslim|jewish|christian|hindu|sikh|gay|lesbian|trans|disabled|disability|retard\w*|n[i1]gg\w*|paki|f[a@]g\w*|ugly|fat)\b/i.test(text);
 }
 
 const VOICE_WORDS =
@@ -33,7 +42,17 @@ const VOICE_WORDS =
 /** A text from Sir that wants audio back. Strangers never reach this. */
 export function voiceAsk(text: string): VoiceAsk | null {
   const clean = text.replace(/\s+/g, " ").trim();
-  if (!clean || !VOICE_WORDS.test(clean)) return null;
+  if (!clean) return null;
+  const byCallStyle = /\b(?:call|ring|phone) me\b/i.test(clean);
+  if (/^(?:please\s+|go on,?\s+|jarvis,?\s+)?roast me\b/i.test(clean) || /\b(?:roast me|give me a roast)\b/i.test(clean))
+    return { kind: "speech", byCall: byCallStyle, prompt: "", style: "roast" };
+  if (/\b(?:hype me(?: up)?|gas me up|motivate me|pep talk)\b/i.test(clean))
+    return { kind: "speech", byCall: byCallStyle, prompt: "", style: "hype" };
+  const diss = /\bdiss(?: track| song| verse)?\b(?:\s+(?:about|on|for|against)\s+(.{2,80}))?/i.exec(clean);
+  if (diss && !/(?:\+|\b0)\d[\d\s-]{8,}\d/.test(clean)) {
+    return { kind: "sing", byCall: byCallStyle, prompt: (diss[1] ?? "").replace(/[.?!]+$/, "").trim(), style: "diss" };
+  }
+  if (!VOICE_WORDS.test(clean)) return null;
   // "Call 07700 900123 and say hello" is a call to someone else, handled by the call desk.
   if (/(?:\+|\b0)\d[\d\s-]{8,}\d/.test(clean)) return null;
   // Talking about songs or rap is chat, not a request for audio.
@@ -46,7 +65,8 @@ export function voiceAsk(text: string): VoiceAsk | null {
   if (/\bbeat ?box/i.test(clean)) return { kind: "beatbox", byCall, prompt: "" };
   const sound = /\b(?:sound (?:effect )?of|noise of|sound like)\s+(.{3,80})$/i.exec(clean);
   if (sound?.[1]) return { kind: "sound", byCall, prompt: sound[1].replace(/[.?!]+$/, "") };
-  if (/\b(?:sing|singing|song|rap|rapping)\b/i.test(clean)) return { kind: "sing", byCall, prompt: "" };
+  if (/\b(?:rap|rapping|bars|verse)\b/i.test(clean)) return { kind: "sing", byCall, prompt: "", style: "rap" };
+  if (/\b(?:sing|singing|song)\b/i.test(clean)) return { kind: "sing", byCall, prompt: "" };
   return { kind: "speech", byCall, prompt: "" };
 }
 
@@ -68,6 +88,31 @@ export function beatboxPrompt(refinement = ""): string {
   const tempo = /\b(?:faster|quicker|speed it up|hype)\b/.test(r) ? "105 bpm" : /\b(?:slower|chill|calm)\b/.test(r) ? "85 bpm" : "95 bpm";
   const extra = /\bbass|deeper\b/.test(r) ? ", heavy bass" : /\bhi.?hat|tss\b/.test(r) ? ", busy hi-hats" : "";
   return `${BEATBOX_BASE}${extra}, ${tempo}, no instruments, no music, no background noise, dry studio`;
+}
+
+/** The backing beat rap notes play over. Made once, then reused so each rap only costs the words. */
+export const RAP_BEAT_PROMPT =
+  "Original boom bap hip hop instrumental loop, 90 bpm, punchy kick and crisp snare, swinging hi-hats, warm sub bass and a moody piano chord, no vocals, seamless loop, studio quality";
+
+export async function rapBeat(env: Env): Promise<string | null> {
+  await ensureVoiceTable(env);
+  const saved = ((await getState(env, "voice:rap_beat").catch(() => null)) ?? "").trim();
+  if (saved) {
+    const row = await dbFirst<{ id: string }>(env, "SELECT id FROM voice_notes WHERE id = ? AND expires_at > ?", [saved, new Date().toISOString()]).catch(() => null);
+    if (row) return saved;
+  }
+  const clip = await soundClip(env, RAP_BEAT_PROMPT, { seconds: 12, model: BEATBOX.model, influence: 0.6 });
+  if (!clip.ok) return null;
+  const id = noteId();
+  const now = new Date().toISOString();
+  await dbRun(
+    env,
+    "INSERT INTO voice_notes (id, kind, mime, audio_b64, bytes, chars, script, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    [id, "beat", "audio/mpeg", toBase64(clip.bytes), clip.bytes.length, 480, "[beat] rap bed", now, "2099-01-01T00:00:00.000Z"],
+  );
+  await noteUsage(env, 480);
+  await setState(env, "voice:rap_beat", id).catch(() => undefined);
+  return id;
 }
 
 export interface VoiceNote {
@@ -105,6 +150,10 @@ export async function ensureVoiceTable(env: Env): Promise<void> {
     )`,
   );
   await dbRun(env, "CREATE INDEX IF NOT EXISTS idx_voice_notes_expires ON voice_notes (expires_at)").catch(() => 0);
+  const cols = await dbAll<{ name: string }>(env, "PRAGMA table_info(voice_notes)").catch(() => []);
+  if (cols.length && !cols.some((c) => c.name === "bed")) {
+    await dbRun(env, "ALTER TABLE voice_notes ADD COLUMN bed TEXT NOT NULL DEFAULT ''").catch(() => 0);
+  }
   ready = true;
 }
 
@@ -175,7 +224,15 @@ export async function writeScript(env: Env, ask: VoiceAsk, request: string, hist
       role: "system",
       content: [
         "You are J.A.R.V.I.S., Sir's British butler assistant, voiced by George. Write only the exact words you will speak in a voice note to Sir.",
-        singing
+        ask.style === "roast"
+          ? "He asked you to roast him. Write a short, original, affectionate roast of Sir (three to five quick jokes), dry British wit, cheeky not cruel. Nothing about race, religion, sexuality, disability, weight or looks; no swearing. You may use [laughs] once."
+          : ask.style === "hype"
+            ? "He asked you to hype him up. Write a short, original, energetic pep talk for Sir, building to a big finish, confident and warm. You may use [excited] or [laughs] once."
+            : ask.style === "diss"
+              ? `He asked for a diss track${ask.prompt ? ` about ${ask.prompt}` : ""}. Write an original playful diss rap (six to eight short rhyming lines) with clean, witty, teasing bars about harmless things like their cooking, their football team, their timekeeping or their dance moves. No slurs, no swearing, no threats or violence, nothing about race, religion, sexuality, disability, weight or looks, no real people's names other than the target, and never mention or imitate any real artist. Start with [rapping].`
+              : ask.style === "rap"
+                ? "He asked you to rap. Write a short original rap verse (six to eight lines) with tight rhythm and rhyme, playful and in character, as JARVIS. Never mention or imitate any real artist. Start with [rapping]."
+                : singing
           ? "He asked you to sing or rap. Write a short original verse (four to eight lines) with rhythm and rhyme, playful and in character. You may use the audio tags [sings], [rapping], [laughs] or [clears throat] sparingly. Never use real artists' lyrics."
           : "Sound natural and warm, as if leaving a voice note. You may use [laughs] or [sighs] once if it fits.",
         "If he says 'say it' or 'say that', speak your previous message to him.",
@@ -304,11 +361,12 @@ export async function makeVoiceNote(
     bytes = spoken.bytes;
     chars = spoken.chars;
   }
-  const note = await storeNote(env, ask.kind, bytes, chars, script);
+  const bed = ask.style === "diss" || ask.style === "rap" ? ((await rapBeat(env).catch(() => null)) ?? "") : "";
+  const note = await storeNote(env, ask.kind, bytes, chars, script, bed);
   return { ok: true, note };
 }
 
-export async function storeNote(env: Env, kind: VoiceKind, bytes: Uint8Array, chars: number, script: string): Promise<VoiceNote> {
+export async function storeNote(env: Env, kind: VoiceKind, bytes: Uint8Array, chars: number, script: string, bed = ""): Promise<VoiceNote> {
   await ensureVoiceTable(env);
   const id = noteId();
   const now = new Date();
@@ -318,6 +376,7 @@ export async function storeNote(env: Env, kind: VoiceKind, bytes: Uint8Array, ch
     "INSERT INTO voice_notes (id, kind, mime, audio_b64, bytes, chars, script, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     [id, kind, "audio/mpeg", toBase64(bytes), bytes.length, chars, script, now.toISOString(), expires.toISOString()],
   );
+  if (bed) await dbRun(env, "UPDATE voice_notes SET bed = ? WHERE id = ?", [bed, id]).catch(() => 0);
   await noteUsage(env, chars);
   const url = `${await noteOrigin(env)}/v/${id}`;
   return { id, url, kind, chars, bytes: bytes.length, script };
@@ -403,7 +462,15 @@ async function noteUsage(env: Env, chars: number): Promise<void> {
 /** One line in persona, then the link. */
 export function noteLine(ask: VoiceAsk, url: string): string {
   const lead =
-    ask.kind === "beatbox"
+    ask.style === "roast"
+      ? "Roast incoming, Sir. Brace yourself. Tap to play:"
+      : ask.style === "hype"
+        ? "Hype, as requested, Sir. Volume up. Tap to play:"
+        : ask.style === "diss"
+          ? "Diss track, fresh off the desk, Sir. Volume up. Tap to play:"
+          : ask.style === "rap"
+            ? "Bars over a beat, Sir. Tap to play:"
+            : ask.kind === "beatbox"
       ? "Beatbox, as requested, Sir. Tap to play:"
       : ask.kind === "sing"
         ? "A little number for you, Sir. Tap to play:"
@@ -419,18 +486,28 @@ export function noteFailure(result: VoiceResult): string {
 
 /** Rings Sir's own number and plays the note. Only ever called on his explicit request, only to his number. */
 export async function callOwnerWithNote(env: Env, owner: string, url: string): Promise<{ ok: boolean; sid: string; error: string }> {
+  return callAndPlay(env, owner, `<Response><Pause length="1"/><Play>${escapeXml(`${url}.mp3`)}</Play></Response>`);
+}
+
+/** Places a call that plays fixed TwiML. Callers decide who may be rung; this only dials. */
+export async function callAndPlay(
+  env: Env,
+  to: string,
+  twiml: string,
+  timeLimit = 0,
+): Promise<{ ok: boolean; sid: string; error: string }> {
+  const owner = to;
   const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
   const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
   const from = (env.TWILIO_FROM_NUMBER ?? "").trim();
   if (!account || !token || !from || !owner) return { ok: false, sid: "", error: "calling is not set up" };
-  const twiml = `<Response><Pause length="1"/><Play>${escapeXml(`${url}.mp3`)}</Play></Response>`;
   try {
     const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls.json`, {
       method: "POST",
       redirect: "manual",
       signal: AbortSignal.timeout(15_000),
       headers: { authorization: `Basic ${btoa(`${account}:${token}`)}`, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ To: owner, From: from, Twiml: twiml, Timeout: "30" }).toString(),
+      body: new URLSearchParams({ To: owner, From: from, Twiml: twiml, Timeout: "30", ...(timeLimit > 0 ? { TimeLimit: String(timeLimit) } : {}) }).toString(),
     });
     const body = (await response.json().catch(() => ({}))) as { sid?: string; message?: string };
     if (!response.ok || !body.sid) return { ok: false, sid: "", error: (body.message ?? `HTTP ${response.status}`).slice(0, 120) };
@@ -440,7 +517,7 @@ export async function callOwnerWithNote(env: Env, owner: string, url: string): P
   }
 }
 
-function escapeXml(value: string): string {
+export function escapeXml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 }
 
@@ -454,15 +531,15 @@ export async function serveVoiceNote(request: Request, env: Env, path: string): 
   const id = match?.[1] ?? "";
   const raw = Boolean(match?.[2]);
   await ensureVoiceTable(env).catch(() => undefined);
-  const row = await dbFirst<{ kind: string; mime: string; audio_b64: string; expires_at: string }>(
+  const row = await dbFirst<{ kind: string; mime: string; audio_b64: string; expires_at: string; bed?: string }>(
     env,
-    "SELECT kind, mime, audio_b64, expires_at FROM voice_notes WHERE id = ?",
+    "SELECT kind, mime, audio_b64, expires_at, bed FROM voice_notes WHERE id = ?",
     [id],
   ).catch(() => null);
   const headers = { "x-robots-tag": "noindex, nofollow", "cache-control": "private, max-age=3600", "referrer-policy": "no-referrer" };
   if (!row) return page(404, "This voice note isn't here.", "", headers);
   if (Date.parse(row.expires_at) < Date.now()) return page(410, "This voice note has expired.", "", headers);
-  if (!raw) return page(200, "A voice note from JARVIS", `/v/${id}.mp3`, headers);
+  if (!raw) return page(200, "A voice note from JARVIS", `/v/${id}.mp3`, headers, row.bed ? `/v/${row.bed}.mp3` : "");
   const bytes = fromBase64(row.audio_b64);
   const total = bytes.length;
   const range = /^bytes=(\d*)-(\d*)$/.exec(request.headers.get("range") ?? "");
@@ -481,8 +558,17 @@ export async function serveVoiceNote(request: Request, env: Env, path: string): 
   return new Response(request.method === "HEAD" ? null : bytes, { status: 200, headers: { ...base, "content-length": String(total) } });
 }
 
-function page(status: number, title: string, src: string, headers: Record<string, string>): Response {
-  const player = src
+function page(status: number, title: string, src: string, headers: Record<string, string>, bed = ""): Response {
+  const player = src && bed
+    ? `<audio id="a" src="${src}" preload="auto" playsinline></audio><audio id="m" src="${bed}" preload="auto" loop playsinline></audio>
+<button id="b">&#9654;&#xFE0E; Play</button>
+<script>var a=document.getElementById('a'),m=document.getElementById('m'),b=document.getElementById('b'),c=null;
+function stop(){m.pause();m.currentTime=0;a.pause();a.currentTime=0;b.innerHTML='&#9654;&#xFE0E; Play'}
+b.onclick=function(){if(!a.paused){stop();return}
+try{if(!c){var C=window.AudioContext||window.webkitAudioContext;c=new C();var g=c.createGain();g.gain.value=0.32;c.createMediaElementSource(m).connect(g).connect(c.destination);var v=c.createGain();v.gain.value=1;c.createMediaElementSource(a).connect(v).connect(c.destination)}c.resume()}catch(e){m.volume=0.32}
+m.currentTime=0;m.play();setTimeout(function(){a.play()},1400);b.textContent='\u275A\u275A Stop'};
+a.onended=function(){setTimeout(stop,1200)}</script>`
+    : src
     ? `<audio id="a" src="${src}" preload="auto" controls playsinline></audio>
 <button id="b" onclick="var a=document.getElementById('a');a.paused?a.play():a.pause()">&#9654;&#xFE0E; Play</button>
 <script>var a=document.getElementById('a'),b=document.getElementById('b');a.onplay=function(){b.textContent='\\u275A\\u275A Pause'};a.onpause=a.onended=function(){b.innerHTML='&#9654;&#xFE0E; Play'};a.play().catch(function(){})</script>`

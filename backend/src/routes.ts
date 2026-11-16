@@ -113,6 +113,7 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "POST" && path === "/debug/sms-simulate") return simulateSmsRoute(request, env);
     if (request.method === "POST" && path === "/debug/voice-proof") return (await import("./sms-desk")).voiceProofRoute(env);
     if (request.method === "POST" && path === "/debug/voice-lab") return (await import("./sms-desk")).voiceLabRoute(request, env);
+    if (request.method === "POST" && path === "/debug/extras") return (await import("./sms-extras")).extrasDebugRoute(request, env);
     if (request.method === "POST" && path === "/debug/voice-send") return (await import("./sms-desk")).voiceSendRoute(request, env);
     if (request.method === "POST" && path === "/debug/voice-once") return (await import("./sms-desk")).voiceOnceRoute(request, env);
     if (request.method === "GET" && path === "/debug/voice-notes") {

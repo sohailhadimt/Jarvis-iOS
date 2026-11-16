@@ -75,7 +75,7 @@ describe("text desk", () => {
     const bubbles = capabilityBubbles();
     expect(bubbles.join(" ")).toContain("book me a dentist this week");
     expect(bubbles.join(" ")).toContain("find a plumber who can come today");
-    expect(bubbles.at(-1)).toBe("I'll text or call you when something needs you.");
+    expect(bubbles.at(-1)).toContain("Text 'help'");
     expect(smsBubbles("Of course, Sir. I can do that. Shall I go ahead?")).toEqual([
       "Of course, Sir.",
       "I can do that.",

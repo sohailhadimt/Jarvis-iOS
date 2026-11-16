@@ -35,7 +35,7 @@ describe("shop around", () => {
 
   it("speaks as J.A.R.V.I.S. for Master Hadi and only cites a real offer", () => {
     const first = outboundOpening(quoteBrief("a boiler service", null));
-    expect(first).toContain("Hello, this is J.A.R.V.I.S., calling on behalf of Master Hadi.");
+    expect(first).toContain("Hello, this is J.A.R.V.I.S., an AI assistant calling on behalf of Master Hadi.");
     expect(first).toContain("I'm calling to ask:");
     expect(first.toLowerCase()).toContain("master hadi will confirm");
     expect(first).not.toMatch(/\bSohail\b/);

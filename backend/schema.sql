@@ -624,7 +624,44 @@ CREATE TABLE IF NOT EXISTS voice_notes (
   chars INTEGER NOT NULL,
   script TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
-  expires_at TEXT NOT NULL
+  expires_at TEXT NOT NULL,
+  bed TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_voice_notes_expires ON voice_notes (expires_at);
+
+-- Text-line extras (owner only): reminders, price watches, tasks passed to agents.
+CREATE TABLE IF NOT EXISTS sms_reminders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  phone TEXT NOT NULL,
+  task TEXT NOT NULL,
+  due_at TEXT NOT NULL,
+  via TEXT NOT NULL DEFAULT 'sms',
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  fired_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_sms_reminders_due ON sms_reminders (status, due_at);
+
+CREATE TABLE IF NOT EXISTS price_watches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  phone TEXT NOT NULL,
+  item TEXT NOT NULL,
+  symbol TEXT NOT NULL DEFAULT '',
+  currency TEXT NOT NULL DEFAULT '£',
+  threshold REAL NOT NULL,
+  last_price REAL,
+  last_source TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  checked_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sms_agent_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent TEXT NOT NULL,
+  task TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  created_at TEXT NOT NULL
+);

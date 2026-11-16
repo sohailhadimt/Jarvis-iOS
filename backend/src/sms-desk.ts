@@ -9,6 +9,7 @@ import {
   callOwnerWithNote,
   claimsAudio,
   kindFromLine,
+  dissUnsafe,
   kindFromText,
   makeVoiceNote,
   noteFailure,
@@ -113,7 +114,7 @@ export function capabilityBubbles(): string[] {
   return [
     "I make calls, book appointments, and sort a bill, Sir.",
     "You can say 'book me a dentist this week', or 'find a plumber who can come today'.",
-    "I'll text or call you when something needs you.",
+    "Text 'help' for the full list: reminders, nearby, price watches, roasts and more.",
   ];
 }
 
@@ -486,9 +487,9 @@ export function scheduleEmail(goal: string, slots: { label: string }[]): { subje
   return { subject, body };
 }
 
-export async function handleInboundSms(env: Env, from: string, body: string): Promise<void> {
+export async function handleInboundSms(env: Env, from: string, body: string, media: string[] = []): Promise<void> {
   const text = body.replace(/\s+/g, " ").trim();
-  if (!text) return;
+  if (!text && !media.length) return;
   const sender = toE164(from);
   const ours = toE164(env.TWILIO_FROM_NUMBER ?? "");
   if (!sender || (ours && sender === ours)) return;
@@ -508,9 +509,10 @@ export async function handleInboundSms(env: Env, from: string, body: string): Pr
     }
     const owner = await readOwnerMobile(env);
     if (owner && sender === owner) {
-      await answerOwner(env, sender, text);
+      await answerOwner(env, sender, text, media);
       return;
     }
+    if (!text) return;
     await sendSms(env, sender, screenStranger());
     if (owner) await sendSms(env, owner, `Text from ${sender}: ${clip(text, 240)}`);
   } catch (err) {
@@ -715,10 +717,19 @@ function publicSmsError(text: string): string {
   return clean.slice(0, 180);
 }
 
-async function answerOwner(env: Env, phone: string, text: string): Promise<void> {
-  await rememberTurn(env, phone, "user", text);
+async function answerOwner(env: Env, phone: string, text: string, media: string[] = []): Promise<void> {
+  await rememberTurn(env, phone, "user", text || (media.length ? "[photo]" : ""));
   await noteSmsLog(env, { direction: "in", status: "received", errorCode: "", brain: "inbound", detail: text, sid: "" });
+  const sim = Boolean(smsCapture.get(env));
   const approval = approvalWord(text);
+  if (approval === "yes") {
+    const { placePendingPrank } = await import("./sms-extras");
+    const pranked = await placePendingPrank(env, phone, sim);
+    if (pranked) {
+      await replyLine(env, phone, pranked, "prank");
+      return;
+    }
+  }
   if (approval) {
     const placed = await placeApprovedOutbound(env, phone);
     if (placed) {
@@ -736,6 +747,8 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
       return;
     }
   }
+  const extras = await import("./sms-extras");
+  if (await extras.smsExtras(env, phone, text, media, { sim, send: (line) => replyLine(env, phone, line, "extra") })) return;
   const corrected = numberCorrection(text);
   if (corrected) {
     const line = await correctPendingNumber(env, phone, corrected);
@@ -754,6 +767,10 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
     return;
   }
   const voice = voiceAsk(text);
+  if (voice?.style === "diss" && dissUnsafe(text)) {
+    await reply(env, phone, "I'll keep it clean, Sir: no threats, slurs or digs at who someone is. Give me something harmless to roast them on, like their cooking or their football team.", "diss-refused");
+    return;
+  }
   if (voice) {
     await deliverVoiceNote(env, phone, text, voice);
     return;
@@ -772,6 +789,21 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
   const revision = pendingRevision(text);
   if (revision) {
     await reply(env, phone, await revisePendingOutbound(env, phone, revision));
+    return;
+  }
+  const byName = extras.ringByName(text);
+  if (byName) {
+    if (extras.personalContact(byName.name)) {
+      await reply(env, phone, `I only ring personal contacts on a number you type, Sir. Send it like: call 07... and ${byName.verb} ${byName.purpose}`, "ring-personal");
+      return;
+    }
+    const found = await extras.findBusinessPhone(env, byName.name, byName.place);
+    if (!found) {
+      await replyLine(env, phone, `I couldn't find a number for ${byName.name}, Sir. Send it like: call 01233 000000 and ${byName.verb} ${byName.purpose}`, "ring-unknown");
+      return;
+    }
+    const offer = await offerOutbound(env, phone, { name: byName.name, phone: found.phone, purpose: byName.purpose, verb: byName.verb });
+    await replyLine(env, phone, `Found ${byName.name}: ${found.phone}${found.source ? ` (${found.source})` : ""}. ${offer}`, "ring-found");
     return;
   }
   const choice = menuChoice(text);
@@ -1630,16 +1662,20 @@ export async function simulateSmsRoute(request: Request, env: Env): Promise<Resp
   const body = await readJson(request);
   if (!body.ok) return body.response;
   if (!isRecord(body.value)) return apiError(400, "bad_request", "text is required.");
-  const text = asString(body.value.text, 500);
-  if (!text) return apiError(400, "bad_request", "text is required.");
+  const text = asString(body.value.text, 500) ?? "";
+  const hasMedia = Array.isArray(body.value.media) && body.value.media.length > 0;
+  if (!text && !hasMedia) return apiError(400, "bad_request", "text is required.");
   // A thread is a separate Ofcom drama number, so a test conversation keeps its own history.
   const thread = typeof body.value.thread === "string" && /^\d{1,3}$/.test(body.value.thread) ? body.value.thread : "0";
   const phone = `+447700900${thread.padStart(3, "0")}`;
   if (body.value.reset === true) await dbRun(env, "DELETE FROM sms_turns WHERE phone = ?", [phone]).catch(() => 0);
+  const media = Array.isArray(body.value.media)
+    ? body.value.media.filter((m): m is string => typeof m === "string" && /^https:\/\//.test(m)).slice(0, 1)
+    : [];
   const lines: string[] = [];
   smsCapture.set(env, lines);
   try {
-    await answerOwner(env, phone, text);
+    await answerOwner(env, phone, text, media);
   } finally {
     smsCapture.delete(env);
   }

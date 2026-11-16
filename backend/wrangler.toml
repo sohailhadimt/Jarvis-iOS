@@ -20,7 +20,7 @@ binding = "SELF"
 service = "jarvis-backend"
 
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["*/5 * * * *", "* * * * *"]
 
 [observability]
 enabled = true
