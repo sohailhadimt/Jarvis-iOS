@@ -348,38 +348,40 @@ export async function sweepMorningText(env: Env, now = new Date()): Promise<bool
 
 // ---------------------------------------------------------------- nearby
 
-const PLACE_TAGS: [RegExp, string, string][] = [
-  [/\b(?:pharmac(?:y|ies)|chemists?)\b/i, "pharmacy", '["amenity"="pharmacy"]'],
-  [/\b(?:petrol|fuel|gas station|petrol station)\b/i, "petrol station", '["amenity"="fuel"]'],
-  [/\b(?:cafes?|coffee(?: shops?)?)\b/i, "cafe", '["amenity"="cafe"]'],
-  [/\b(?:chippy|fish and chips?)\b/i, "chippy", '["cuisine"~"fish_and_chips"]'],
-  [/\b(?:chinese)\b/i, "Chinese", '["cuisine"~"chinese",i]'],
-  [/\b(?:indian|curry)\b/i, "Indian", '["cuisine"~"indian",i]'],
-  [/\b(?:pizza)\b/i, "pizza place", '["cuisine"~"pizza",i]'],
-  [/\b(?:kebab)\b/i, "kebab shop", '["cuisine"~"kebab",i]'],
-  [/\b(?:takeaways?|fast food)\b/i, "takeaway", '["amenity"="fast_food"]'],
-  [/\b(?:restaurants?)\b/i, "restaurant", '["amenity"="restaurant"]'],
-  [/\b(?:pubs?|bars?)\b/i, "pub", '["amenity"~"^(pub|bar)$"]'],
-  [/\b(?:supermarkets?|groceries|grocery|food shop)\b/i, "supermarket", '["shop"="supermarket"]'],
-  [/\b(?:corner shop|convenience|off licen[cs]e|shop)\b/i, "shop", '["shop"="convenience"]'],
-  [/\b(?:atms?|cash ?machines?|cashpoints?)\b/i, "cash machine", '["amenity"="atm"]'],
-  [/\b(?:a ?& ?e|hospitals?)\b/i, "hospital", '["amenity"="hospital"]'],
-  [/\b(?:gp|doctors?|surgery)\b/i, "GP", '["amenity"="doctors"]'],
-  [/\b(?:dentists?)\b/i, "dentist", '["amenity"="dentist"]'],
-  [/\b(?:gyms?)\b/i, "gym", '["leisure"="fitness_centre"]'],
-  [/\b(?:banks?)\b/i, "bank", '["amenity"="bank"]'],
-  [/\b(?:post office)\b/i, "post office", '["amenity"="post_office"]'],
-  [/\b(?:car wash)\b/i, "car wash", '["amenity"="car_wash"]'],
-  [/\b(?:barbers?|hairdressers?)\b/i, "barber", '["shop"="hairdresser"]'],
-  [/\b(?:vets?)\b/i, "vet", '["amenity"="veterinary"]'],
-  [/\b(?:toilets?|loos?)\b/i, "toilet", '["amenity"="toilets"]'],
-  [/\b(?:parking|car park)\b/i, "car park", '["amenity"="parking"]'],
-  [/\b(?:ev charg\w*|charging point|charger)\b/i, "EV charger", '["amenity"="charging_station"]'],
+/** [what he says, label, Nominatim search words, cuisine filter]. */
+const PLACE_TAGS: [RegExp, string, string[], RegExp?][] = [
+  [/\b(?:pharmac(?:y|ies)|chemists?)\b/i, "pharmacy", ["pharmacy"]],
+  [/\b(?:petrol|fuel|gas station|petrol station)\b/i, "petrol station", ["fuel"]],
+  [/\b(?:cafes?|coffee(?: shops?)?)\b/i, "cafe", ["cafe"]],
+  [/\b(?:chippy|fish and chips?)\b/i, "chippy", ["fast food", "restaurant"], /fish_and_chips|fish|chip/i],
+  [/\b(?:chinese)\b/i, "Chinese", ["restaurant", "fast food"], /chinese/i],
+  [/\b(?:indian|curry)\b/i, "Indian", ["restaurant", "fast food"], /indian|curry|bangladeshi|nepal/i],
+  [/\b(?:pizza)\b/i, "pizza place", ["fast food", "restaurant"], /pizza/i],
+  [/\b(?:kebab)\b/i, "kebab shop", ["fast food"], /kebab|turkish/i],
+  [/\b(?:takeaways?|fast food)\b/i, "takeaway", ["fast food"]],
+  [/\b(?:restaurants?)\b/i, "restaurant", ["restaurant"]],
+  [/\b(?:pubs?|bars?)\b/i, "pub", ["pub"]],
+  [/\b(?:supermarkets?|groceries|grocery|food shop)\b/i, "supermarket", ["supermarket"]],
+  [/\b(?:corner shop|convenience|off licen[cs]e)\b/i, "shop", ["convenience store"]],
+  [/\b(?:atms?|cash ?machines?|cashpoints?)\b/i, "cash machine", ["atm"]],
+  [/\b(?:a ?& ?e|hospitals?)\b/i, "hospital", ["hospital"]],
+  [/\b(?:gp|doctors?|surgery)\b/i, "GP", ["doctors"]],
+  [/\b(?:dentists?)\b/i, "dentist", ["dentist"]],
+  [/\b(?:gyms?)\b/i, "gym", ["gym"]],
+  [/\b(?:banks?)\b/i, "bank", ["bank"]],
+  [/\b(?:post office)\b/i, "post office", ["post office"]],
+  [/\b(?:car wash)\b/i, "car wash", ["car wash"]],
+  [/\b(?:barbers?|hairdressers?)\b/i, "barber", ["hairdresser"]],
+  [/\b(?:vets?)\b/i, "vet", ["veterinary"]],
+  [/\b(?:toilets?|loos?)\b/i, "toilet", ["toilets"]],
+  [/\b(?:parking|car park)\b/i, "car park", ["parking"]],
+  [/\b(?:ev charg\w*|charging point|charger)\b/i, "EV charger", ["charging station"]],
 ];
 
 export interface NearbyAsk {
   label: string;
-  filter: string;
+  terms: string[];
+  cuisine?: RegExp;
   openOnly: boolean;
   place: string;
 }
@@ -392,18 +394,20 @@ export function nearbyAsk(text: string): NearbyAsk | null {
   if (!asks) return null;
   const found = PLACE_TAGS.find(([re]) => re.test(clean));
   let label = "";
-  let filter = "";
+  let terms: string[] = [];
+  let cuisine: RegExp | undefined;
   if (found) {
     label = found[1];
-    filter = found[2];
+    terms = found[2];
+    cuisine = found[3];
   } else {
     const what = /\b(?:nearest|closest)\s+(?:open\s+)?([a-z][a-z' -]{2,30}?)(?:\s+(?:near|in|to|around|that)\b|$)/i.exec(clean)?.[1];
     if (!what) return null;
     label = what.trim();
-    filter = `["name"~"${label.replace(/["\\]/g, "")}",i]`;
+    terms = [label];
   }
   const where = /\b(?:near|in|around)\s+(?!me\b|here\b)([A-Z][\w' -]{2,40})$/.exec(clean)?.[1]?.trim() ?? "";
-  return { label, filter, openOnly: /\bopen\b/i.test(clean), place: where };
+  return { label, terms, ...(cuisine ? { cuisine } : {}), openOnly: /\bopen\b/i.test(clean), place: where };
 }
 
 const DAY_KEYS = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
@@ -417,7 +421,7 @@ export function openNow(hours: string, at: Date): { open: boolean; until: string
   const mins = p.hour * 60 + p.minute;
   let result: { open: boolean; until: string } | null = null;
   let understood = false;
-  for (const raw of spec.split(";")) {
+  for (const raw of spec.replace(/(\d{2}:\d{2}),\s*(?=(?:Mo|Tu|We|Th|Fr|Sa|Su|PH)\b)/g, "$1;").split(";")) {
     const rule = raw.trim();
     if (!rule || /^PH\b/.test(rule)) continue;
     const m = /^((?:(?:Mo|Tu|We|Th|Fr|Sa|Su)(?:-(?:Mo|Tu|We|Th|Fr|Sa|Su))?,?\s*)+)?\s*(off|closed|24\/7|(?:\d{1,2}:\d{2}-\d{1,2}:\d{2}\+?,?\s*)+)$/.exec(rule);
@@ -469,20 +473,6 @@ function distanceKm(a: { lat: number; lon: number }, b: { lat: number; lon: numb
   return 12_742 * Math.asin(Math.sqrt(h));
 }
 
-async function geocode(place: string): Promise<{ lat: number; lon: number; label: string } | null> {
-  try {
-    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=gb&q=${encodeURIComponent(place)}`;
-    const response = await fetch(url, { headers: { "user-agent": UA, accept: "application/json" }, signal: AbortSignal.timeout(6_000) });
-    if (!response.ok) return null;
-    const rows = (await response.json()) as { lat?: string; lon?: string; display_name?: string }[];
-    const row = rows[0];
-    if (!row?.lat || !row.lon) return null;
-    return { lat: Number(row.lat), lon: Number(row.lon), label: place };
-  } catch {
-    return null;
-  }
-}
-
 interface Spot {
   name: string;
   lat: number;
@@ -491,38 +481,48 @@ interface Spot {
   status: { open: boolean; until: string } | null;
 }
 
+async function nominatim(query: string, limit: number): Promise<{ lat: string; lon: string; name?: string; type?: string; extratags?: Record<string, string> | null }[] | null> {
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&extratags=1&countrycodes=gb&limit=${limit}&q=${encodeURIComponent(query)}`;
+    const response = await fetch(url, { headers: { "user-agent": UA, accept: "application/json", "accept-language": "en-GB" }, signal: AbortSignal.timeout(8_000) });
+    if (!response.ok) return null;
+    return (await response.json()) as { lat: string; lon: string; name?: string; type?: string; extratags?: Record<string, string> | null }[];
+  } catch {
+    return null;
+  }
+}
+
+/** OpenStreetMap via Nominatim: no key, opening hours when the map has them. */
 export async function findNearby(ask: NearbyAsk, now = new Date()): Promise<{ centre: string; spots: Spot[] } | null> {
-  const centre = ask.place ? ((await geocode(`${ask.place}, UK`)) ?? null) : { ...ASHFORD };
-  if (!centre) return null;
-  const query = `[out:json][timeout:20];(nwr${ask.filter}(around:8000,${centre.lat},${centre.lon}););out center 60;`;
-  const mirrors = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"];
-  for (const mirror of mirrors) {
-    try {
-      const response = await fetch(mirror, {
-        method: "POST",
-        headers: { "user-agent": UA, "content-type": "application/x-www-form-urlencoded" },
-        body: `data=${encodeURIComponent(query)}`,
-        signal: AbortSignal.timeout(12_000),
-      });
-      if (!response.ok) continue;
-      const body = (await response.json()) as {
-        elements?: { lat?: number; lon?: number; center?: { lat: number; lon: number }; tags?: Record<string, string> }[];
-      };
-      const spots: Spot[] = [];
-      for (const el of body.elements ?? []) {
-        const lat = el.lat ?? el.center?.lat;
-        const lon = el.lon ?? el.center?.lon;
-        const name = el.tags?.name ?? el.tags?.brand ?? "";
-        if (lat === undefined || lon === undefined || !name) continue;
-        spots.push({ name, lat, lon, km: distanceKm(centre, { lat, lon }), status: openNow(el.tags?.opening_hours ?? "", now) });
-      }
-      spots.sort((a, b) => a.km - b.km);
-      return { centre: ask.place || ASHFORD.label, spots };
-    } catch {
-      // next mirror
+  const placeName = ask.place ? `${ask.place}` : ASHFORD.label;
+  let centre: { lat: number; lon: number } = { lat: ASHFORD.lat, lon: ASHFORD.lon };
+  if (ask.place) {
+    const hit = (await nominatim(`${ask.place}, UK`, 1))?.[0];
+    if (!hit) return null;
+    centre = { lat: Number(hit.lat), lon: Number(hit.lon) };
+  }
+  const spots: Spot[] = [];
+  const seen = new Set<string>();
+  let answered = false;
+  for (const term of ask.terms.slice(0, 2)) {
+    const rows = await nominatim(`${term} near ${placeName}`, ask.cuisine ? 40 : 15);
+    if (!rows) continue;
+    answered = true;
+    for (const row of rows) {
+      const tags = row.extratags ?? {};
+      if (ask.cuisine && !ask.cuisine.test(`${tags.cuisine ?? ""} ${row.name ?? ""}`)) continue;
+      const lat = Number(row.lat);
+      const lon = Number(row.lon);
+      const name = row.name || tags.brand || tags.operator || sentenceCase(ask.label);
+      const key = `${name}|${lat.toFixed(4)}|${lon.toFixed(4)}`;
+      if (!Number.isFinite(lat) || seen.has(key)) continue;
+      seen.add(key);
+      spots.push({ name, lat, lon, km: distanceKm(centre, { lat, lon }), status: openNow(tags.opening_hours ?? "", now) });
     }
   }
-  return null;
+  if (!answered) return null;
+  spots.sort((a, b) => a.km - b.km);
+  return { centre: placeName, spots: spots.filter((s) => s.km <= 15) };
 }
 
 export function nearbyLine(ask: NearbyAsk, found: { centre: string; spots: Spot[] }): string {
@@ -531,10 +531,10 @@ export function nearbyLine(ask: NearbyAsk, found: { centre: string; spots: Spot[
   const where = found.centre === ASHFORD.label ? "" : ` near ${found.centre}`;
   if (!found.spots.length) return `I couldn't find a ${ask.label}${where} within 8 km, Sir.`;
   const open = found.spots.filter((s) => s.status?.open);
-  const pick = ask.openOnly ? (open[0] ?? found.spots[0]!) : found.spots[0]!;
+  const pick = ask.openOnly ? (open[0] ?? found.spots.find((s) => s.status?.open !== false) ?? found.spots[0]!) : found.spots[0]!;
   const lead =
     ask.openOnly && !open.length
-      ? `Nothing I can confirm open${where}, Sir. Nearest ${ask.label}:`
+      ? `I can't confirm opening hours${where}, Sir. Nearest ${ask.label}:`
       : `Nearest ${ask.openOnly ? "open " : ""}${ask.label}${where}, Sir:`;
   const second = found.spots.find((s) => s !== pick && (!ask.openOnly || s.status?.open !== false));
   const extra = second ? ` Next: ${second.name}, ${second.km.toFixed(1)} km, ${status(second)}.` : "";
@@ -580,39 +580,54 @@ export function watchAsk(text: string): WatchAsk | null {
 }
 
 export async function stockQuote(symbol: string): Promise<number | null> {
-  try {
-    const url = `https://stooq.com/q/l/?s=${encodeURIComponent(symbol.toLowerCase())}.us&f=sd2t2ohlcv&h&e=csv`;
-    const response = await fetch(url, { headers: { "user-agent": UA }, signal: AbortSignal.timeout(6_000) });
-    if (!response.ok) return null;
-    const lines = (await response.text()).trim().split(/\r?\n/);
-    const cols = (lines[1] ?? "").split(",");
-    const close = Number(cols[6]);
-    return Number.isFinite(close) && close > 0 ? close : null;
-  } catch {
-    return null;
+  for (const host of ["query1", "query2"]) {
+    try {
+      const url = `https://${host}.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol.toUpperCase())}?range=1d&interval=1d`;
+      const response = await fetch(url, { headers: { "user-agent": "Mozilla/5.0 (JARVIS price watch)" }, signal: AbortSignal.timeout(6_000) });
+      if (!response.ok) continue;
+      const body = (await response.json()) as { chart?: { result?: { meta?: { regularMarketPrice?: number } }[] } };
+      const price = Number(body.chart?.result?.[0]?.meta?.regularMarketPrice);
+      if (Number.isFinite(price) && price > 0) return price;
+    } catch {
+      // next host
+    }
   }
+  return null;
 }
 
-/** Best effort: the lowest believable £ price in search snippets for the item. */
+/** Search hits as text blobs: snippets first, then the top pages read in full when snippets say nothing. */
+async function searchBlobs(env: Env, query: string, wanted: RegExp): Promise<{ text: string; host: string }[]> {
+  const { webSearch, fetchPublicPage } = await import("./search");
+  const found = await webSearch(env, query);
+  if (!found.ok) return [];
+  const host = (url: string) => {
+    try {
+      return new URL(url).hostname.replace(/^www\./, "");
+    } catch {
+      return "";
+    }
+  };
+  const blobs = found.results.slice(0, 8).map((r) => ({ text: `${r.title ?? ""} ${r.snippet ?? ""}`, host: host(r.url) }));
+  if (blobs.some((b) => new RegExp(wanted.source, wanted.flags.replace("g", "")).test(b.text))) return blobs;
+  const pages = await Promise.all(
+    found.results.slice(0, 3).map(async (r) => {
+      const page = await fetchPublicPage(r.url).catch(() => null);
+      return page && page.ok ? { text: page.text.slice(0, 60_000), host: host(r.url) } : null;
+    }),
+  );
+  return [...blobs, ...pages.filter((p): p is { text: string; host: string } => Boolean(p))];
+}
+
+/** Best effort: the lowest believable £ price for the item in search results. */
 export async function productPrice(env: Env, item: string, threshold: number): Promise<{ price: number; source: string } | null> {
-  const { webSearch } = await import("./search");
-  const found = await webSearch(env, `${item} price UK`);
-  if (!found.ok) return null;
+  const pricePattern = /£\s?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)/g;
+  const blobs = await searchBlobs(env, `${item} price UK`, pricePattern);
   let best: { price: number; source: string } | null = null;
-  for (const r of found.results.slice(0, 8)) {
-    const blob = `${r.title ?? ""} ${(r as { snippet?: string; content?: string }).snippet ?? (r as { content?: string }).content ?? ""}`;
-    for (const m of blob.matchAll(/£\s?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)/g)) {
+  for (const blob of blobs) {
+    for (const m of blob.text.matchAll(pricePattern)) {
       const price = Number(m[1]!.replace(/,/g, ""));
       if (!Number.isFinite(price) || price < threshold * 0.35 || price > threshold * 6) continue;
-      if (!best || price < best.price) {
-        let host = "";
-        try {
-          host = new URL(r.url).hostname.replace(/^www\./, "");
-        } catch {
-          host = "";
-        }
-        best = { price, source: host };
-      }
+      if (!best || price < best.price) best = { price, source: blob.host };
     }
   }
   return best;
@@ -621,7 +636,7 @@ export async function productPrice(env: Env, item: string, threshold: number): P
 async function checkWatch(env: Env, w: { item: string; symbol: string; threshold: number }): Promise<{ price: number; source: string } | null> {
   if (w.symbol) {
     const price = await stockQuote(w.symbol);
-    return price === null ? null : { price, source: "stooq" };
+    return price === null ? null : { price, source: "Yahoo Finance" };
   }
   return productPrice(env, w.item, w.threshold);
 }
@@ -920,7 +935,7 @@ export async function placePendingPrank(env: Env, owner: string, sim: boolean): 
 export function ringByName(text: string): { name: string; place: string; verb: "ask" | "tell"; purpose: string } | null {
   const clean = text.replace(/\s+/g, " ").trim().replace(/[.!]+$/, "");
   if (/\d{6,}/.test(clean.replace(/[\s-]/g, ""))) return null;
-  const m = /^(?:please\s+)?(?:ring|call|phone)\s+(?!me\b|him\b|her\b|them\b|back\b|us\b|you\b|it\b|(?:the|that|this|my) (?:number|one|caller|person)\b)(.{2,60}?)\s+(?:and|to)\s+(ask|tell|find out|check|see)\s+(?:them\s+|if\s+|whether\s+)?(.{3,300})$/i.exec(clean);
+  const m = /^(?:please\s+)?(?:ring|call|phone)\s+(?!me\b|him\b|her\b|them\b|back\b|us\b|you\b|it\b|(?:the|that|this|my) (?:number|one|caller|person)\b)(.{2,60}?)\s+(?:and|to)\s+(ask|tell|find out|check|see)\s+(?:them\s+)?(.{3,300})$/i.exec(clean);
   if (!m) return null;
   let name = m[1]!.trim();
   let place = "";
@@ -930,7 +945,8 @@ export function ringByName(text: string): { name: string; place: string; verb: "
     place = at[2]!.trim();
   }
   const verb = /^tell$/i.test(m[2]!) ? "tell" : "ask";
-  const purpose = /^(?:find out|check|see)$/i.test(m[2]!) ? `whether ${m[3]!.trim()}` : m[3]!.trim();
+  const rest = m[3]!.trim();
+  const purpose = /^(?:find out|check|see)$/i.test(m[2]!) && !/^(?:if|whether|what|when|how|who|where|why)\b/i.test(rest) ? `whether ${rest}` : rest;
   return { name, place, verb, purpose };
 }
 
@@ -941,22 +957,13 @@ export function personalContact(name: string): boolean {
 const UK_PHONE = /(?:\+44\s?\(?0?\)?\s?|\b0)(?:\d[\s-]?){9,10}\b/g;
 
 export async function findBusinessPhone(env: Env, name: string, place: string): Promise<{ phone: string; source: string } | null> {
-  const { webSearch } = await import("./search");
   const { toE164, isBlockedNumber } = await import("./calls");
-  const found = await webSearch(env, `${name} ${place || "Ashford Kent"} phone number`);
-  if (!found.ok) return null;
-  for (const r of found.results.slice(0, 8)) {
-    const blob = `${r.title ?? ""} ${(r as { snippet?: string }).snippet ?? (r as { content?: string }).content ?? ""}`;
-    for (const m of blob.matchAll(UK_PHONE)) {
+  const blobs = await searchBlobs(env, `${name} ${place || "Ashford Kent"} phone number`, UK_PHONE);
+  for (const blob of blobs) {
+    for (const m of blob.text.matchAll(UK_PHONE)) {
       const e164 = toE164(m[0].replace(/[\s()-]/g, ""));
       if (!e164 || isBlockedNumber(e164) || /^\+44(?:9|87|84|70)/.test(e164)) continue;
-      let host = "";
-      try {
-        host = new URL(r.url).hostname.replace(/^www\./, "");
-      } catch {
-        host = "";
-      }
-      return { phone: e164, source: host };
+      return { phone: e164, source: blob.host };
     }
   }
   return null;

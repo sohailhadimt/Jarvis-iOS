@@ -38,6 +38,8 @@ export default {
         sweepHunts(env),
         sweepInboundCalls(env),
         import("./voice-notes").then((m) => m.sweepVoiceNotes(env)).catch(() => null),
+        // Backstop if the minute trigger is still propagating: due reminders also go out here.
+        import("./sms-extras").then((m) => m.fireDueReminders(env)).catch(() => null),
         import("./desk")
           .then(async (m) => {
             const { readCallSettings } = await import("./owner-alert");

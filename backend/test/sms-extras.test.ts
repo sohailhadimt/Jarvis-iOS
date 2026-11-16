@@ -63,17 +63,15 @@ function extrasEnv(opts: { stooq?: number; webhook?: boolean } = {}): { env: Env
         { status: 200 },
       );
     }
-    if (url.includes("stooq.com")) {
-      return new Response(`Symbol,Date,Time,Open,High,Low,Close,Volume\nTSLA.US,2026-11-13,22:00:00,1,1,1,${opts.stooq ?? 250},1\n`, { status: 200 });
+    if (url.includes("finance.yahoo.com")) {
+      return new Response(JSON.stringify({ chart: { result: [{ meta: { regularMarketPrice: opts.stooq ?? 250 } }] } }), { status: 200 });
     }
-    if (url.includes("overpass")) {
+    if (url.includes("nominatim")) {
       return new Response(
-        JSON.stringify({
-          elements: [
-            { lat: 51.15, lon: 0.88, tags: { name: "Far Chemist", opening_hours: "24/7" } },
-            { lat: 51.147, lon: 0.876, tags: { name: "Boots", opening_hours: "Mo-Su 00:00-00:01" } },
-          ],
-        }),
+        JSON.stringify([
+          { lat: "51.15", lon: "0.88", name: "Far Chemist", extratags: { opening_hours: "24/7" } },
+          { lat: "51.147", lon: "0.876", name: "Boots", extratags: { opening_hours: "Mo-Su 00:00-00:01" } },
+        ]),
         { status: 200 },
       );
     }
@@ -201,6 +199,7 @@ describe("nearby", () => {
     expect(openNow("Sa-Su 10:00-16:00", monNoon)).toBeNull();
     expect(openNow("24/7", monNoon)?.open).toBe(true);
     expect(openNow("sunrise-sunset", monNoon)).toBeNull();
+    expect(openNow("Mo-Sa 08:30-17:30, Su 10:00-16:00", monNoon)).toEqual({ open: true, until: "17:30" });
   });
   it("replies with the nearest open place and a maps link", async () => {
     const { env, seen } = extrasEnv();
@@ -209,7 +208,7 @@ describe("nearby", () => {
     expect(text).toContain("Nearest open pharmacy, Sir: Far Chemist");
     expect(text).toContain("https://maps.google.com/?q=51.15000,0.88000");
     const line = nearbyLine(
-      { label: "cafe", filter: "", openOnly: false, place: "" },
+      { label: "cafe", terms: ["cafe"], openOnly: false, place: "" },
       { centre: "Ashford, Kent", spots: [] },
     );
     expect(line).toContain("couldn't find a cafe");
@@ -234,7 +233,7 @@ describe("price watch", () => {
     const { env: env2, seen: seen2 } = { env, seen };
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.includes("stooq.com")) return new Response("Symbol,Date,Time,Open,High,Low,Close,Volume\nTSLA.US,d,t,1,1,1,190.5,1\n", { status: 200 });
+      if (url.includes("finance.yahoo.com")) return new Response(JSON.stringify({ chart: { result: [{ meta: { regularMarketPrice: 190.5 } }] } }), { status: 200 });
       if (url.includes("/Messages.json")) {
         const form = new URLSearchParams(String(init?.body ?? ""));
         seen2.texts.push({ to: form.get("To") ?? "", body: form.get("Body") ?? "" });
@@ -314,7 +313,7 @@ describe("prank calls", () => {
 
 describe("ring a business by name", () => {
   it("parses and keeps personal contacts to typed numbers", () => {
-    expect(ringByName("ring Dominos in Ashford and ask if they deliver to TN24")).toMatchObject({ name: "Dominos", place: "Ashford", verb: "ask" });
+    expect(ringByName("ring Dominos in Ashford and ask if they deliver to TN24")).toMatchObject({ name: "Dominos", place: "Ashford", verb: "ask", purpose: "if they deliver to TN24" });
     expect(ringByName("call the number and tell them hello")).toBeNull();
     expect(ringByName("call 07911 222333 and ask")).toBeNull();
     expect(personalContact("my mum")).toBe(true);

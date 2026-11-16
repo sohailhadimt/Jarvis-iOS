@@ -41,4 +41,12 @@ for (const m of rows) {
     body: redact(m.body).slice(0, 120),
   }));
 }
+const numbers = await get(`${base}/IncomingPhoneNumbers.json?PageSize=5`);
+for (const n of numbers.body.incoming_phone_numbers || []) {
+  console.log(`number_caps sms=${n.capabilities?.sms} mms=${n.capabilities?.mms} voice=${n.capabilities?.voice}`);
+}
+const calls = await get(`${base}/Calls.json?PageSize=8`);
+for (const c of (calls.body.calls || []).slice(0, 8)) {
+  console.log(JSON.stringify({ call: c.sid, to_owner: !!owner && c.to === owner, status: c.status, duration: c.duration, price: c.price, unit: c.price_unit, start: c.start_time }));
+}
 NODE
