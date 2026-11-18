@@ -908,7 +908,7 @@ export function imageLink(text: string): string | null {
   return url ?? null;
 }
 
-async function fetchImage(env: Env, url: string): Promise<{ mime: string; b64: string } | null> {
+async function fetchImage(env: Env, url: string, video = false): Promise<{ mime: string; b64: string } | null> {
   const twilio = /^https:\/\/api\.twilio\.com\//.test(url);
   const headers: Record<string, string> = { "user-agent": UA };
   if (twilio) {
@@ -922,9 +922,10 @@ async function fetchImage(env: Env, url: string): Promise<{ mime: string; b64: s
   try {
     const response = await fetch(url, { headers, redirect: "follow", signal: AbortSignal.timeout(10_000) });
     const mime = (response.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
-    if (!response.ok || !/^image\/(?:jpeg|jpg|png|webp|gif|heic|heif)$/.test(mime)) return null;
+    const kind = video ? /^video\/(?:mp4|3gpp|quicktime|webm|mpeg)$/ : /^image\/(?:jpeg|jpg|png|webp|gif|heic|heif)$/;
+    if (!response.ok || !kind.test(mime)) return null;
     const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.length < 200 || bytes.length > 6_000_000) return null;
+    if (bytes.length < 200 || bytes.length > (video ? 14_000_000 : 6_000_000)) return null;
     let binary = "";
     for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
     return { mime: mime === "image/jpg" ? "image/jpeg" : mime, b64: btoa(binary) };
@@ -943,6 +944,35 @@ export const VISION_MODELS: ["gemini" | "groq", string][] = [
   ["gemini", "gemini-flash-lite-latest"],
   ["groq", "qwen/qwen3.8-27b"],
 ];
+
+const VIDEO_PROMPT =
+  "You are J.A.R.V.I.S., Sir's British assistant, answering by message. Watch the video and reply with what matters: what happens, any text, numbers or speech worth knowing, and what he should do next. If he asked a question, answer it directly. Plain text, no markdown, under 500 characters, call him Sir once. Never invent what you can't see or hear.";
+
+/** Video understanding: Gemini watches the clip natively (no ffmpeg in a Worker to sample frames). */
+export async function watchVideo(env: Env, video: { mime: string; b64: string }, question: string): Promise<string | null> {
+  const key = (env.GEMINI_API_KEY ?? "").trim();
+  if (!key) return null;
+  for (const model of [GEMINI_MODEL, "gemini-3.5-flash-lite", "gemini-flash-lite-latest"]) {
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: "POST",
+        headers: { "x-goog-api-key": key, "content-type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: VIDEO_PROMPT }] },
+          contents: [{ role: "user", parts: [{ inline_data: { mime_type: video.mime, data: video.b64 } }, { text: question.trim() || "What's in this video, and what matters?" }] }],
+        }),
+        signal: AbortSignal.timeout(25_000),
+      });
+      if (!response.ok) continue;
+      const body = (await response.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+      const text = (body.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? "").join(" ").replace(/[*_#`]+/g, "").replace(/\s+/g, " ").trim();
+      if (text) return text.slice(0, 500);
+    } catch {
+      // next model
+    }
+  }
+  return null;
+}
 
 export interface VisionOptions {
   prompt?: string;
@@ -1235,6 +1265,13 @@ export async function smsExtras(env: Env, phone: string, text: string, media: st
       const question = clean.replace(/https?:\/\/\S+/gi, " ").trim();
       const seen = await describeImage(env, image, question);
       await ctx.send(seen ?? "I got the photo, Sir, but couldn't read it just now. Try again in a minute.");
+      return true;
+    }
+    const clip = media.length ? await fetchImage(env, link, true) : null;
+    if (clip) {
+      const question = clean.replace(/https?:\/\/\S+/gi, " ").trim();
+      const watched = await watchVideo(env, clip, question);
+      await ctx.send(watched ?? "I got the video, Sir, but couldn't watch it just now. Try again in a minute, or send a shorter clip.");
       return true;
     }
     if (media.length) {

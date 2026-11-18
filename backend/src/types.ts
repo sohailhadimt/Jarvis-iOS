@@ -71,6 +71,8 @@ export interface Env {
   TWILIO_ACCOUNT_SID?: string;
   TWILIO_AUTH_TOKEN?: string;
   TWILIO_FROM_NUMBER?: string;
+  /** Optional WhatsApp sender, e.g. the Twilio sandbox number. Unset keeps WhatsApp off. */
+  TWILIO_WHATSAPP_FROM?: string;
   ELEVENLABS_API_KEY?: string;
   ELEVENLABS_AGENT_ID?: string;
   /** In-app voice agent (signed URL only). Daily seconds cap is ELEVENLABS_APP_DAILY_SECONDS. */

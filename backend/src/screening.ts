@@ -383,7 +383,13 @@ async function smsWebhook(request: Request, env: Env, ctx: ExecutionContext): Pr
   const valid = await twilioRequestSigned(request, params, token);
   if (!valid) return xml("<Response></Response>", 403);
   const body = params.Body ?? "";
-  const from = params.From ?? "";
+  const wa = await import("./whatsapp");
+  const viaWhatsApp = wa.isWhatsAppSender(params.From ?? "");
+  const from = viaWhatsApp ? wa.stripWhatsApp(params.From ?? "") : params.From ?? "";
+  if (viaWhatsApp) {
+    const sender = toE164(from);
+    if (sender) await wa.openWindow(env, sender).catch(() => undefined);
+  }
   if (await ownerSmsDecision(env, from, body, new URL(request.url).origin).catch(() => false)) {
     return xml("<Response></Response>", 200);
   }
@@ -418,7 +424,8 @@ async function smsWebhook(request: Request, env: Env, ctx: ExecutionContext): Pr
   const count = Math.min(3, Number(params.NumMedia ?? "0") || 0);
   for (let i = 0; i < count; i++) {
     const url = params[`MediaUrl${i}`] ?? "";
-    if (/^https:\/\//.test(url) && /^image\//i.test(params[`MediaContentType${i}`] ?? "image/")) media.push(url);
+    const type = params[`MediaContentType${i}`] ?? "image/";
+    if (/^https:\/\//.test(url) && (/^image\//i.test(type) || (viaWhatsApp && /^video\//i.test(type)))) media.push(url);
   }
   if (body.trim() || media.length) {
     ctx.waitUntil(

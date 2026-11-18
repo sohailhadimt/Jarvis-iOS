@@ -641,6 +641,13 @@ export async function sendSmsResult(env: Env, to: string, body: string): Promise
   const missing = smsGap(account, token, from, dest, message);
   if (missing) return { ok: false, sid: "", status: "", errorCode: "", error: missing };
   const form = new URLSearchParams({ From: from ?? "", To: dest ?? "", Body: message });
+  const { replyChannel } = await import("./whatsapp");
+  const wa = dest ? await replyChannel(env, dest).catch(() => null) : null;
+  if (wa) {
+    form.set("From", wa);
+    form.set("To", `whatsapp:${dest}`);
+    form.set("Body", clip(body, 1500));
+  }
   try {
     const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Messages.json`, {
       method: "POST",
@@ -654,6 +661,11 @@ export async function sendSmsResult(env: Env, to: string, body: string): Promise
     });
     const text = await response.text();
     const parsed = parseSms(text);
+    if (!response.ok && wa) {
+      // WhatsApp refused (window closed, sandbox lapsed): fall back to a normal text.
+      await setState(env, `wa_window:${dest}`, "0").catch(() => undefined);
+      return sendSmsResult(env, to, body);
+    }
     if (!response.ok) {
       const error = publicSmsError(parsed.message || "Twilio rejected the text.");
       console.error("owner sms rejected", parsed.code || response.status, error);
