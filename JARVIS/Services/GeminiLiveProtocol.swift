@@ -57,7 +57,8 @@ enum LiveWire {
                       silenceMs: Int = silenceDurationMs) -> String {
         var setup: [String: Any] = [
             "model": "models/\(LiveModel.current)",
-            "responseModalities": [modality == .text ? "TEXT" : "AUDIO"],
+            // Live API rejects a top-level responseModalities (close 1007); it lives in generationConfig.
+            "generationConfig": ["responseModalities": [modality == .text ? "TEXT" : "AUDIO"]] as [String: Any],
             "systemInstruction": ["parts": [["text": String(instruction.prefix(12_000))]]],
             "inputAudioTranscription": [:] as [String: Any],
             "realtimeInputConfig": [

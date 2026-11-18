@@ -48,14 +48,27 @@ export interface BrainAnswer {
 const LIMIT = 60;
 let ready = false;
 
-export function brainSystem(channel: "sms" | "app"): string {
+export function brainSystem(channel: "sms" | "app", options?: { detail?: boolean }): string {
   if (channel === "sms") {
     return [
       BRAIN_PERSONA,
-      "This reply is an SMS. Write two or three short sentences. Each sentence ends with a full stop and can stand alone as its own text.",
+      "This reply is an SMS. You are texting Sir directly, as his trusted British butler and a sharp, well-read companion.",
+      "Talk naturally, like a real conversation: answer his questions, give a view when he asks for one, keep a light dry wit, and follow on from the earlier texts in this thread. Do not list what you can do or offer menus unless he asks.",
+      options?.detail
+        ? "He asked for detail, so you may write up to about 800 characters. Plain text, no markdown."
+        : "Keep it to one to three short sentences, under 300 characters in total.",
+      "Plain text only: no emoji, no markdown, no bullet points, and do not include URLs.",
+      "Write one single reply. Do not offer to order, buy, book, or arrange anything unless he asks for it.",
+      "You can send him voice notes, songs, raps and beatbox clips: when he asks, the server records them and texts a link. Never say you cannot send voice messages, audio, or recordings; if he wants one, tell him to ask for a voice note. Never write that you are sending, attaching, or offering up a recording yourself, and never end a reply with a colon.",
+      "If you are unsure about something current, say so briefly or use web_search. Never invent facts, prices, or phone numbers.",
       "You cannot dial from this chat. Never say you are calling now, ringing now, or that a call has been placed. The server places calls.",
       "A message that starts with call, ring, or phone waits until he replies YES. Replying 1, you call, or call him back to a call message is already approved.",
-      "Do not include URLs.",
+      "Never ask him to reply YES yourself, and never say a call, reminder or booking is scheduled, pending or booked: the server books those and confirms them itself. For 'call me at 12' just tell him to text it as 'call me at 12'.",
+      "He texts in UK slang: yh, ye and ya mean yeah; u is you; ur is your; wdym is what do you mean; 'waste man' is banter; 'what's good', 'wagwan' and 'wyd' are greetings (how are you / what are you doing), not requests for recommendations. Yh is never a name, a place or a shop.",
+      "Knock-knock jokes: you are the one listening. Reply only 'Who's there?', then '<name> who?', then laugh at the punchline.",
+      "For games (loadouts, metas, weapon stats), films, TV, sport, releases and prices, call web_search first and answer only from what it returns. Never invent fire rates, recoil, stats, cast lists, filming locations or dates.",
+      "This UK number cannot receive photos or videos: picture messages never reach you. If he says he sent one, say plainly that it didn't come through on this line and ask him to describe it or send a link.",
+      "Do not end with 'let me know if…', 'take care' or an offer of more help.",
     ].join("\n");
   }
   return [
@@ -64,8 +77,14 @@ export function brainSystem(channel: "sms" | "app"): string {
   ].join("\n");
 }
 
+/** Texts kept per phone for the SMS conversation. */
+export const SMS_HISTORY = 20;
+
 /** Rewrites a claim that a call is already ringing when no tool placed one. */
 export function guardUnplacedCall(text: string): string {
+  if (/\b(?:can(?:not|'t|’t)|unable to|not able to|don't have the ability to)\b.{0,30}\b(?:send|record|make|do|create)\b.{0,25}\b(?:voice|audio|recordings?|beatbox|sing)/i.test(text)) {
+    return "Ask me for a voice note, Sir, and I'll text you a link that plays it.";
+  }
   if (unplacedClaim(text)) return "I have not placed a call, Sir. Nothing was dialled.";
   if (/unable to place|can(?:not|'t) (?:place|make) (?:a )?(?:telephone |phone )?calls?|can(?:not|'t) (?:use the phone|call)\b/i.test(text)) {
     return "Tell me the number and what to say, Sir. Nothing has been dialled yet.";
@@ -87,6 +106,8 @@ export async function ensureBrain(env: Env): Promise<void> {
     )`,
   );
   await dbRun(env, "CREATE INDEX IF NOT EXISTS idx_brain_turns_created ON brain_turns (created_at)");
+  await dbRun(env, "CREATE INDEX IF NOT EXISTS idx_brain_turns_ref ON brain_turns (source, ref)").catch(() => 0);
+  await dbRun(env, "CREATE INDEX IF NOT EXISTS idx_outbound_calls_updated ON outbound_calls (updated_at)").catch(() => 0);
   await dbRun(
     env,
     `CREATE TABLE IF NOT EXISTS brain_reminders (
@@ -121,20 +142,41 @@ export async function rememberLine(
   return true;
 }
 
+/** Calls already copied into the brain by this isolate, keyed by id and last update. Skips repeat work on every history read. */
+let lastCallSync = "";
+
 export async function syncCalls(env: Env): Promise<void> {
   await ensureBrain(env);
+  // Ids and stamps first. The transcripts are only read when a call changed since the last sync.
+  const recent = (await dbAll<{ id: string; updated_at: string | null }>(
+    env,
+    "SELECT id, updated_at FROM outbound_calls WHERE to_number NOT LIKE '+447700900%' ORDER BY updated_at DESC LIMIT 8",
+  ).catch(() => [])).filter((call) => /^call_[A-Za-z0-9]+$/.test(call.id));
+  if (!recent.length) return;
+  const signature = recent.map((call) => `${call.id}@${call.updated_at ?? ""}`).join(",");
+  if (signature === lastCallSync) return;
   const calls = await dbAll<{ id: string; transcript_json: string | null; updated_at: string | null }>(
     env,
-    "SELECT id, transcript_json, updated_at FROM outbound_calls ORDER BY updated_at DESC LIMIT 8",
-  ).catch(() => []);
+    `SELECT id, transcript_json, updated_at FROM outbound_calls WHERE id IN (${recent.map(() => "?").join(",")})`,
+    recent.map((call) => call.id),
+  ).catch(() => null);
+  if (!calls) return;
+  // One read for every call's existing lines instead of one query per call.
+  const marks = calls.map(() => "?").join(",");
+  const existing = await dbAll<{ ref: string; body: string }>(
+    env,
+    `SELECT ref, body FROM brain_turns WHERE source = 'call' AND ref IN (${marks})`,
+    calls.map((call) => call.id),
+  ).catch(() => null);
+  if (existing === null) return;
+  const seen = new Map<string, Set<string>>();
+  for (const row of existing) {
+    const set = seen.get(row.ref) ?? new Set<string>();
+    set.add(row.body);
+    seen.set(row.ref, set);
+  }
   for (const call of calls) {
-    if (!/^call_[A-Za-z0-9]+$/.test(call.id)) continue;
-    const existing = await dbAll<{ body: string }>(
-      env,
-      "SELECT body FROM brain_turns WHERE source = 'call' AND ref = ?",
-      [call.id],
-    ).catch(() => []);
-    const have = new Set(existing.map((row) => row.body));
+    const have = seen.get(call.id) ?? new Set<string>();
     for (const line of readTranscript(call.transcript_json).slice(-6)) {
       const body = cleanLine(line.text);
       if (!body || have.has(body)) continue;
@@ -142,6 +184,7 @@ export async function syncCalls(env: Env): Promise<void> {
       have.add(body);
     }
   }
+  lastCallSync = signature;
 }
 
 export async function listTurns(env: Env): Promise<BrainTurn[]> {
@@ -178,20 +221,46 @@ export async function createReminder(env: Env, text: string, dueAt: string | nul
   return "Reminder saved, Sir. Nothing was sent.";
 }
 
-/** Answer from the shared history. The caller stores the user line first. */
-export async function brainReply(env: Env, channel: "sms" | "app"): Promise<BrainAnswer> {
-  await syncCalls(env);
+/**
+ * Answer from history. The caller stores the user line first.
+ * SMS with a phone reads that phone's own last 20 texts, so a reply follows on from the thread
+ * and never picks up another caller's transcript or a test thread. The app keeps the shared brain.
+ */
+export async function brainReply(
+  env: Env,
+  channel: "sms" | "app",
+  options?: { phone?: string; detail?: boolean },
+): Promise<BrainAnswer> {
+  const phone = channel === "sms" ? options?.phone ?? "" : "";
+  if (!phone) await syncCalls(env);
   const facts = await dbAll<{ detail: string }>(env, "SELECT detail FROM owner_facts ORDER BY created_at DESC LIMIT 12").catch(() => []);
   const reminders = await openReminders(env).catch(() => []);
-  const turns = await dbAll<{ role: string; body: string }>(
-    env,
-    "SELECT role, body FROM brain_turns ORDER BY created_at DESC LIMIT 16",
-  ).catch(() => []);
+  const turns = phone
+    ? await dbAll<{ role: string; body: string }>(
+        env,
+        "SELECT role, body FROM sms_turns WHERE phone = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+        [phone, SMS_HISTORY],
+      ).catch(() => [])
+    : await dbAll<{ role: string; body: string }>(
+        env,
+        "SELECT role, body FROM brain_turns ORDER BY created_at DESC LIMIT 16",
+      ).catch(() => []);
+  let languageLine = "";
+  let pinned = "";
+  if (phone) {
+    const { readLanguage, smsLanguageRule, pinnedLanguageNudge } = await import("./languages");
+    const latest = turns.find((t) => t.role === "user")?.body ?? "";
+    const pref = await readLanguage(env, phone).catch(() => null);
+    languageLine = smsLanguageRule(pref, latest);
+    pinned = pinnedLanguageNudge(pref, latest);
+  }
   const messages: ChatMessage[] = [
     {
       role: "system",
       content: [
-        brainSystem(channel),
+        brainSystem(channel, { detail: options?.detail }),
+        ...(languageLine ? [languageLine] : []),
+        `It is ${londonNow()} in London.`,
         facts.length ? `Known facts:\n${facts.map((fact) => `- ${fact.detail}`).join("\n")}` : "No saved facts yet.",
         reminders.length ? `Open reminders:\n${reminders.map((item) => `- ${item}`).join("\n")}` : "No open reminders.",
       ].join("\n"),
@@ -202,13 +271,24 @@ export async function brainReply(env: Env, channel: "sms" | "app"): Promise<Brai
     if (!turn.body) continue;
     messages.push({ role: turn.role, content: turn.body });
   }
+  // A pinned language goes last, right after his text, where the model cannot miss it.
+  if (pinned) {
+    const last = [...messages].reverse().find((m) => m.role === "user");
+    if (last && typeof last.content === "string") last.content = `${last.content}\n\n(${pinned})`;
+    else messages.push({ role: "user", content: `(${pinned})` });
+  }
+  const finish = (raw: string | null): string => {
+    const text = phone ? smsAnswer(raw ?? "", Boolean(options?.detail)) : spokenAnswer(raw ?? "");
+    return guardUnplacedCall(text ?? "I've noted that, Sir.");
+  };
   const tools = brainTools();
-  const first = await completeChat(env, messages, tools);
+  // An SMS reply runs inside the webhook's waitUntil, so a slow Gemini must hand over to Groq in time.
+  const started = Date.now();
+  const budget = phone ? { timeoutMs: 9_000, budgetMs: 24_000 } : undefined;
+  const first = await completeChat(env, messages, tools, budget);
   if (!first.ok) return { text: CHAT_FALLBACK, error: `${first.code}: ${first.message}` };
   const calls = first.message.tool_calls ?? [];
-  if (calls.length === 0) {
-    return { text: guardUnplacedCall(spokenAnswer(first.message.content ?? "") ?? "I've noted that, Sir."), error: null };
-  }
+  if (calls.length === 0) return { text: finish(first.message.content), error: null };
   messages.push(first.message);
   for (const call of calls.slice(0, 3)) {
     const result = await runBrainTool(env, call.function.name, call.function.arguments, channel);
@@ -219,9 +299,50 @@ export async function brainReply(env: Env, channel: "sms" | "app"): Promise<Brai
       name: call.function.name,
     });
   }
-  const second = await completeChat(env, messages, null);
+  const second = await completeChat(
+    env,
+    messages,
+    null,
+    budget ? { timeoutMs: 9_000, budgetMs: Math.max(3_000, budget.budgetMs - (Date.now() - started)) } : undefined,
+  );
   if (!second.ok) return { text: "I've noted that, Sir.", error: `${second.code}: ${second.message}` };
-  return { text: guardUnplacedCall(spokenAnswer(second.message.content ?? "") ?? "I've noted that, Sir."), error: null };
+  return { text: finish(second.message.content), error: null };
+}
+
+/** SMS chat text: no links or markdown, and short unless he asked for detail. */
+/** Drops a trailing "let me know if…" / "take care" sentence when something else was said. */
+export function dropTrailingOffers(text: string): string {
+  const parts = text.split(/(?<=[.!?])\s+/);
+  while (parts.length > 1 && /^(?:please\s+|do\s+)?(?:let me know|feel free|take care|i'?m here (?:if|whenever)|is there anything else|anything else i can|how (?:else )?may i (?:help|assist))/i.test(parts[parts.length - 1]!.trim())) {
+    parts.pop();
+  }
+  return parts.join(" ");
+}
+
+export function smsAnswer(raw: string, detail: boolean): string | null {
+  if (!detail) {
+    const spoken = spokenAnswer(raw.replace(/[*_#`]+/g, ""));
+    return spoken ? dropTrailingOffers(spoken) : spoken;
+  }
+  const text = raw
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/[*_#`]+/g, "")
+    .replace(/^\s*[-•]\s+/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length < 2 ? null : dropTrailingOffers(text).slice(0, 900);
+}
+
+function londonNow(): string {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date());
 }
 
 export function brainTools(): LlmTool[] {
@@ -248,6 +369,13 @@ export function brainTools(): LlmTool[] {
       due: { type: "string" },
     }, ["title"]),
     tool("get_briefing", "Read the briefing and the open reminders.", {}, []),
+    tool("get_weather", "Live weather for any place: current conditions and the forecast. Defaults to Ashford, Kent.", {
+      place: { type: "string" },
+      when: { type: "string", description: "today, tomorrow, a weekday, this weekend, or this week" },
+    }, []),
+    tool("lookup_contact", "Look up a name in Sir's own phone contacts. Returns up to three matches with numbers.", {
+      name: { type: "string" },
+    }, ["name"]),
   ];
 }
 
@@ -295,6 +423,18 @@ export async function runBrainTool(env: Env, name: string, raw: string, channel:
       return { ok: true, briefing: `Briefing is not available just now.${extra}` };
     }
   }
+  if (name === "get_weather") {
+    const { weatherFor } = await import("./live-tools");
+    const got = await weatherFor(typeof args.place === "string" ? args.place : "", typeof args.when === "string" ? args.when : "");
+    return { ok: got.ok, weather: got.text };
+  }
+  if (name === "lookup_contact") {
+    const { findContacts, maskPhone } = await import("./contacts");
+    const q = typeof args.name === "string" ? args.name : "";
+    const found = await findContacts(env, q, 3).catch(() => []);
+    if (!found.length) return { ok: true, matches: [], message: `No contact matches ${q}. He can tap Sync contacts in the app.` };
+    return { ok: true, matches: found.map((f) => ({ name: f.name, phone: maskPhone(f.phone), label: f.label })) };
+  }
   if (name === "web_search" || name === "draft_document" || name === "request_approval") {
     const desk = await import("./sms-desk");
     return desk.runSmsTool(env, name, raw);
@@ -312,8 +452,7 @@ export function personaResponse(): Response {
 }
 
 export async function historyResponse(env: Env): Promise<Response> {
-  const turns = await listTurns(env);
-  const reminders = await openReminders(env).catch(() => []);
+  const [turns, reminders] = await Promise.all([listTurns(env), openReminders(env).catch(() => [] as string[])]);
   return json({
     revision: BRAIN_REVISION,
     voice: "George",

@@ -1,3 +1,4 @@
+import { createTwilioCall, publicBase, twilioUrl } from "./public-url";
 import { awayFirstMessage, awayPrompt, readActiveAway, rememberRecording } from "./call-desk";
 import {
   INTERCEPTOR_DECLINE,
@@ -30,6 +31,8 @@ import { forcePolly } from "./outbound-speech";
 import type { Env } from "./types";
 import { asgLineOn, asgTwiml } from "./asg-phone";
 import { readOwnerMobile } from "./owner-alert";
+import { callIsLive, closeOpenRows, isOwnerCaller } from "./hangup";
+import { DESK_BRIEF, deskAgentId, ownerSmsDecision } from "./desk";
 
 const ACTIVE = ["screening", "listening", "handling", "message", "connecting", "ringing", "in_progress", "wrapping"];
 
@@ -99,11 +102,21 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
   const ours = toE164(env.TWILIO_FROM_NUMBER ?? "");
   const dialed = toE164(params.To ?? "") ?? ours;
   if (!caller || (ours && caller === ours)) return xml("<Response><Hangup/></Response>", 200);
+  const retried = await callForSid(env, params.CallSid ?? "");
+  if (retried) {
+    // Twilio retried the same call's webhook. Reuse the row instead of adding a second card.
+    console.warn("inbound webhook retried for an existing CallSid", retried.id);
+  }
   const owner = await readOwnerMobile(env).catch(() => null);
-  if (asgLineOn(env) && !pollyInbound(env) && owner && caller !== owner) {
-    const asgId = newId("call");
+  if (isOwnerCaller(caller, owner)) {
+    // Sir ringing his own JARVIS line is not a caller to screen: no card, no push, George answers him.
+    return ownerOnLine(request, env, caller, dialed || ours || caller, params.CallSid ?? "", retried?.id ?? null);
+  }
+  const desk = pollyInbound(env) ? null : await deskAgentId(env).catch(() => null);
+  if (!desk && asgLineOn(env) && !pollyInbound(env) && owner && caller !== owner) {
+    const asgId = retried?.id ?? newId("call");
     const stamp = nowIso();
-    await dbRun(
+    if (!retried) await dbRun(
       env,
       `INSERT INTO outbound_calls
         (id, contact_name, to_number, brief, status, twilio_sid, conversation_id, transcript_json, summary, error, created_at, updated_at)
@@ -114,10 +127,10 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
     if (twiml) return new Response(twiml, { status: 200, headers: { "content-type": "text/xml; charset=utf-8" } });
   }
   const permission = await matchPermission(env, caller);
-  const id = newId("call");
+  const id = retried?.id ?? newId("call");
   const now = nowIso();
   const sid = params.CallSid ?? "";
-  try {
+  if (!retried) try {
     await dbRun(
       env,
       `INSERT INTO outbound_calls
@@ -182,7 +195,14 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
     first,
     prompt,
     contact: "Caller",
-    brief: intercept ? "Take a message." : away ? away.instruction : "Find out who is calling and why. Do not reveal personal information.",
+    brief: intercept
+      ? "Take a message."
+      : away
+        ? away.instruction
+        : desk
+          ? DESK_BRIEF
+          : "Find out who is calling and why. Do not reveal personal information.",
+    ...(desk ? { agentId: desk, variables: { jarvis_call_id: id } } : {}),
   });
   if (!connected.twiml) {
     const reason = connected.reason || "no_twiml";
@@ -209,6 +229,100 @@ async function inboundCall(request: Request, env: Env, ctx: ExecutionContext): P
     ]).catch(() => undefined);
   }
   return new Response(connected.twiml, { status: 200, headers: { "content-type": "text/xml; charset=utf-8" } });
+}
+
+/** The row a Twilio CallSid already created, so a retried webhook never stores a second card. */
+export async function callForSid(env: Env, sid: string): Promise<{ id: string } | null> {
+  if (!sid) return null;
+  return dbFirst<{ id: string }>(env, "SELECT id FROM outbound_calls WHERE twilio_sid = ? ORDER BY created_at ASC LIMIT 1", [sid]).catch(
+    () => null,
+  );
+}
+
+export const OWNER_LINE_GREETING = "JARVIS here, Sir. How can I help?";
+
+export function ownerLinePrompt(): string {
+  return [
+    "You are JARVIS, the personal assistant of Master Hadi (Sohail). The caller is Master Hadi himself, your owner, ringing his own JARVIS line.",
+    "Speak as a British butler. Address him as Sir. Keep every answer to one to three short spoken sentences. No lists or markdown.",
+    "Help him directly: answer questions, take notes and reminders, and tell him what you can do. Do not screen him, do not ask who is calling, and do not take a message for him.",
+    "Never claim a call, text, booking or payment has happened unless a tool result says so. Anything that spends money or contacts someone else waits for his approval in the app.",
+  ].join(" ");
+}
+
+/**
+ * The owner's own call, matched by caller ID only. He gets his personal agent (greeting by name, context,
+ * live tools). If that agent is not set up yet, the main agent with forced owner overrides. Never the desk.
+ */
+async function ownerOnLine(request: Request, env: Env, caller: string, to: string, sid: string, existing: string | null = null): Promise<Response> {
+  const id = existing ?? newId("call");
+  const now = nowIso();
+  if (!existing) await dbRun(
+    env,
+    `INSERT INTO outbound_calls
+      (id, contact_name, to_number, brief, status, twilio_sid, conversation_id, transcript_json, summary, error, created_at, updated_at)
+     VALUES (?, 'Master Hadi', ?, 'Owner on his JARVIS line', 'in_progress', ?, NULL, '[]', NULL, NULL, ?, ?)`,
+    [id, caller, sid || null, now, now],
+  ).catch(() => undefined);
+  const { connected, greeting, path } = await registerOwner(env, id, caller, to);
+  if (connected.twiml) {
+    await recordHandoff(env, { callId: id, path, ok: true, reason: "twiml" }).catch(() => undefined);
+    if (connected.conversationId) {
+      await dbRun(env, "UPDATE outbound_calls SET conversation_id = ?, updated_at = ? WHERE id = ?", [connected.conversationId, nowIso(), id]).catch(
+        () => undefined,
+      );
+    }
+    return new Response(connected.twiml, { status: 200, headers: { "content-type": "text/xml; charset=utf-8" } });
+  }
+  const reason = connected.reason || "no_twiml";
+  await recordHandoff(env, { callId: id, path, ok: false, reason, detail: connected.error || "" }).catch(() => undefined);
+  await dbRun(env, "UPDATE outbound_calls SET transcript_json = ?, error = ?, updated_at = ? WHERE id = ?", [
+    JSON.stringify([{ role: "assistant", text: greeting }]),
+    connected.error || reason,
+    nowIso(),
+    id,
+  ]).catch(() => undefined);
+  return xml(converseTwiml(greeting, converseAction(request, id)), 200);
+}
+
+/** Register Sir's call: the personal agent first; the main agent with forced owner overrides as the fallback. */
+export async function registerOwner(env: Env, id: string, caller: string, to: string) {
+  const own = await import("./owner-agent");
+  const greeting = own.ownerGreeting();
+  const variables = await own.ownerVariables(env, id);
+  const agentId = await own.ownerAgentId(env).catch(() => null);
+  const base = {
+    id,
+    from: caller,
+    to,
+    direction: "inbound" as const,
+    first: greeting,
+    contact: "Master Hadi",
+    brief: "Sir is calling his own JARVIS line. Help him directly. Do not screen him.",
+  };
+  if (agentId) {
+    const connected = await registerElevenLabsCall(env, { ...base, prompt: "", agentId, variables });
+    if (connected.twiml) return { connected, greeting, path: "owner-agent" };
+    console.error("owner agent hand-off failed, falling back", JSON.stringify({ reason: connected.reason ?? "" }));
+  }
+  const connected = await registerElevenLabsCall(env, {
+    ...base,
+    prompt: own.ownerFallbackPrompt(variables),
+    variables: { jarvis_call_id: id },
+    forceOverrides: true,
+  });
+  return { connected, greeting, path: "owner" };
+}
+
+/** App-token debug: the TwiML the owner's call would get right now, with any token or URL secret masked. */
+export async function ownerLinePreview(env: Env): Promise<Response> {
+  const owner = await readOwnerMobile(env).catch(() => null);
+  const ours = toE164(env.TWILIO_FROM_NUMBER ?? "");
+  if (!owner || !ours) return apiError(503, "not_configured", "Owner mobile or Twilio number is not set.");
+  const id = newId("call");
+  const { connected, greeting, path } = await registerOwner(env, id, owner, ours);
+  const masked = (connected.twiml ?? "").replace(/(token|signature|auth|key)=([^&"'<\s]+)/gi, "$1=***").replace(/\+\d{8,15}/g, "[number]");
+  return json({ ok: Boolean(connected.twiml), path, greeting, reason: connected.reason ?? null, error: connected.error ? "set" : null, twiml: masked });
 }
 
 async function inboundStatus(request: Request, env: Env): Promise<Response> {
@@ -269,7 +383,16 @@ async function smsWebhook(request: Request, env: Env, ctx: ExecutionContext): Pr
   const valid = await twilioRequestSigned(request, params, token);
   if (!valid) return xml("<Response></Response>", 403);
   const body = params.Body ?? "";
-  const from = params.From ?? "";
+  const wa = await import("./whatsapp");
+  const viaWhatsApp = wa.isWhatsAppSender(params.From ?? "");
+  const from = viaWhatsApp ? wa.stripWhatsApp(params.From ?? "") : params.From ?? "";
+  if (viaWhatsApp) {
+    const sender = toE164(from);
+    if (sender) await wa.openWindow(env, sender).catch(() => undefined);
+  }
+  if (await ownerSmsDecision(env, from, body, new URL(request.url).origin).catch(() => false)) {
+    return xml("<Response></Response>", 200);
+  }
   const action = smsAction(body);
   if (action) {
     const { readOwnerMobile } = await import("./owner-alert");
@@ -297,9 +420,16 @@ async function smsWebhook(request: Request, env: Env, ctx: ExecutionContext): Pr
       }
     }
   }
-  if (body.trim()) {
+  const media: string[] = [];
+  const count = Math.min(3, Number(params.NumMedia ?? "0") || 0);
+  for (let i = 0; i < count; i++) {
+    const url = params[`MediaUrl${i}`] ?? "";
+    const type = params[`MediaContentType${i}`] ?? "image/";
+    if (/^https:\/\//.test(url) && (/^image\//i.test(type) || (viaWhatsApp && /^video\//i.test(type)))) media.push(url);
+  }
+  if (body.trim() || media.length) {
     ctx.waitUntil(
-      import("./sms-desk").then((mod) => mod.handleInboundSms(env, from, body).catch(() => undefined)),
+      import("./sms-desk").then((mod) => mod.handleInboundSms(env, from, body, media).catch(() => undefined)),
     );
   }
   return xml("<Response></Response>", 200);
@@ -314,7 +444,7 @@ async function joinWebhook(request: Request, env: Env, id: string): Promise<Resp
   const room = `jarvis-${id}`;
   const flag = muted ? ' muted="true"' : "";
   return xml(
-    `<Response><Dial><Conference beep="false" startConferenceOnEnter="true" endConferenceOnExit="true"${flag}>${escapeXml(room)}</Conference></Dial></Response>`,
+    `<Response><Dial><Conference beep="false" waitUrl="" startConferenceOnEnter="true" endConferenceOnExit="true"${flag}>${escapeXml(room)}</Conference></Dial></Response>`,
     200,
   );
 }
@@ -372,6 +502,11 @@ async function applyDecision(
     };
   }
   if (!call.twilio_sid) return { ok: false, response: apiError(409, "not_ready", "The call is not connected yet.") };
+  if (!(await callIsLive(env, call.twilio_sid))) {
+    // The caller has gone. Never ring Sir's mobile into an empty room.
+    await mark(env, id, "completed", action).catch(() => undefined);
+    return { ok: false, response: apiError(409, "call_ended", "That caller has already hung up.") };
+  }
   if (action === "decline") {
     const updated = await updateTwiml(env, call.twilio_sid, say("I'm sorry, Master Hadi can't take your call. Goodbye."));
     if (!updated.ok) return { ok: false, response: apiError(502, "twilio", updated.error) };
@@ -387,14 +522,18 @@ async function applyDecision(
   }
   if (action === "takeover") {
     const room = `jarvis-${id}`;
-    const dialed = await createCall(env, mobile ?? "", from ?? "", `<?xml version="1.0" encoding="UTF-8"?><Response>${joinTwiml(room, false)}</Response>`);
-    if (!dialed.ok) return { ok: false, response: apiError(502, "twilio", dialed.error) };
+    // Move the caller first. If that fails, Sir's mobile is never rung.
     const moved = await updateTwiml(
       env,
       call.twilio_sid,
       `<Response><Say language="en-GB" voice="${FALLBACK_SAY_VOICE}">Connecting you to Master Hadi.</Say>${joinTwiml(room, false)}</Response>`,
     );
     if (!moved.ok) return { ok: false, response: apiError(502, "twilio", moved.error) };
+    const dialed = await createCall(env, mobile ?? "", from ?? "", `<?xml version="1.0" encoding="UTF-8"?><Response>${joinTwiml(room, false)}</Response>`);
+    if (!dialed.ok) {
+      await updateTwiml(env, call.twilio_sid, say("I'm sorry, Master Hadi can't take your call just now. Goodbye.")).catch(() => undefined);
+      return { ok: false, response: apiError(502, "twilio", dialed.error) };
+    }
     await mark(env, id, "connecting", "takeover");
     return { ok: true, audio: "mobile" };
   }
@@ -429,12 +568,16 @@ async function redirectCall(env: Env, callSid: string, id: string, mode: string,
   const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
   const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
   const form = new URLSearchParams();
-  form.set("Url", `${origin.replace(/\/$/, "")}/calls/voice/${id}?mode=${mode}`);
+  form.set("Url", twilioUrl(publicBase(env, origin), `/calls/voice/${encodeURIComponent(id)}`, { mode }));
   form.set("Method", "POST");
   return twilioPost(account, token, `/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls/${encodeURIComponent(callSid)}.json`, form);
 }
 
+const STALE_CARD_MS = 30 * 60 * 1000;
+
 async function activeCalls(env: Env): Promise<Response> {
+  // A row whose hang-up webhook never arrived must not live on as a ghost card.
+  await closeOpenRows(env, STALE_CARD_MS);
   try {
     const rows = await dbAll<{
       id: string;
@@ -453,9 +596,10 @@ async function activeCalls(env: Env): Promise<Response> {
       personal_requested: number;
       personal_note: string;
       decision: string | null;
+      twilio_sid: string | null;
     }>(
       env,
-      `SELECT c.id, c.contact_name, c.to_number, c.brief, c.status, c.transcript_json, c.summary, c.error, c.created_at, c.updated_at,
+      `SELECT c.id, c.contact_name, c.to_number, c.brief, c.status, c.transcript_json, c.summary, c.error, c.created_at, c.updated_at, c.twilio_sid,
               s.caller_name, s.reason, s.personal_allowed, s.personal_requested, s.personal_note, s.decision
        FROM outbound_calls c
        JOIN call_screen s ON s.call_id = c.id
@@ -463,8 +607,16 @@ async function activeCalls(env: Env): Promise<Response> {
        ORDER BY c.created_at DESC LIMIT 10`,
       ACTIVE,
     );
+    // One card per caller and per Twilio CallSid: a retried webhook must never show the same call twice.
+    const seen = new Set<string>();
+    const latest = rows.filter((row) => {
+      const keys = [row.to_number || row.id, row.twilio_sid ? `sid:${row.twilio_sid}` : ""].filter(Boolean);
+      if (keys.some((key) => seen.has(key))) return false;
+      for (const key of keys) seen.add(key);
+      return true;
+    });
     return json({
-      calls: rows.map((row) => ({
+      calls: latest.map((row) => ({
         id: row.id,
         contact_name: row.contact_name,
         to: row.to_number,
@@ -624,6 +776,7 @@ export async function pushNotice(
   body: string,
   extra: Record<string, string>,
   category = "JARVIS_CALL",
+  background = false,
 ): Promise<boolean> {
   const jwt = await apnsJwt(env);
   if (!jwt) return false;
@@ -647,7 +800,7 @@ export async function pushNotice(
         "apns-priority": "10",
       },
       body: JSON.stringify({
-        aps: { alert: { title, body }, sound: "default", category },
+        aps: { alert: { title, body }, sound: "default", category, ...(background ? { "content-available": 1 } : {}) },
         ...extra,
       }),
     }).catch(() => null);
@@ -688,8 +841,9 @@ async function sendSms(env: Env, body: string): Promise<void> {
 async function createCall(env: Env, to: string, from: string, twiml: string): Promise<{ ok: true } | { ok: false; error: string }> {
   const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
   const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
-  const form = new URLSearchParams({ To: to, From: from, Twiml: twiml });
-  return twilioPost(account, token, `/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls.json`, form);
+  if (!account || !token) return { ok: false, error: "Calling is not set up." };
+  const attempt = await createTwilioCall(env, () => new URLSearchParams({ To: to, From: from, Twiml: twiml }));
+  return attempt.ok ? { ok: true } : { ok: false, error: twilioMessage(attempt.body) };
 }
 
 async function updateTwiml(env: Env, callSid: string, twiml: string): Promise<{ ok: true } | { ok: false; error: string }> {
@@ -752,7 +906,7 @@ async function mark(env: Env, id: string, status: string, decision: string): Pro
 
 function joinTwiml(room: string, muted: boolean): string {
   const flag = muted ? ' muted="true"' : "";
-  return `<Dial><Conference beep="false" startConferenceOnEnter="true" endConferenceOnExit="true"${flag}>${escapeXml(room)}</Conference></Dial>`;
+  return `<Dial><Conference beep="false" waitUrl="" startConferenceOnEnter="true" endConferenceOnExit="true"${flag}>${escapeXml(room)}</Conference></Dial>`;
 }
 
 async function readBody(request: Request): Promise<{ ok: true; value: Record<string, unknown> } | { ok: false; response: Response }> {

@@ -78,6 +78,9 @@ final class SpeechListener {
     }
     private(set) var lastCaptureFailure: String?
     private var playbackPlayer: AVAudioPlayerNode?
+    /// The tap that is running now, so the engine can be rebuilt after an interruption or a route change.
+    private var currentTap: (@Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void)?
+    private var currentTapSize: AVAudioFrameCount = 1024
     var speechBandRatio: Double { gate.speechBandRatio }
     var allowsUtterance: Bool { gate.allowsUtterance }
     var sharedPlayback: AVAudioPlayerNode? { playbackPlayer }
@@ -86,10 +89,19 @@ final class SpeechListener {
 
     var isOnDevice: Bool { recognizer?.supportsOnDeviceRecognition ?? false }
     var isEngineRunning: Bool { engine?.isRunning ?? false }
+    /// True while the raw microphone feed for a live voice session is installed.
+    var isLiveFeed: Bool { liveFeed }
+    /// Identity of the capture engine, so the engine only reacts to its own configuration changes.
+    var engineIdentity: ObjectIdentifier? { engine.map { ObjectIdentifier($0) } }
 
     /// Starts a silent input tap when recognition could not, so the process is not suspended.
     func keepEngineAlive() throws {
         if isEngineRunning, tapInstalled { return }
+        // Never swap the live microphone feed for a silent tap: the agent would hear nothing.
+        if liveFeed {
+            try restartLiveEngine()
+            return
+        }
         try installTap(AudioTaps.silentTap(), bufferSize: 1024)
     }
 
@@ -172,6 +184,33 @@ final class SpeechListener {
         refreshVoiceProcessing()
     }
 
+    /// A phone call, Siri, new headphones, or a media-services reset stopped or invalidated the engine.
+    /// Builds a fresh engine on the current route and reinstalls the live tap. The shared player is new afterwards.
+    func rebuildLiveEngine() throws {
+        guard liveFeed, let block = currentTap else { return }
+        let size = currentTapSize
+        teardownEngine()
+        try installTap(block, bufferSize: size)
+        playbackPlayer?.play()
+        liveFeed = true
+        refreshVoiceProcessing()
+    }
+
+    /// After a configuration change iOS stops the engine. Restart the same engine and reinstall the live tap
+    /// on the current hardware format. Voice processing is not toggled again, because toggling it posts
+    /// another configuration change and the rebuild would loop forever.
+    func restartLiveEngine() throws {
+        guard liveFeed, let block = currentTap else { return }
+        guard engine != nil else {
+            try rebuildLiveEngine()
+            return
+        }
+        try installTap(block, bufferSize: currentTapSize)
+        playbackPlayer?.play()
+        liveFeed = true
+        refreshVoiceProcessing()
+    }
+
     func stop() {
         bargeMonitor = false
         liveFeed = false
@@ -235,11 +274,17 @@ final class SpeechListener {
         let engine = try makeEngine()
         enableVoiceProcessing(engine)
         removeTapIfInstalled()
+        guard !CellularCall.active else { throw ListenerError.noInput }
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { throw ListenerError.noInput }
+        // The hardware side must be live too; a 0 Hz input during a call or route change crashes installTap.
+        let hardware = input.inputFormat(forBus: 0)
+        guard hardware.sampleRate > 0, hardware.channelCount > 0 else { throw ListenerError.noInput }
         input.installTap(onBus: 0, bufferSize: bufferSize, format: format, block: block)
         tapInstalled = true
+        currentTap = block
+        currentTapSize = bufferSize
         // Attach before start so voice processing's echo reference includes TTS.
         attachPlayback(engine)
         if !engine.isRunning {

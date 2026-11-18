@@ -236,6 +236,7 @@ CREATE TABLE IF NOT EXISTS outbound_calls (
 );
 
 CREATE INDEX IF NOT EXISTS idx_outbound_calls_created ON outbound_calls (created_at);
+CREATE INDEX IF NOT EXISTS idx_outbound_calls_updated ON outbound_calls (updated_at);
 
 -- Inbound screening. Default is to deny personal details.
 CREATE TABLE IF NOT EXISTS call_screen (
@@ -539,6 +540,7 @@ CREATE TABLE IF NOT EXISTS brain_turns (
 );
 
 CREATE INDEX IF NOT EXISTS idx_brain_turns_created ON brain_turns (created_at);
+CREATE INDEX IF NOT EXISTS idx_brain_turns_ref ON brain_turns (source, ref);
 
 CREATE TABLE IF NOT EXISTS brain_reminders (
   id TEXT PRIMARY KEY,
@@ -596,3 +598,70 @@ SELECT
   NULL,
   '1970-01-01T00:00:00.000Z'
 WHERE NOT EXISTS (SELECT 1 FROM scheduled_jobs WHERE id = 'job_pipeline_monitor');
+
+-- Call desk: Sir's live Allow/Deny for a caller's question or location request.
+CREATE TABLE IF NOT EXISTS owner_requests (
+  id TEXT PRIMARY KEY, call_id TEXT NOT NULL, kind TEXT NOT NULL, question TEXT NOT NULL DEFAULT '',
+  caller_name TEXT NOT NULL DEFAULT '', caller_phone TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending',
+  answer TEXT NOT NULL DEFAULT '', share_token TEXT NOT NULL DEFAULT '', sms_sent INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL, decided_at TEXT, decided_via TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_owner_requests_status ON owner_requests (status, created_at);
+
+-- A 10-minute live location link. The token is the only key; coordinates are cleared after expiry.
+CREATE TABLE IF NOT EXISTS location_shares (
+  token TEXT PRIMARY KEY, request_id TEXT NOT NULL, caller_phone TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL, expires_at TEXT NOT NULL, lat REAL, lng REAL, accuracy REAL, located_at TEXT
+);
+
+-- Voice notes JARVIS texts as a link (UK numbers cannot send MMS). Deleted by the cron after 7 days.
+CREATE TABLE IF NOT EXISTS voice_notes (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  mime TEXT NOT NULL,
+  audio_b64 TEXT NOT NULL,
+  bytes INTEGER NOT NULL,
+  chars INTEGER NOT NULL,
+  script TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  bed TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_voice_notes_expires ON voice_notes (expires_at);
+
+-- Text-line extras (owner only): reminders, price watches, tasks passed to agents.
+CREATE TABLE IF NOT EXISTS sms_reminders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  phone TEXT NOT NULL,
+  task TEXT NOT NULL,
+  due_at TEXT NOT NULL,
+  via TEXT NOT NULL DEFAULT 'sms',
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  fired_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_sms_reminders_due ON sms_reminders (status, due_at);
+
+CREATE TABLE IF NOT EXISTS price_watches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  phone TEXT NOT NULL,
+  item TEXT NOT NULL,
+  symbol TEXT NOT NULL DEFAULT '',
+  currency TEXT NOT NULL DEFAULT '£',
+  threshold REAL NOT NULL,
+  last_price REAL,
+  last_source TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  checked_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sms_agent_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent TEXT NOT NULL,
+  task TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  created_at TEXT NOT NULL
+);

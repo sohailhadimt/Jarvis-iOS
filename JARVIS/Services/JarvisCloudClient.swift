@@ -677,6 +677,62 @@ struct CloudClient: Sendable {
         try await decode(path: "/briefing")
     }
 
+    /// A signed ElevenLabs Agents URL for in-app voice. Nil reason means the phone should use Gemini Live.
+    func elevenSession() async -> (url: URL, maxSeconds: Int)? {
+        guard let (data, status) = try? await raw(method: "POST", path: "/voice/eleven-session", authorize: true,
+                                                  body: Data("{}".utf8), query: []),
+              (200..<300).contains(status),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let text = object["signed_url"] as? String, text.hasPrefix("wss://"),
+              let url = URL(string: text) else { return nil }
+        return (url, object["max_seconds"] as? Int ?? 600)
+    }
+
+    /// Seconds the agent conversation really ran, for the daily minutes guard.
+    func elevenUsage(seconds: Int) async {
+        let body = (try? JSONSerialization.data(withJSONObject: ["seconds": seconds])) ?? Data("{}".utf8)
+        _ = try? await raw(method: "POST", path: "/voice/eleven-usage", authorize: true, body: body, query: [])
+    }
+
+    struct Queued: Decodable, Sendable { var ok: Bool }
+
+    /// Runs a line as if Sir had texted JARVIS. The reply comes back by SMS.
+    func smsCommand(_ text: String) async throws -> Bool {
+        let result: Queued = try await sendJSON(method: "POST", path: "/sms/command", body: ["text": String(text.prefix(500))])
+        return result.ok
+    }
+
+    struct ContactSyncResult: Decodable, Sendable {
+        var ok: Bool
+        var stored: Int
+        var people: Int
+    }
+
+    /// Names and numbers to the private owner_contacts table. Replaces the previous list.
+    func syncContacts(_ contacts: [[String: Any]]) async throws -> ContactSyncResult {
+        try await sendJSON(method: "POST", path: "/contacts/sync", body: ["contacts": contacts])
+    }
+
+    /// "Call me at" morning briefing call settings. Time is HH:MM London, days 0 = Sunday.
+    func briefingCallSettings() async -> (enabled: Bool, time: String, days: [Int])? {
+        guard let (data, status) = try? await raw(method: "GET", path: "/briefing/call-settings", authorize: true, body: nil, query: []),
+              (200..<300).contains(status) else { return nil }
+        return Self.parseBriefingCall(data)
+    }
+
+    func saveBriefingCallSettings(enabled: Bool, time: String, days: [Int]) async -> Bool {
+        let object: [String: Any] = ["enabled": enabled, "time": time, "days": days]
+        guard let body = try? JSONSerialization.data(withJSONObject: object),
+              let (_, status) = try? await raw(method: "POST", path: "/briefing/call-settings", authorize: true, body: body, query: []) else { return false }
+        return (200..<300).contains(status)
+    }
+
+    private static func parseBriefingCall(_ data: Data) -> (enabled: Bool, time: String, days: [Int])? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let time = object["time"] as? String else { return nil }
+        return (object["enabled"] as? Bool ?? false, time, object["days"] as? [Int] ?? [])
+    }
+
     /// A short-lived Gemini Live token. The API key stays on the worker.
     func liveTicket() async -> LiveTicketResult {
         do {
@@ -1136,6 +1192,33 @@ struct CloudClient: Sendable {
     func callQuestions() async throws -> [CallQuestion] {
         let envelope: QuestionEnvelope = try await sendNoBody(method: "GET", path: "/calls/questions")
         return envelope.questions
+    }
+
+    /// Sir's Allow or Deny for a caller's question or location request. Returns when the share ends, if one started.
+    func decideOwnerRequest(id: String, allow: Bool, answer: String) async -> (ok: Bool, shareExpiresAt: Date?) {
+        guard let body = try? JSONSerialization.data(withJSONObject: ["allow": allow, "answer": answer]) else { return (false, nil) }
+        guard let reply = try? await raw(method: "POST", path: "/calls/requests/\(Self.path(id))", authorize: true, body: body, query: []),
+              (200..<300).contains(reply.1) else { return (false, nil) }
+        let object = (try? JSONSerialization.jsonObject(with: reply.0)) as? [String: Any]
+        return (true, LocationShare.parseDate(object?["share_expires_at"] as? String))
+    }
+
+    /// The end of the live location share the worker has open, or nil.
+    func activeLocationShare() async -> Date? {
+        guard let reply = try? await raw(method: "GET", path: "/location/active", authorize: true, body: nil, query: []),
+              (200..<300).contains(reply.1) else { return nil }
+        let object = (try? JSONSerialization.jsonObject(with: reply.0)) as? [String: Any]
+        guard object?["sharing"] as? Bool == true else { return nil }
+        return LocationShare.parseDate(object?["expires_at"] as? String)
+    }
+
+    /// One position for the open share. False once the worker has no live share.
+    func sendLocation(lat: Double, lng: Double, accuracy: Double) async -> Bool {
+        guard let body = try? JSONSerialization.data(withJSONObject: ["lat": lat, "lng": lng, "accuracy": accuracy]) else { return false }
+        guard let reply = try? await raw(method: "POST", path: "/location/update", authorize: true, body: body, query: []),
+              (200..<300).contains(reply.1) else { return false }
+        let object = (try? JSONSerialization.jsonObject(with: reply.0)) as? [String: Any]
+        return object?["sharing"] as? Bool == true
     }
 
     func answerCallQuestion(callId: String, questionId: String, text: String) async -> ScreenResult {

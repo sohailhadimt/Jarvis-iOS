@@ -51,6 +51,8 @@ export const TOOL_NAMES = [
 export type ToolName = (typeof TOOL_NAMES)[number];
 
 export interface Env {
+  /** Public https origin Twilio and ElevenLabs call back on. Defaults to the workers.dev host. */
+  PUBLIC_BASE_URL?: string;
   DB: D1Database;
   /** Service binding to this same Worker. Lets agent lanes hand each step to a fresh invocation. */
   SELF?: Fetcher;
@@ -69,12 +71,22 @@ export interface Env {
   TWILIO_ACCOUNT_SID?: string;
   TWILIO_AUTH_TOKEN?: string;
   TWILIO_FROM_NUMBER?: string;
+  /** Optional WhatsApp sender, e.g. the Twilio sandbox number. Unset keeps WhatsApp off. */
+  TWILIO_WHATSAPP_FROM?: string;
   ELEVENLABS_API_KEY?: string;
   ELEVENLABS_AGENT_ID?: string;
+  /** In-app voice agent (signed URL only). Daily seconds cap is ELEVENLABS_APP_DAILY_SECONDS. */
+  ELEVENLABS_APP_AGENT_ID?: string;
+  ELEVENLABS_APP_DAILY_SECONDS?: string;
   /** Optional pin for the ASG receptionist agent; otherwise looked up by name. */
   ASG_AGENT_ID?: string;
   /** "off" sends every caller to JARVIS again. */
   ASG_LINE?: string;
+  /** "off" sends non-owner callers back to the old agents. */
+  CALL_DESK?: string;
+  DESK_AGENT_ID?: string;
+  /** "off" sends Sir's own calls to the main agent with overrides instead of the personal agent. */
+  OWNER_AGENT?: string;
   /** Bearer key for POST /alert (proactive JARVIS alert calls). Worker secret. */
   ALERT_KEY?: string;
   /** "off" stops proactive alert calls and texts. */

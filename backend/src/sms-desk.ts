@@ -1,10 +1,27 @@
 import { brainReply, guardUnplacedCall, rememberLine } from "./brain";
 import { delegatedBrief, isBlockedNumber, placeOutboundCall, safeError, toE164 } from "./calls";
 import { dbAll, dbFirst, dbRun, getState, setState } from "./db";
+import { UNICODE_SMS_MAX, needsUnicode } from "./languages";
 import { isRecord, json, newId, nowIso, apiError, asString, readJson } from "./http";
 import { CHAT_FALLBACK } from "./llm";
 import { inQuietHours, londonDay, londonMinutes, readCallSettings, readOwnerMobile } from "./owner-alert";
 import { webSearch } from "./search";
+import {
+  callOwnerWithNote,
+  claimsAudio,
+  kindFromLine,
+  dissUnsafe,
+  kindFromText,
+  makeVoiceNote,
+  noteFailure,
+  noteLine,
+  noteUrl,
+  voiceAsk,
+  voiceFollowUp,
+  voiceLab,
+  type VoiceAsk,
+  type VoiceKind,
+} from "./voice-notes";
 import { parseToolArgs } from "./tools";
 import type { Env } from "./types";
 
@@ -98,7 +115,7 @@ export function capabilityBubbles(): string[] {
   return [
     "I make calls, book appointments, and sort a bill, Sir.",
     "You can say 'book me a dentist this week', or 'find a plumber who can come today'.",
-    "I'll text or call you when something needs you.",
+    "Text 'help' for the full list: reminders, nearby, price watches, roasts and more.",
   ];
 }
 
@@ -128,6 +145,94 @@ export function smsBubbles(text: string): string[] {
     if (bubbles.length >= 3) break;
   }
   return bubbles.slice(0, 3);
+}
+
+/** Characters a phone sends in the cheap GSM-7 alphabet. Anything else turns the text into 70-character segments. */
+const GSM_SAFE = /[A-Za-z0-9 \n@£$¥èéùìòÇØøÅå_ÆæßÉ!"#¤%&'()*+,\-./:;<=>?¡ÄÖÑÜ§¿äöñüà]/;
+
+export function gsmText(text: string): string {
+  const swapped = text
+    .replace(/[‘’ʼ′`]/g, "'")
+    .replace(/[“”″]/g, '"')
+    .replace(/\s*[–—]\s*/g, " - ")
+    .replace(/−/g, "-")
+    .replace(/…/g, "...")
+    .replace(/[\u00a0\t]/g, " ");
+  let out = "";
+  for (const char of swapped) out += GSM_SAFE.test(char) ? char : "";
+  return out
+    .replace(/ {2,}/g, " ")
+    .replace(/\s+([.,!?])/g, "$1")
+    .replace(/([a-z][.!?])([A-Z])/g, "$1 $2")
+    .trim();
+}
+
+/** Two GSM segments. A longer chat reply is cut at a sentence so it still reads as one text. */
+export const CHAT_SMS_MAX = 306;
+
+/** A chat reply goes out as one text (up to two segments). With detail it may run to three texts. */
+export function chatBubbles(text: string, detail = false): string[] {
+  if (needsUnicode(text)) return unicodeBubbles(text, detail);
+  const clean = gsmText(text.replace(/https?:\/\/\S+/gi, " ").replace(/\s+/g, " ")).replace(/\s*:\s*$/, ".");
+  if (!clean) return ["I'm here, Sir."];
+  const parts: string[] = [];
+  let rest = clean;
+  const limit = detail ? 3 : 1;
+  while (rest && parts.length < limit) {
+    if (rest.length <= CHAT_SMS_MAX) {
+      parts.push(rest);
+      rest = "";
+      break;
+    }
+    const window = rest.slice(0, CHAT_SMS_MAX);
+    const stop = Math.max(window.lastIndexOf(". "), window.lastIndexOf("? "), window.lastIndexOf("! "));
+    const cut = stop >= 80 ? stop + 1 : window.lastIndexOf(" ") > 80 ? window.lastIndexOf(" ") : CHAT_SMS_MAX;
+    parts.push(rest.slice(0, cut).trim());
+    rest = rest.slice(cut).trim();
+  }
+  return parts.filter(Boolean);
+}
+
+/** Urdu, Punjabi, Turkish: keep the letters, tidy punctuation, and cap at two Unicode segments (three texts with detail). */
+export function unicodeBubbles(text: string, detail = false): string[] {
+  const clean = text
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/[*_#`]+/g, "")
+    .replace(/[\u200b\u00a0\t]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\s*:\s*$/, ".");
+  if (!clean) return ["I'm here, Sir."];
+  const parts: string[] = [];
+  let rest = clean;
+  const limit = detail ? 3 : 1;
+  while (rest && parts.length < limit) {
+    if (rest.length <= UNICODE_SMS_MAX) {
+      parts.push(rest);
+      break;
+    }
+    const window = rest.slice(0, UNICODE_SMS_MAX);
+    const stop = Math.max(window.lastIndexOf(". "), window.lastIndexOf("۔ "), window.lastIndexOf("। "), window.lastIndexOf("? "), window.lastIndexOf("؟ "), window.lastIndexOf("! "));
+    const cut = stop >= 40 ? stop + 1 : window.lastIndexOf(" ") > 40 ? window.lastIndexOf(" ") : UNICODE_SMS_MAX;
+    parts.push(rest.slice(0, cut).trim());
+    rest = rest.slice(cut).trim();
+  }
+  return parts.filter(Boolean);
+}
+
+/** He asked for the long version. */
+export function wantsDetail(text: string): boolean {
+  return /\b(?:in detail|more detail|full detail|details|explain|elaborate|in depth|step by step|break(?: it)? down|full (?:list|breakdown|version|story)|go into|longer)\b/i.test(text);
+}
+
+/** "Should I buy...?" is a question for chat, not a payment request. */
+export function adviceQuestion(text: string): boolean {
+  return /^(?:should|would|is|are|was|were|what|which|how|why|when|where|do|does|did|who|whats|what's)\b/i.test(text.trim());
+}
+
+/** Test threads for /debug/sms-simulate. Ofcom drama numbers, which never ring a real phone. */
+export function simulatedPhone(phone: string): boolean {
+  return /^\+447700900\d{3}$/.test(phone);
 }
 
 const CALLBACK_KEY = "sms_callback";
@@ -411,9 +516,9 @@ export function scheduleEmail(goal: string, slots: { label: string }[]): { subje
   return { subject, body };
 }
 
-export async function handleInboundSms(env: Env, from: string, body: string): Promise<void> {
+export async function handleInboundSms(env: Env, from: string, body: string, media: string[] = []): Promise<void> {
   const text = body.replace(/\s+/g, " ").trim();
-  if (!text) return;
+  if (!text && !media.length) return;
   const sender = toE164(from);
   const ours = toE164(env.TWILIO_FROM_NUMBER ?? "");
   if (!sender || (ours && sender === ours)) return;
@@ -433,9 +538,10 @@ export async function handleInboundSms(env: Env, from: string, body: string): Pr
     }
     const owner = await readOwnerMobile(env);
     if (owner && sender === owner) {
-      await answerOwner(env, sender, text);
+      await answerOwner(env, sender, text, media);
       return;
     }
+    if (!text) return;
     await sendSms(env, sender, screenStranger());
     if (owner) await sendSms(env, owner, `Text from ${sender}: ${clip(text, 240)}`);
   } catch (err) {
@@ -535,6 +641,13 @@ export async function sendSmsResult(env: Env, to: string, body: string): Promise
   const missing = smsGap(account, token, from, dest, message);
   if (missing) return { ok: false, sid: "", status: "", errorCode: "", error: missing };
   const form = new URLSearchParams({ From: from ?? "", To: dest ?? "", Body: message });
+  const { replyChannel } = await import("./whatsapp");
+  const wa = dest ? await replyChannel(env, dest).catch(() => null) : null;
+  if (wa) {
+    form.set("From", wa);
+    form.set("To", `whatsapp:${dest}`);
+    form.set("Body", clip(body, 1500));
+  }
   try {
     const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Messages.json`, {
       method: "POST",
@@ -548,6 +661,11 @@ export async function sendSmsResult(env: Env, to: string, body: string): Promise
     });
     const text = await response.text();
     const parsed = parseSms(text);
+    if (!response.ok && wa) {
+      // WhatsApp refused (window closed, sandbox lapsed): fall back to a normal text.
+      await setState(env, `wa_window:${dest}`, "0").catch(() => undefined);
+      return sendSmsResult(env, to, body);
+    }
     if (!response.ok) {
       const error = publicSmsError(parsed.message || "Twilio rejected the text.");
       console.error("owner sms rejected", parsed.code || response.status, error);
@@ -640,10 +758,19 @@ function publicSmsError(text: string): string {
   return clean.slice(0, 180);
 }
 
-async function answerOwner(env: Env, phone: string, text: string): Promise<void> {
-  await rememberTurn(env, phone, "user", text);
+async function answerOwner(env: Env, phone: string, text: string, media: string[] = []): Promise<void> {
+  await rememberTurn(env, phone, "user", text || (media.length ? "[photo]" : ""));
   await noteSmsLog(env, { direction: "in", status: "received", errorCode: "", brain: "inbound", detail: text, sid: "" });
+  const sim = Boolean(smsCapture.get(env));
   const approval = approvalWord(text);
+  if (approval === "yes") {
+    const { placePendingPrank } = await import("./sms-extras");
+    const pranked = await placePendingPrank(env, phone, sim);
+    if (pranked) {
+      await replyLine(env, phone, pranked, "prank");
+      return;
+    }
+  }
   if (approval) {
     const placed = await placeApprovedOutbound(env, phone);
     if (placed) {
@@ -657,10 +784,27 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
         await reply(env, phone, started.message, "yes-hunt");
         return;
       }
+      const { bookTimedCallFromRecent } = await import("./sms-extras");
+      const booked = await bookTimedCallFromRecent(env, phone).catch(() => null);
+      if (booked) {
+        await replyLine(env, phone, booked, "yes-timed-call");
+        return;
+      }
       await reply(env, phone, "Nothing is waiting to be dialled, Sir. Nothing was dialled.", "yes-empty");
       return;
     }
   }
+  {
+    const langs = await import("./languages");
+    const asked = langs.languageCommand(text);
+    if (asked) {
+      await langs.saveLanguage(env, phone, asked);
+      await reply(env, phone, langs.confirmLanguage(asked), `lang-${asked}`);
+      return;
+    }
+  }
+  const extras = await import("./sms-extras");
+  if (await extras.smsExtras(env, phone, text, media, { sim, send: (line) => replyLine(env, phone, line, "extra") })) return;
   const corrected = numberCorrection(text);
   if (corrected) {
     const line = await correctPendingNumber(env, phone, corrected);
@@ -672,12 +816,27 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
     );
     return;
   }
+  const picked = await contactPick(env, phone, text);
+  if (picked) {
+    await replyLine(env, phone, picked, "ring-picked");
+    return;
+  }
   const choiceReply = callChoice(text);
   const numbered = text.trim() === "1" || text.trim() === "2";
   if (choiceReply && (!numbered || (await loadLatestCall(env)))) {
     await reply(env, phone, choiceReply === "dial" ? await placeLatestCallback(env, phone) : await sendCallerNumber(env));
     return;
   }
+  const voice = voiceAsk(text);
+  if (voice?.style === "diss" && dissUnsafe(text)) {
+    await reply(env, phone, "I'll keep it clean, Sir: no threats, slurs or digs at who someone is. Give me something harmless to roast them on, like their cooking or their football team.", "diss-refused");
+    return;
+  }
+  if (voice) {
+    await deliverVoiceNote(env, phone, text, voice);
+    return;
+  }
+  if (await voiceFollow(env, phone, text)) return;
   const asked = outboundAsk(text) ?? looseCall(text);
   if (asked) {
     await reply(env, phone, await offerOutbound(env, phone, asked), "offer");
@@ -693,6 +852,36 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
     await reply(env, phone, await revisePendingOutbound(env, phone, revision));
     return;
   }
+  const byName = extras.ringByName(text);
+  if (byName) {
+    const people = await import("./contacts");
+    const spoken = byName.place ? `${byName.name} ${byName.place}` : byName.name;
+    let known = await people.resolveContact(env, byName.name).catch(() => ({ kind: "none" as const }) as Awaited<ReturnType<typeof people.resolveContact>>);
+    if (known.kind === "none" && byName.place) known = await people.resolveContact(env, spoken).catch(() => known);
+    if (known.kind === "one") {
+      const c = known.contact;
+      const offer = await offerOutbound(env, phone, { name: c.name, phone: c.phone, purpose: byName.purpose, verb: byName.verb });
+      await replyLine(env, phone, `${c.name} from your contacts: ${people.maskPhone(c.phone)}. ${offer}`, "ring-contact");
+      return;
+    }
+    if (known.kind === "many") {
+      await setState(env, contactPickKey(phone), JSON.stringify({ options: known.options.map((o) => ({ name: o.name, phone: o.phone })), purpose: byName.purpose, verb: byName.verb, until: Date.now() + 10 * 60_000 }));
+      await replyLine(env, phone, `Which one, Sir? ${people.optionsLine(known.options)}. Reply 1, 2 or 3.`, "ring-pick");
+      return;
+    }
+    if (extras.personalContact(byName.name)) {
+      await reply(env, phone, `I only ring personal contacts on a number you type, Sir. Send it like: call 07... and ${byName.verb} ${byName.purpose}`, "ring-personal");
+      return;
+    }
+    const found = await extras.findBusinessPhone(env, byName.name, byName.place);
+    if (!found) {
+      await replyLine(env, phone, `I couldn't find a number for ${byName.name}, Sir. Send it like: call 01233 000000 and ${byName.verb} ${byName.purpose}`, "ring-unknown");
+      return;
+    }
+    const offer = await offerOutbound(env, phone, { name: byName.name, phone: found.phone, purpose: byName.purpose, verb: byName.verb });
+    await replyLine(env, phone, `Found ${byName.name}: ${found.phone}${found.source ? ` (${found.source})` : ""}. ${offer}`, "ring-found");
+    return;
+  }
   const choice = menuChoice(text);
   if (choice) {
     await sendBubbles(env, phone, menuBubbles(choice));
@@ -703,7 +892,7 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
     return;
   }
   await rememberFacts(env, text);
-  if (paymentAsk(text)) {
+  if (paymentAsk(text) && !adviceQuestion(text)) {
     await queueApproval(env, "payment", explicitSummary(text), "explicit_authorisation", { kind: "payment" });
     await reply(env, phone, "That needs your approval, Sir. I have not paid anything or minted a card.");
     return;
@@ -747,7 +936,7 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
     await reply(env, phone, await offerCallback(env, phone, text));
     return;
   }
-  if (follow === "detail") {
+  if (follow === "detail" && (await callContext(env, phone, text))) {
     try {
       await reply(env, phone, await describeLatestCall(env));
     } catch (err) {
@@ -756,7 +945,238 @@ async function answerOwner(env: Env, phone: string, text: string): Promise<void>
     }
     return;
   }
-  await reply(env, phone, await chatReply(env, phone));
+  const detail = wantsDetail(text);
+  const answer = await chatReply(env, phone, detail);
+  if (claimsAudio(answer)) {
+    // Chat cannot attach audio. Make the note it promised, or say plainly how to get one.
+    const kind = kindFromText(answer) ?? kindFromText(text) ?? (await recentVoice(env, phone)).kind;
+    if (kind) {
+      await deliverVoiceNote(env, phone, text, { kind, byCall: false, prompt: "" });
+      return;
+    }
+    await replyChat(env, phone, "Ask me for a voice note, Sir, and I'll text you a link that plays it.", false);
+    return;
+  }
+  await replyChat(env, phone, answer, detail);
+}
+
+function contactPickKey(phone: string): string {
+  return `contact_pick:${phone}`;
+}
+
+/** "1", "2" or "3" after a "Which one, Sir?" list. Offers the call; it still waits for YES. */
+async function contactPick(env: Env, phone: string, text: string): Promise<string | null> {
+  const n = /^\s*([123])\s*[.!)]?\s*$/.exec(text)?.[1];
+  if (!n) return null;
+  const raw = await getState(env, contactPickKey(phone)).catch(() => null);
+  if (!raw) return null;
+  let saved: { options?: { name: string; phone: string }[]; purpose?: string; verb?: "ask" | "tell"; until?: number } = {};
+  try {
+    saved = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  await setState(env, contactPickKey(phone), "").catch(() => undefined);
+  if (!saved.until || saved.until < Date.now()) return null;
+  const choice = saved.options?.[Number(n) - 1];
+  if (!choice || !saved.purpose) return null;
+  const { maskPhone } = await import("./contacts");
+  const offer = await offerOutbound(env, phone, { name: choice.name, phone: choice.phone, purpose: saved.purpose, verb: saved.verb === "tell" ? "tell" : "ask" });
+  return `${choice.name}: ${maskPhone(choice.phone)}. ${offer}`;
+}
+
+/** The thread's latest voice note: its kind, and its link when the last reply carried one. */
+async function recentVoice(env: Env, phone: string): Promise<{ kind: VoiceKind | null; link: string | null; lastHadLink: boolean }> {
+  const rows = await dbAll<{ role: string; body: string }>(
+    env,
+    "SELECT role, body FROM sms_turns WHERE phone = ? ORDER BY created_at DESC, rowid DESC LIMIT 8",
+    [phone],
+  ).catch(() => []);
+  const assistant = rows.filter((row) => row.role === "assistant");
+  const last = assistant[0]?.body ?? "";
+  const linked = assistant.find((row) => kindFromLine(row.body));
+  const link = linked ? /https:\/\/\S+\/v\/([A-Za-z0-9]{20})/.exec(linked.body) : null;
+  const live = link?.[1] ? await noteUrl(env, link[1]).catch(() => null) : null;
+  const lastFour = rows.slice(0, 4).map((row) => row.body).join(" ");
+  const kind = (linked ? kindFromLine(linked.body) : null) ?? (assistant.slice(0, 2).some((row) => kindFromText(row.body)) ? kindFromText(lastFour) : null);
+  return { kind, link: live, lastHadLink: Boolean(kindFromLine(last)) };
+}
+
+/** "More complex plz", "again", "where is it" after a voice note go back to the voice desk. */
+async function voiceFollow(env: Env, phone: string, text: string): Promise<boolean> {
+  const follow = voiceFollowUp(text);
+  if (!follow) return false;
+  const recent = await recentVoice(env, phone);
+  if (!recent.kind) return false;
+  if (follow === "resend" && recent.lastHadLink && recent.link) {
+    await replyLine(env, phone, `Here it is again, Sir. Tap to play: ${recent.link}`, "voice-resend");
+    return true;
+  }
+  await deliverVoiceNote(env, phone, text, { kind: recent.kind, byCall: /\b(?:call|ring) me\b/i.test(text), prompt: "" });
+  return true;
+}
+
+/** Runs the beatbox candidates once per nonce and returns their links for the listening check. */
+export async function voiceLabRoute(request: Request, env: Env): Promise<Response> {
+  const body = await readJson(request);
+  if (!body.ok) return body.response;
+  const nonce = isRecord(body.value) ? asString(body.value.nonce, 40) : "";
+  if (!nonce || !/^[A-Za-z0-9_-]+$/.test(nonce)) return apiError(400, "bad_request", "nonce is required.");
+  const key = `voice_lab:${nonce}`;
+  const prior = await getState(env, key).catch(() => null);
+  if (prior) return json({ ok: true, already: true, ...JSON.parse(prior) });
+  const { elevenCredits } = await import("./voice-notes");
+  const before = await elevenCredits(env);
+  const clips = await voiceLab(env);
+  const after = await elevenCredits(env);
+  const record = { clips, before, after, at: new Date().toISOString() };
+  await setState(env, key, JSON.stringify(record));
+  return json({ ok: true, ...record });
+}
+
+/** Texts Sir one chosen note once per nonce, then reads Twilio's delivery status. */
+export async function voiceSendRoute(request: Request, env: Env): Promise<Response> {
+  const body = await readJson(request);
+  if (!body.ok) return body.response;
+  if (!isRecord(body.value)) return apiError(400, "bad_request", "nonce and id are required.");
+  const nonce = asString(body.value.nonce, 40);
+  const id = asString(body.value.id, 20) ?? "";
+  const lead = asString(body.value.lead, 120) || "Here you are, Sir. Tap to play:";
+  if (!nonce || !/^[A-Za-z0-9_-]+$/.test(nonce) || !/^[A-Za-z0-9]{20}$/.test(id)) return apiError(400, "bad_request", "nonce and id are required.");
+  const key = `voice_send:${nonce}`;
+  const prior = await getState(env, key).catch(() => null);
+  if (prior) {
+    const record = JSON.parse(prior) as { sid?: string };
+    return json({ ok: true, already: true, ...record, delivery: record.sid ? await twilioStatus(env, record.sid) : "" });
+  }
+  const owner = await readOwnerMobile(env);
+  const url = await noteUrl(env, id);
+  if (!owner || !url) return apiError(409, "not_ready", "No owner mobile or no such note.");
+  const line = `${lead} ${url}`;
+  await setState(env, key, JSON.stringify({ url, pending: true, at: new Date().toISOString() }));
+  const result = await sendSmsResult(env, owner, line);
+  await rememberTurn(env, owner, "assistant", line).catch(() => undefined);
+  const record = { url, sid: result.sid, status: result.status, error: result.error, at: new Date().toISOString() };
+  await setState(env, key, JSON.stringify(record));
+  await pause(8_000);
+  return json({ ok: result.ok, sent: result.ok, ...record, delivery: result.sid ? await twilioStatus(env, result.sid) : "" });
+}
+
+async function twilioStatus(env: Env, sid: string): Promise<string> {
+  if (!/^SM[0-9a-f]{32}$/i.test(sid)) return "";
+  const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
+  const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
+  try {
+    const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Messages/${sid}.json`, {
+      headers: { authorization: `Basic ${btoa(`${account}:${token}`)}` },
+      signal: AbortSignal.timeout(8_000),
+    });
+    const parsed = (await response.json()) as { status?: string; error_code?: number | null; num_segments?: string; price?: string | null };
+    return `${parsed.status ?? ""} error=${parsed.error_code ?? ""} segments=${parsed.num_segments ?? ""} price=${parsed.price ?? ""}`;
+  } catch {
+    return "unknown";
+  }
+}
+
+/** Makes the audio and texts one line plus the link. "Call me and say it" rings his own number instead. */
+async function deliverVoiceNote(env: Env, phone: string, text: string, ask: VoiceAsk): Promise<void> {
+  const history = await dbAll<{ role: string; body: string }>(
+    env,
+    "SELECT role, body FROM sms_turns WHERE phone = ? ORDER BY created_at DESC, rowid DESC LIMIT 8",
+    [phone],
+  ).catch(() => []);
+  const lang = await (await import("./languages")).readLanguage(env, phone).catch(() => null);
+  const made = await makeVoiceNote(env, ask, text, [...history].reverse(), lang);
+  if (!made.ok || !made.note) {
+    await recordSmsError(env, "voice", made.error ?? "voice note failed");
+    await reply(env, phone, noteFailure(made), "voice-failed");
+    return;
+  }
+  const url = made.note.url;
+  if (ask.byCall) {
+    if (smsCapture.get(env)) {
+      await replyLine(env, phone, `Simulation: I would ring you now to play it, Sir. Nothing was dialled. ${url}`, "voice-call-sim");
+      return;
+    }
+    const owner = await readOwnerMobile(env);
+    if (owner && toE164(phone) === owner) {
+      const call = await callOwnerWithNote(env, owner, url);
+      if (call.ok) {
+        await replyLine(env, phone, `Ringing you now to play it, Sir. If you miss it: ${url}`, "voice-call");
+        return;
+      }
+      await recordSmsError(env, "voice-call", call.error);
+      await replyLine(env, phone, `I couldn't ring you just now, Sir, so here it is to play: ${url}`, "voice-call-failed");
+      return;
+    }
+  }
+  await replyLine(env, phone, noteLine(ask, url), "voice");
+}
+
+/** One text sent as written, link included. */
+async function replyLine(env: Env, phone: string, line: string, brain: string): Promise<void> {
+  await noteSmsLog(env, { direction: "out", status: "reply", errorCode: "", brain, detail: line, sid: "" });
+  const lines = smsCapture.get(env);
+  if (lines) {
+    lines.push(line);
+    await rememberTurn(env, phone, "assistant", line);
+    return;
+  }
+  await sendBubbles(env, phone, [line]);
+}
+
+/** Generates a beatbox note and texts it to Sir once ever, as live proof. Later calls only report. */
+export async function voiceProofRoute(env: Env): Promise<Response> {
+  const key = "voice_proof_sent";
+  const prior = await getState(env, key).catch(() => null);
+  if (prior) return json({ ok: true, already: true, ...JSON.parse(prior) });
+  const owner = await readOwnerMobile(env);
+  if (!owner) return apiError(409, "no_owner", "No owner mobile is saved.");
+  const ask: VoiceAsk = { kind: "beatbox", byCall: false, prompt: "" };
+  const made = await makeVoiceNote(env, ask, "Send me a voice message of you beatboxing");
+  if (!made.ok || !made.note) return json({ ok: false, sent: false, error: redactSmsDetail(made.error ?? "failed") });
+  await setState(env, key, JSON.stringify({ url: made.note.url, at: new Date().toISOString(), pending: true }));
+  const result = await sendSmsResult(env, owner, noteLine(ask, made.note.url));
+  const record = { url: made.note.url, at: new Date().toISOString(), sid: result.sid, status: result.status, error: result.error, bytes: made.note.bytes };
+  await setState(env, key, JSON.stringify(record));
+  await rememberTurn(env, owner, "assistant", noteLine(ask, made.note.url)).catch(() => undefined);
+  return json({ ok: result.ok, sent: result.ok, ...record });
+}
+
+/** Runs one simulated voice request per nonce, so a deploy check does not spend credits twice. */
+export async function voiceOnceRoute(request: Request, env: Env): Promise<Response> {
+  const body = await readJson(request);
+  if (!body.ok) return body.response;
+  if (!isRecord(body.value)) return apiError(400, "bad_request", "nonce and text are required.");
+  const nonce = asString(body.value.nonce, 40);
+  const text = asString(body.value.text, 300);
+  if (!nonce || !text || !/^[A-Za-z0-9_-]+$/.test(nonce)) return apiError(400, "bad_request", "nonce and text are required.");
+  const key = `voice_once:${nonce}`;
+  const prior = await getState(env, key).catch(() => null);
+  if (prior) return json({ ok: true, already: true, ...JSON.parse(prior) });
+  const lines: string[] = [];
+  smsCapture.set(env, lines);
+  try {
+    await answerOwner(env, "+447700900777", text);
+  } finally {
+    smsCapture.delete(env);
+  }
+  const record = { texts: lines, at: new Date().toISOString() };
+  await setState(env, key, JSON.stringify(record));
+  return json({ ok: true, sent: false, ...record });
+}
+
+/** "more" or "details" only means the last call when the thread was about a call. Otherwise it is chat. */
+async function callContext(env: Env, phone: string, text: string): Promise<boolean> {
+  const clean = text.toLowerCase().replace(/[?!.,'"’]/g, " ").replace(/\s+/g, " ").trim();
+  if (!/^(?:more|details|more details|tell me more)$/.test(clean)) return true;
+  const last = await dbFirst<{ body: string }>(
+    env,
+    "SELECT body FROM sms_turns WHERE phone = ? AND role = 'assistant' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    [phone],
+  ).catch(() => null);
+  if (!last) return true;
+  return /\b(?:called|rang|rung|caller|calling|message from|call back|call them|call him|call her)\b/i.test(last.body);
 }
 
 interface LatestCall {
@@ -945,11 +1365,14 @@ function callingNow(who: string): string {
   return `Calling ${who} now, Sir. I'll text you what they say.`;
 }
 
-function dialFailure(error: string): string {
-  const detail = publicSmsError(error);
-  return detail
-    ? `I couldn't place that call, Sir. ${detail} Nothing was dialled.`
-    : "I couldn't place that call, Sir. Nothing was dialled.";
+/** Friendly words for Sir. Twilio codes and URLs stay in the worker log, never in a text. */
+export function dialFailure(error: string): string {
+  console.error("text-line call not placed", publicSmsError(error));
+  if (/not a valid phone number|cannot be called|number is not valid|\b2121[1478]\b/i.test(error)) {
+    return "That number isn't one I can ring, Sir. Nothing was dialled.";
+  }
+  if (/not set up/i.test(error)) return "Calling isn't set up on my line just now, Sir. Nothing was dialled.";
+  return "That call didn't go through on my side, Sir. Nothing was dialled. Text me the same request again in a minute and I'll retry.";
 }
 
 async function placeApprovedOutbound(env: Env, owner: string): Promise<string | null> {
@@ -1177,9 +1600,23 @@ async function reply(env: Env, phone: string, text: string, brain = "reply"): Pr
   const lines = smsCapture.get(env);
   if (lines) {
     lines.push(text);
+    await rememberTurn(env, phone, "assistant", text);
     return;
   }
   await sendBubbles(env, phone, smsBubbles(text));
+}
+
+/** A conversational reply: one text, two segments at most, unless he asked for detail. */
+async function replyChat(env: Env, phone: string, text: string, detail: boolean): Promise<void> {
+  const bubbles = chatBubbles(text, detail);
+  await noteSmsLog(env, { direction: "out", status: "reply", errorCode: "", brain: "chat", detail: bubbles.join(" "), sid: "" });
+  const lines = smsCapture.get(env);
+  if (lines) {
+    lines.push(...bubbles);
+    for (const bubble of bubbles) await rememberTurn(env, phone, "assistant", bubble);
+    return;
+  }
+  await sendBubbles(env, phone, bubbles);
 }
 
 async function sendBubbles(env: Env, phone: string, bubbles: string[]): Promise<void> {
@@ -1330,16 +1767,25 @@ export async function simulateSmsRoute(request: Request, env: Env): Promise<Resp
   const body = await readJson(request);
   if (!body.ok) return body.response;
   if (!isRecord(body.value)) return apiError(400, "bad_request", "text is required.");
-  const text = asString(body.value.text, 500);
-  if (!text) return apiError(400, "bad_request", "text is required.");
+  const text = asString(body.value.text, 500) ?? "";
+  const hasMedia = Array.isArray(body.value.media) && body.value.media.length > 0;
+  if (!text && !hasMedia) return apiError(400, "bad_request", "text is required.");
+  // A thread is a separate Ofcom drama number, so a test conversation keeps its own history.
+  const thread = typeof body.value.thread === "string" && /^\d{1,3}$/.test(body.value.thread) ? body.value.thread : "0";
+  const phone = `+447700900${thread.padStart(3, "0")}`;
+  if (body.value.reset === true) await dbRun(env, "DELETE FROM sms_turns WHERE phone = ?", [phone]).catch(() => 0);
+  const media = Array.isArray(body.value.media)
+    ? body.value.media.filter((m): m is string => typeof m === "string" && /^https:\/\//.test(m)).slice(0, 1)
+    : [];
   const lines: string[] = [];
   smsCapture.set(env, lines);
   try {
-    await answerOwner(env, "+447700900000", text);
+    await answerOwner(env, phone, text, media);
   } finally {
     smsCapture.delete(env);
   }
-  return json({ ok: true, reply: lines.join(" "), sent: false });
+  const history = await dbFirst<{ n: number }>(env, "SELECT count(*) AS n FROM sms_turns WHERE phone = ?", [phone]).catch(() => null);
+  return json({ ok: true, reply: lines.join(" "), texts: lines, history: Number(history?.n ?? 0), sent: false });
 }
 
 export async function lastSmsErrors(env: Env): Promise<Response> {
@@ -1363,9 +1809,8 @@ function redactSmsDetail(text: string): string {
     .slice(0, 400);
 }
 
-async function chatReply(env: Env, phone: string): Promise<string> {
-  void phone;
-  const answered = await brainReply(env, "sms");
+async function chatReply(env: Env, phone: string, detail = false): Promise<string> {
+  const answered = await brainReply(env, "sms", { phone, detail });
   if (answered.error) await recordSmsError(env, "chat", answered.error);
   return guardUnplacedCall(answered.text);
 }
@@ -1374,7 +1819,13 @@ export async function runSmsTool(env: Env, name: string, raw: string): Promise<u
   const parsed = parseToolArgs(raw);
   if (!parsed.ok) return { ok: false, error: parsed.error };
   if (name === "web_search") {
-    const found = await webSearch(env, typeof parsed.value.query === "string" ? parsed.value.query : "");
+    const query = typeof parsed.value.query === "string" ? parsed.value.query : "";
+    const { liveSearch } = await import("./live-tools");
+    const live = await liveSearch(env, query).catch(() => null);
+    if (live && live.ok && live.provider !== "search") {
+      return { ok: true, answer: live.answer, phones: parsePhones(live.answer, 3), source: live.provider };
+    }
+    const found = await webSearch(env, query);
     if (!found.ok) return { ok: false, error: found.error };
     const blob = found.results.map((hit) => `${hit.title} ${hit.snippet}`).join("\n");
     return {
@@ -1430,6 +1881,32 @@ async function rememberFacts(env: Env, text: string): Promise<void> {
   }
 }
 
+/**
+ * Text Sir from a call (or any server path): always his own number, split into at most three texts
+ * of two segments each (about six segments), each logged to his SMS thread so a follow-up text has context.
+ */
+export async function textOwnerLong(env: Env, owner: string, text: string, brain = "call-text"): Promise<{ ok: boolean; sent: number; segments: number; error: string }> {
+  const bubbles = chatBubbles(text, true);
+  let sent = 0;
+  let segments = 0;
+  let error = "";
+  for (let i = 0; i < bubbles.length; i++) {
+    const line = bubbles[i] ?? "";
+    if (!line) continue;
+    if (i > 0) await pause(600);
+    const result = await sendSmsResult(env, owner, line);
+    if (!result.ok) {
+      error = result.error || "send failed";
+      break;
+    }
+    sent += 1;
+    segments += needsUnicode(line) ? Math.ceil(line.length / 67) : line.length <= 160 ? 1 : Math.ceil(line.length / 153);
+    await rememberTurn(env, owner, "assistant", line).catch(() => undefined);
+  }
+  await noteSmsLog(env, { direction: "out", status: sent ? "reply" : "failed", errorCode: "", brain, detail: bubbles.join(" "), sid: "" }).catch(() => undefined);
+  return { ok: sent > 0 && !error, sent, segments, error };
+}
+
 async function rememberTurn(env: Env, phone: string, role: "user" | "assistant", body: string): Promise<void> {
   await dbRun(env, "INSERT INTO sms_turns (id, phone, role, body, created_at) VALUES (?, ?, ?, ?, ?)", [
     newId("sms"),
@@ -1438,6 +1915,7 @@ async function rememberTurn(env: Env, phone: string, role: "user" | "assistant",
     clip(body, 1000),
     nowIso(),
   ]);
+  if (simulatedPhone(phone)) return;
   await rememberLine(env, { source: "sms", role, body }).catch(() => undefined);
 }
 

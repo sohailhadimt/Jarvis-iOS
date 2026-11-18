@@ -1,3 +1,4 @@
+import { createTwilioCall, twilioUrl } from "./public-url";
 /**
  * ASG receptionist line. Callers other than the owner reach a separate ElevenLabs agent
  * (looked up by name, so no id is committed). Leads land in the asg_leads D1 table.
@@ -69,6 +70,74 @@ async function ensureTable(env: Env): Promise<void> {
   );
 }
 
+export interface AsgLead {
+  call_id: string;
+  conversation_id: string;
+  phone: string;
+  caller_name: string;
+  company: string;
+  role: string;
+  company_size: string;
+  needs: string;
+  email: string;
+  preferred_times: string;
+  summary: string;
+  do_not_contact: boolean;
+  transcript: string;
+  /** Fire the hot-lead alert from here (the desk tool). The post-call path alerts itself. */
+  alert?: boolean;
+}
+
+/** One row in asg_leads, from the post-call webhook or the desk agent's save_asg_lead tool. */
+export async function insertAsgLead(env: Env, lead: AsgLead): Promise<string> {
+  await ensureTable(env);
+  const id = newId("lead");
+  await dbRun(
+    env,
+    `INSERT INTO asg_leads (id, call_id, conversation_id, phone, caller_name, company, role, company_size, needs, email,
+      preferred_times, summary, do_not_contact, transcript, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)`,
+    [
+      id,
+      lead.call_id,
+      lead.conversation_id,
+      lead.phone,
+      lead.caller_name,
+      lead.company,
+      lead.role,
+      lead.company_size,
+      lead.needs,
+      lead.email,
+      lead.preferred_times,
+      lead.summary,
+      lead.do_not_contact ? 1 : 0,
+      lead.transcript,
+      nowIso(),
+    ],
+  );
+  if (lead.alert !== false && !lead.do_not_contact) {
+    try {
+      const { fireAlert, isHotLead } = await import("./proactive-alert");
+      const origin = (await dbFirst<{ worker_origin: string }>(env, "SELECT worker_origin FROM call_settings WHERE id = 'default'"))?.worker_origin;
+      if (origin && isHotLead(`${lead.summary} ${lead.needs}`)) {
+        await fireAlert(env, {
+          type: "hot_lead",
+          summary: `A caller wants to buy from ASG. ${lead.needs}`.slice(0, 300),
+          who: [lead.caller_name, lead.company].filter(Boolean).join(" from "),
+          value: "",
+          when: lead.preferred_times,
+          meet_link: "",
+          details: [lead.email, lead.summary].filter(Boolean).join(" | ").slice(0, 600),
+          dedupe_key: `lead:${lead.call_id}`,
+        }, origin.replace(/\/$/, ""));
+      }
+    } catch {
+      // An alert failure never loses the lead.
+    }
+  }
+  return id;
+}
+
 /** Called from the post-call webhook for every conversation; ignores non-ASG agents. */
 export async function captureAsgLead(env: Env, data: Record<string, unknown>): Promise<boolean> {
   const agentId = typeof data.agent_id === "string" ? data.agent_id : "";
@@ -91,30 +160,22 @@ export async function captureAsgLead(env: Env, data: Record<string, unknown>): P
         .join("\n")
         .slice(0, 8000)
     : "";
-  await ensureTable(env);
-  await dbRun(
-    env,
-    `INSERT INTO asg_leads (id, call_id, conversation_id, phone, caller_name, company, role, company_size, needs, email,
-      preferred_times, summary, do_not_contact, transcript, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)`,
-    [
-      newId("lead"),
-      String(init.user_id ?? ""),
-      String(data.conversation_id ?? ""),
-      phone,
-      pick("caller_name"),
-      pick("company"),
-      pick("role"),
-      pick("company_size"),
-      pick("needs"),
-      pick("email"),
-      pick("preferred_times"),
-      pick("summary") || String(analysis.transcript_summary ?? "").slice(0, 1000),
-      pick("do_not_contact") === "true" ? 1 : 0,
-      transcript,
-      nowIso(),
-    ],
-  );
+  await insertAsgLead(env, {
+    call_id: String(init.user_id ?? ""),
+    conversation_id: String(data.conversation_id ?? ""),
+    phone,
+    caller_name: pick("caller_name"),
+    company: pick("company"),
+    role: pick("role"),
+    company_size: pick("company_size"),
+    needs: pick("needs"),
+    email: pick("email"),
+    preferred_times: pick("preferred_times"),
+    summary: pick("summary") || String(analysis.transcript_summary ?? "").slice(0, 1000),
+    do_not_contact: pick("do_not_contact") === "true",
+    transcript,
+    alert: false,
+  });
   try {
     const hotText = `${pick("summary")} ${pick("needs")} ${String(analysis.transcript_summary ?? "")}`;
     const { fireAlert, isHotLead } = await import("./proactive-alert");
@@ -183,14 +244,13 @@ async function placeCallback(request: Request, env: Env): Promise<Response> {
      VALUES (?, ?, ?, ?, 'placing', NULL, NULL, '[]', NULL, NULL, ?, ?)`,
     [id, String(body?.name ?? "ASG callback").slice(0, 80), to, `ASG consented callback: ${consent.slice(0, 300)}`, now, now],
   );
-  const origin = new URL(request.url).origin.replace("http:", "https:");
-  const form = new URLSearchParams({ To: to, From: from, Url: `${origin}/asg/voice/${id}`, Method: "POST", TimeLimit: "360" });
-  const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Calls.json`, {
-    method: "POST",
-    headers: { authorization: `Basic ${btoa(`${sid}:${token}`)}`, "content-type": "application/x-www-form-urlencoded" },
-    body: form.toString(),
-  });
-  const text = await res.text();
+  const origin = new URL(request.url).origin;
+  const res = await createTwilioCall(
+    env,
+    (base) => new URLSearchParams({ To: to, From: from, Url: twilioUrl(base, `/asg/voice/${encodeURIComponent(id)}`), Method: "POST", TimeLimit: "360" }),
+    { fallbackOrigin: origin },
+  );
+  const text = res.body;
   if (!res.ok) {
     await dbRun(env, "UPDATE outbound_calls SET status = 'failed', error = ? WHERE id = ?", [text.slice(0, 300), id]);
     return apiError(502, "twilio_failed", text.slice(0, 300));

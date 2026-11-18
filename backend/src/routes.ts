@@ -44,6 +44,7 @@ import { markPersonaDraft, routePersona } from "./personas";
 import { lastSmsErrors, lastSmsLog, pairResponse, recordSmsError, saveBusy, sendOwnerSmsRoute, simulateSmsRoute } from "./sms-desk";
 import { historyResponse, lineResponse, personaResponse, reminderResponse, sayResponse } from "./brain";
 import { liveTokenResponse } from "./live-token";
+import { elevenSessionResponse, elevenUsageResponse } from "./eleven-session";
 import { readVoiceDebug, saveVoiceDebug, VOICE_DEBUG_REVISION } from "./voice-debug";
 import { optionalSourceUrls } from "./sources";
 import { isPipelineStage, parseMrr, toolsForNames } from "./tools";
@@ -74,6 +75,10 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (streamId && request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
       return handleCallStream(request, env, streamId[1]);
     }
+    {
+      const vn = await import("./voice-notes");
+      if (vn.isVoiceNotePath(request.method, path)) return vn.serveVoiceNote(request, env, path);
+    }
     if (isOwnerWebhook(request.method, path)) return handleOwnerWebhook(request, env, path);
     if (isScreenWebhook(request.method, path)) return handleScreenWebhook(request, env, path, ctx);
     const asgVoice = /^\/asg\/voice\/(call_[A-Za-z0-9]+)$/.exec(path);
@@ -86,19 +91,72 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
       return alertRoute(request, env);
     }
     {
+      const bc = await import("./briefing-call");
+      if (bc.isBriefingWebhook(request.method, path)) return bc.briefingAsk(request, env);
+    }
+    {
       const pa = await import("./proactive-alert");
       if (pa.isAlertWebhook(request.method, path)) return pa.alertWebhook(request, env, path);
     }
     if (isCallWebhook(request.method, path)) return handleCallWebhook(request, env, path);
+    if (path.startsWith("/look/")) {
+      const look = await import("./look");
+      if (look.isLookRoute(request.method, path)) return look.handleLook(request, env, path);
+    }
+    {
+      const own = await import("./owner-agent");
+      if (own.isOwnerTool(request.method, path)) return own.handleOwnerTool(request, env, path);
+    }
+    {
+      const desk = await import("./desk");
+      if (desk.isDeskTool(request.method, path)) return desk.handleDeskTool(request, env, path);
+      if (desk.isShareLink(request.method, path)) return desk.handleShareLink(env, path);
+    }
     const auth = authorize(request, env.JARVIS_APP_TOKEN);
     if (!auth.ok) return auth.response;
     ctx.waitUntil(rememberOrigin(env, url.origin));
+    if (request.method === "POST" && path === "/sms/command") {
+      // Siri Shortcuts: run a line exactly as if Sir had texted it. Replies arrive by SMS; calls still wait for YES.
+      const body = (await request.json().catch(() => null)) as { text?: unknown } | null;
+      const text = typeof body?.text === "string" ? body.text.trim().slice(0, 500) : "";
+      if (!text) return apiError(400, "bad_request", "text is required.");
+      const { readOwnerMobile } = await import("./owner-alert");
+      const owner = await readOwnerMobile(env).catch(() => null);
+      if (!owner) return apiError(503, "not_configured", "Owner mobile is not set.");
+      const { handleInboundSms } = await import("./sms-desk");
+      ctx.waitUntil(handleInboundSms(env, owner, text).catch(() => undefined));
+      return json({ ok: true, queued: true });
+    }
+    if (path === "/owner/agent" || path === "/owner/agent/ensure" || path === "/owner/agent/languages" || path === "/debug/owner-tool") {
+      const handled = await (await import("./owner-agent")).ownerAgentRoute(request, env, path);
+      if (handled) return handled;
+    }
+    if (path.startsWith("/contacts/")) {
+      const handled = await (await import("./contacts")).contactsRoute(request, env, path);
+      if (handled) return handled;
+    }
     if (request.method === "GET" && path === "/debug/last-calls") return lastCallDebug(env);
     if (request.method === "GET" && path === "/debug/last-sms-errors") return lastSmsErrors(env);
     if (request.method === "GET" && path === "/debug/last-sms") return lastSmsLog(env);
+    if (request.method === "GET" && path === "/debug/sweep") return (await import("./sweep")).sweepRoute(env, url);
     if (request.method === "POST" && path === "/debug/sms-simulate") return simulateSmsRoute(request, env);
+    if (request.method === "POST" && path === "/debug/voice-proof") return (await import("./sms-desk")).voiceProofRoute(env);
+    if (request.method === "POST" && path === "/debug/voice-lab") return (await import("./sms-desk")).voiceLabRoute(request, env);
+    if (request.method === "POST" && path === "/debug/extras") return (await import("./sms-extras")).extrasDebugRoute(request, env);
+    if (request.method === "POST" && path === "/debug/voice-send") return (await import("./sms-desk")).voiceSendRoute(request, env);
+    if (request.method === "POST" && path === "/debug/voice-once") return (await import("./sms-desk")).voiceOnceRoute(request, env);
+    if (request.method === "GET" && path === "/debug/voice-notes") {
+      const vn = await import("./voice-notes");
+      const [notes, credits] = await Promise.all([vn.recentNotes(env).catch(() => []), vn.elevenCredits(env)]);
+      return json({ notes, credits });
+    }
     if (request.method === "POST" && path === "/debug/voice") return saveVoiceDebug(request, env);
     if (request.method === "POST" && path === "/voice/live-token") return liveTokenResponse(env);
+    if (path === "/briefing/call-settings" && (request.method === "GET" || request.method === "POST")) {
+      return (await import("./briefing-call")).settingsRoute(request, env);
+    }
+    if (request.method === "POST" && path === "/voice/eleven-session") return elevenSessionResponse(env);
+    if (request.method === "POST" && path === "/voice/eleven-usage") return elevenUsageResponse(request, env);
     if (request.method === "POST" && path === "/messages/sms") return sendOwnerSmsRoute(request, env);
     if (request.method === "GET" && path === "/debug/voice") {
       return json({ revision: VOICE_DEBUG_REVISION, events: await readVoiceDebug(env) });
@@ -152,6 +210,14 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "GET" && path === "/calls/hunts") return listHunts(env);
     if (request.method === "POST" && path === "/calls/hunts") return createHuntRoute(request, env);
     if (request.method === "GET" && path === "/calls/messages") return listCallMessages(env, url);
+    if (request.method === "POST" && (path === "/calls/hangup" || path === "/calls/end-all")) {
+      const { hangUpEverything } = await import("./hangup");
+      return hangUpEverything(env);
+    }
+    if (request.method === "POST" && path === "/debug/owner-line") {
+      const { ownerLinePreview } = await import("./screening");
+      return ownerLinePreview(env);
+    }
     if (request.method === "POST" && path === "/calls/settle") {
       const { settleOpenCalls } = await import("./call-settle");
       return settleOpenCalls(env);
@@ -167,6 +233,11 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     const huntStart = /^\/calls\/hunts\/(hunt_[A-Za-z0-9]+)\/start$/.exec(path);
     if (request.method === "POST" && huntStart) return startHuntRoute(env, huntStart[1]);
     if (request.method === "POST" && path === "/calendar/busy") return saveBusy(request, env);
+    {
+      const { routeDeskApi } = await import("./desk");
+      const desked = await routeDeskApi(request, env, path);
+      if (desked) return desked;
+    }
     const owned = await routeOwnerApi(request, env, path);
     if (owned) return owned;
     const relayed = await routeRelay(request, env, path);
@@ -196,6 +267,8 @@ function normalizePath(pathname: string): string {
   return pathname || "/";
 }
 
+let healthyUntil = 0;
+
 async function health(env: Env): Promise<Response> {
   const body = {
     service: SERVICE,
@@ -205,7 +278,11 @@ async function health(env: Env): Promise<Response> {
     external_actions: false,
   };
   try {
-    await dbFirst<{ ok: number }>(env, "SELECT 1 AS ok");
+    // A healthy D1 answer is reused for a few seconds so health polling does not queue behind real work.
+    if (Date.now() >= healthyUntil) {
+      await dbFirst<{ ok: number }>(env, "SELECT 1 AS ok");
+      healthyUntil = Date.now() + 5_000;
+    }
     return json({ ok: true, ...body, db: "ok" });
   } catch (err) {
     return json(

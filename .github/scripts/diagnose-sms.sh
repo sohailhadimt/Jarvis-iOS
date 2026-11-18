@@ -259,3 +259,6 @@ console.log(JSON.stringify({
 }));
 NODE
 rm -f /tmp/settings.json
+
+# Balance, GB price, and recent owner text delivery (read-only).
+bash "$(dirname "$0")/sms-costs.sh" || echo "sms costs check failed"

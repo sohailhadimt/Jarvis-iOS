@@ -1,3 +1,4 @@
+import { createTwilioCall, twilioUrl } from "./public-url";
 import { BRAIN_IDENTITY, GEORGE_VOICE_ID } from "./brain";
 import { recordHandoff } from "./stream";
 import {
@@ -22,11 +23,11 @@ import { apiError, asString, isRecord, json, newId, nowIso } from "./http";
 import type { Env } from "./types";
 
 /** Spoken before the brief on every outbound call. The principal is Master Hadi, never Sohail. */
-export const OUTBOUND_INTRO = "Hello, this is J.A.R.V.I.S., calling on behalf of Master Hadi.";
+export const OUTBOUND_INTRO = "Hello, this is J.A.R.V.I.S., an AI assistant calling on behalf of Master Hadi.";
 
 /** System line for every outbound call, including ElevenLabs overrides and the Polly fallback. */
 export const OUTBOUND_PERSONA =
-  "You are J.A.R.V.I.S., calling on behalf of Master Hadi, on a live outbound telephone call in the United Kingdom. Refer to him only as Master Hadi. Never call him Sohail.";
+  "You are J.A.R.V.I.S., an AI assistant calling on behalf of Master Hadi, on a live outbound telephone call in the United Kingdom. Always make clear early in the call that you are an AI assistant. If asked, confirm honestly that you are an AI. Refer to him only as Master Hadi. Never call him Sohail.";
 
 /** Said when JARVIS answers a forwarded call. UK disclosure: this is AI, not Master Hadi. */
 export const INBOUND_GREETING =
@@ -448,10 +449,12 @@ export async function handleCallApi(request: Request, env: Env, path: string): P
 async function configResponse(env: Env): Promise<Response> {
   const setup = callingSecrets(env);
   const from = toE164(env.TWILIO_FROM_NUMBER ?? "");
-  const { readOwnerMobile } = await import("./owner-alert");
-  const mobile = await readOwnerMobile(env);
-  const desk = await import("./sms-desk");
-  const chat = await import("./agent-chat");
+  const [{ readOwnerMobile }, desk, chat] = await Promise.all([
+    import("./owner-alert"),
+    import("./sms-desk"),
+    import("./agent-chat"),
+  ]);
+  const [mobile, texts] = await Promise.all([readOwnerMobile(env), desk.textDelivery(env)]);
   return json({
     configured: setup.configured,
     message: setup.configured ? "Calling is ready." : "Calling not set up.",
@@ -459,7 +462,7 @@ async function configResponse(env: Env): Promise<Response> {
     from_number: from,
     forwarding: from ? forwardingCodes(from) : null,
     assistant_webhook: chat.assistantWebhookReady(env),
-    texts: await desk.textDelivery(env),
+    texts,
     screening: {
       mobile_set: Boolean(mobile),
       push: Boolean(env.APNS_KEY_ID?.trim() && env.APNS_TEAM_ID?.trim() && env.APNS_PRIVATE_KEY?.trim()),
@@ -547,7 +550,7 @@ async function createCall(request: Request, env: Env, approvedRoute = false): Pr
 
 async function listCalls(env: Env): Promise<Response> {
   try {
-    const rows = await dbAll<CallRow>(env, "SELECT * FROM outbound_calls ORDER BY created_at DESC LIMIT 50");
+    const rows = await dbAll<CallRow>(env, "SELECT * FROM outbound_calls WHERE to_number NOT LIKE '+447700900%' ORDER BY created_at DESC LIMIT 50");
     const calls = await Promise.all(rows.map((row) => presentCall(env, fromRow(row))));
     return json({ calls });
   } catch {
@@ -866,6 +869,8 @@ async function updateCall(env: Env, id: string, patch: CallPatch): Promise<void>
   if (stored && patch.status === "completed") {
     const { rememberInboundMessage } = await import("./call-messages");
     await rememberInboundMessage(env, id).catch(() => undefined);
+    const { ownerCallFollowUp } = await import("./owner-agent");
+    await ownerCallFollowUp(env, id).catch(() => undefined);
   }
 }
 
@@ -1162,30 +1167,14 @@ export async function placeOutboundCall(env: Env, order: OutboundOrder): Promise
   if (needsDelegation(brief)) {
     await openDelegation(env, { callId: id, contact, to, goal: brief }).catch(() => undefined);
   }
-  const base = await outboundOrigin(env, order.origin);
-  const form = new URLSearchParams();
-  form.set("To", to);
-  form.set("From", from);
-  form.set("Url", `${base}/calls/voice/${id}`);
-  form.set("Method", "POST");
-  form.set("StatusCallback", `${base}/calls/twilio-status/${id}`);
-  form.set("StatusCallbackMethod", "POST");
-  for (const event of ["initiated", "ringing", "answered", "completed"]) form.append("StatusCallbackEvent", event);
-  form.set("Record", "true");
   try {
-    const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls.json`, {
-      method: "POST",
-      redirect: "manual",
-      signal: AbortSignal.timeout(20_000),
-      headers: {
-        authorization: `Basic ${btoa(`${account}:${token}`)}`,
-        "content-type": "application/x-www-form-urlencoded",
-      },
-      body: form.toString(),
+    const attempt = await createTwilioCall(env, (base) => outboundForm(base, id, to, from), {
+      fallbackOrigin: order.origin ?? null,
     });
-    const text = await response.text();
-    if (!response.ok) {
+    const text = attempt.body;
+    if (!attempt.ok) {
       const reason = twilioFailure(text);
+      console.error("outbound call refused by Twilio", attempt.status, reason, attempt.retried ? "after retry" : "");
       await updateCall(env, id, { status: "failed", error: reason });
       return { ok: false, id, error: reason };
     }
@@ -1205,16 +1194,18 @@ export async function placeOutboundCall(env: Env, order: OutboundOrder): Promise
   }
 }
 
-async function outboundOrigin(env: Env, given?: string): Promise<string> {
-  if (given && given.startsWith("http")) return given.replace(/\/$/, "");
-  let saved = "";
-  try {
-    saved = (await dbFirst<{ worker_origin: string }>(env, "SELECT worker_origin FROM call_settings WHERE id = 'default'"))?.worker_origin ?? "";
-  } catch {
-    saved = "";
-  }
-  if (saved.startsWith("http")) return saved.replace(/\/$/, "");
-  return `https://${PUBLIC_VOICE_HOST}`;
+/** The Calls.json form for one outbound call. Every URL is built and validated by twilioUrl. */
+export function outboundForm(base: string, id: string, to: string, from: string): URLSearchParams {
+  const form = new URLSearchParams();
+  form.set("To", to);
+  form.set("From", from);
+  form.set("Url", twilioUrl(base, `/calls/voice/${encodeURIComponent(id)}`));
+  form.set("Method", "POST");
+  form.set("StatusCallback", twilioUrl(base, `/calls/twilio-status/${encodeURIComponent(id)}`));
+  form.set("StatusCallbackMethod", "POST");
+  for (const event of ["initiated", "ringing", "answered", "completed"]) form.append("StatusCallbackEvent", event);
+  form.set("Record", "true");
+  return form;
 }
 
 export async function dialConfirm(env: Env, contact: string, to: string, brief: string): Promise<string | null> {
@@ -1345,8 +1336,12 @@ export interface ElevenCallInput {
   prompt: string;
   contact: string;
   brief: string;
-  /** Use a different ElevenLabs agent (the ASG receptionist). */
+  /** Use a different ElevenLabs agent (the ASG receptionist or the call desk). */
   agentId?: string;
+  /** Extra dynamic variables, e.g. jarvis_call_id for the desk agent's tools. */
+  variables?: Record<string, string>;
+  /** Send first_message and prompt overrides even on an inbound call (Sir's own line). */
+  forceOverrides?: boolean;
 }
 
 export interface ElevenCallResult {
@@ -1397,7 +1392,7 @@ export async function registerElevenLabsCall(env: Env, input: ElevenCallInput): 
   // replace first_message and the prompt on this call. A refused override
   // returns no TwiML so the Polly path speaks the same brief.
   // A dedicated agent (ASG) carries its own prompt, so it registers bare.
-  const overrides = !input.agentId && (input.direction === "outbound" || callOverridesEnabled(env));
+  const overrides = !input.agentId && (input.direction === "outbound" || input.forceOverrides === true || callOverridesEnabled(env));
   const prepare = input.agentId ? "skipped" : await prepareTelephonyAgent(apiKey, agentId);
   let attempt = await postRegister(apiKey, agentId, input, overrides, 6_000);
   if (!attempt.twiml && (attempt.reason === "network" || attempt.reason === "timeout")) {
@@ -1547,6 +1542,7 @@ function registerPayload(agentId: string, input: ElevenCallInput, overrides: boo
       contact_name: input.contact,
       brief: input.brief,
       opening_line: input.first,
+      ...(input.variables ?? {}),
     },
   };
   if (overrides) {

@@ -9,6 +9,7 @@ interface ScreenRow {
   direction: string;
   caller_name: string;
   reason: string;
+  caller_phone?: string;
 }
 
 interface CallRow {
@@ -83,6 +84,9 @@ function messageEnv(
           if (sql.includes("FROM call_devices")) {
             return devices.map((token) => ({ token }));
           }
+          if (sql.includes("FROM call_screen WHERE call_id IN")) {
+            return screens.filter((row) => this.args.map(String).includes(row.call_id));
+          }
           if (sql.includes("WHERE read_at IS NULL")) {
             return messages.filter((row) => row.read_at == null).sort((a, b) => a.created_at.localeCompare(b.created_at));
           }
@@ -137,6 +141,37 @@ function messageEnv(
 const bearer = { authorization: "Bearer secret-token" };
 
 describe("call messages", () => {
+  it("never makes or shows a message card for Sir ringing his own line", async () => {
+    const screens: ScreenRow[] = [
+      { call_id: "call_own", direction: "inbound", caller_name: "Master Haddy", reason: "", caller_phone: "+1 555 765 4321" },
+      { call_id: "call_old", direction: "inbound", caller_name: "Master Haddy", reason: "", caller_phone: "+15557654321" },
+      { call_id: "call_dad", direction: "inbound", caller_name: "Dad", reason: "", caller_phone: "+15550001111" },
+    ];
+    const calls: CallRow[] = [
+      { id: "call_own", status: "completed", summary: "the AI assistant is really good", created_at: "2026-11-18T09:00:00.000Z" },
+    ];
+    const messages: MessageRow[] = [
+      { id: "cmsg_old", call_id: "call_old", caller_name: "Master Haddy", summary: "x", spoken: "Sir, Master Haddy called", called_at: "2026-11-07T21:40:00.000Z", read_at: null, created_at: "2026-11-07T21:40:00.000Z" },
+      { id: "cmsg_dad", call_id: "call_dad", caller_name: "Dad", summary: "ring back", spoken: "Sir, Dad called", called_at: "2026-10-21T16:59:00.000Z", read_at: null, created_at: "2026-10-21T16:59:00.000Z" },
+    ];
+    const env = messageEnv(screens, calls, messages);
+    const original = globalThis.fetch;
+    let texts = 0;
+    globalThis.fetch = (async () => { texts += 1; return new Response("{}", { status: 201 }); }) as typeof fetch;
+    try {
+      expect(await rememberInboundMessage(env, "call_own")).toBe(true);
+      expect(messages.some((row) => row.call_id === "call_own")).toBe(false);
+      expect(texts).toBe(0);
+      for (const query of ["", "?unread=1"]) {
+        const response = await route(new Request(`https://jarvis.example/calls/messages${query}`, { headers: bearer }), env, ctx());
+        const body = (await response.json()) as { messages: { id: string }[] };
+        expect(body.messages.map((row) => row.id)).toEqual(["cmsg_dad"]);
+      }
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it("speaks the caller, the London time, and a callback number", () => {
     const line = spokenCallMessage(
       "Sohil",

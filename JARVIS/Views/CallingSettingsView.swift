@@ -40,6 +40,16 @@ struct CallingSettingsView: View {
 
             Section {
                 NavigationLink {
+                    BriefingCallSettingsView()
+                } label: {
+                    Label("Morning briefing call", systemImage: "sun.horizon")
+                }
+            } footer: {
+                Text("JARVIS rings you at the time you choose and reads your briefing. You can ask follow-up questions on the call.")
+            }
+
+            Section {
+                NavigationLink {
                     InterceptorView()
                 } label: {
                     Label("Interceptor", systemImage: "phone.arrow.down.left")

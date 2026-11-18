@@ -1,3 +1,4 @@
+import { createTwilioCall, twilioUrl } from "./public-url";
 /**
  * JARVIS proactive alert calls. POST /alert (Bearer ALERT_KEY) places ONE outbound call
  * from the Twilio number to the owner's own mobile (OWNER_PHONE / saved call settings).
@@ -183,27 +184,26 @@ async function placeCall(env: Env, id: string, a: AlertInput, origin: string): P
   const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
   const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
   if (!to || !from || !account || !token) return null;
-  const form = new URLSearchParams({
-    To: to,
-    From: from,
-    Twiml: twiml(id, a, origin),
-    TimeLimit: "120",
-    Timeout: "25",
-    StatusCallback: `${origin}/alert/call/${id}/status`,
-    StatusCallbackMethod: "POST",
-  });
   try {
-    const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(account)}/Calls.json`, {
-      method: "POST",
-      signal: AbortSignal.timeout(20_000),
-      headers: { authorization: `Basic ${btoa(`${account}:${token}`)}`, "content-type": "application/x-www-form-urlencoded" },
-      body: form.toString(),
-    });
+    const r = await createTwilioCall(
+      env,
+      (base) =>
+        new URLSearchParams({
+          To: to,
+          From: from,
+          Twiml: twiml(id, a, base),
+          TimeLimit: "120",
+          Timeout: "25",
+          StatusCallback: twilioUrl(base, `/alert/call/${encodeURIComponent(id)}/status`),
+          StatusCallbackMethod: "POST",
+        }),
+      { fallbackOrigin: origin },
+    );
     if (!r.ok) {
-      console.error("alert call failed", r.status, safeError((await r.text()).slice(0, 200)));
+      console.error("alert call failed", r.status, safeError(r.body.slice(0, 200)));
       return null;
     }
-    return ((await r.json()) as { sid?: string }).sid ?? null;
+    return (JSON.parse(r.body) as { sid?: string }).sid ?? null;
   } catch (err) {
     console.error("alert call error", safeError(err instanceof Error ? err.message : "call"));
     return null;

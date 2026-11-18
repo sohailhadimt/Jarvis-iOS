@@ -1,5 +1,6 @@
 import { dbAll, dbFirst, dbRun, getState, setState } from "./db";
 import { apiError, json, newId, nowIso } from "./http";
+import { isOwnerCaller } from "./hangup";
 import { readOwnerMobile } from "./owner-alert";
 import { pushNotice } from "./screening";
 import { sendSmsResult, type SmsResult } from "./sms-desk";
@@ -9,6 +10,7 @@ interface ScreenBits {
   direction: string;
   caller_name: string;
   reason: string;
+  caller_phone?: string | null;
 }
 
 interface CallBits {
@@ -111,11 +113,15 @@ export async function rememberInboundMessage(env: Env, callId: string): Promise<
   try {
     const screen = await dbFirst<ScreenBits>(
       env,
-      "SELECT direction, caller_name, reason FROM call_screen WHERE call_id = ?",
+      "SELECT direction, caller_name, reason, caller_phone FROM call_screen WHERE call_id = ?",
       [callId],
     );
     if (!screen || screen.direction !== "inbound") return false;
     inbound = true;
+    // Sir ringing his own line is a conversation with JARVIS, never a message card from a stranger.
+    if (isOwnerCaller(screen.caller_phone ?? null, await readOwnerMobile(env))) return true;
+    const line = await dbFirst<{ brief: string | null }>(env, "SELECT brief FROM outbound_calls WHERE id = ?", [callId]).catch(() => null);
+    if (line?.brief === "Owner on his JARVIS line") return true;
     const call = await dbFirst<CallBits>(
       env,
       "SELECT status, summary, created_at FROM outbound_calls WHERE id = ?",
@@ -461,12 +467,44 @@ async function releaseSendLock(env: Env, callId: string): Promise<void> {
 export async function listCallMessages(env: Env, url: URL): Promise<Response> {
   const unread = url.searchParams.get("unread") === "1";
   try {
-    const rows = await dbAll<MessageRow>(env, unread ? UNREAD_SQL : RECENT_SQL);
+    const rows = await withoutOwnerCalls(env, await dbAll<MessageRow>(env, unread ? UNREAD_SQL : RECENT_SQL));
     const messages = await Promise.all(rows.map((row) => present(env, row)));
     return json({ messages });
   } catch {
     return json({ messages: [] });
   }
+}
+
+/** Drops cards for calls Sir made to his own line (older ones were saved before the owner line existed). */
+export async function withoutOwnerCalls<T extends { call_id: string; caller_name?: string }>(env: Env, rows: T[]): Promise<T[]> {
+  if (rows.length === 0) return rows;
+  const owner = await readOwnerMobile(env).catch(() => null);
+  if (!owner) return rows;
+  const ids = rows.map((row) => row.call_id);
+  const marks = ids.map(() => "?").join(",");
+  const phones = new Map<string, string>();
+  try {
+    const screens = await dbAll<{ call_id: string; caller_phone: string | null }>(
+      env,
+      `SELECT call_id, caller_phone FROM call_screen WHERE call_id IN (${marks})`,
+      ids,
+    );
+    for (const screen of screens) if (screen.caller_phone) phones.set(screen.call_id, screen.caller_phone);
+  } catch {
+    return rows;
+  }
+  const ownerLine = new Set<string>();
+  try {
+    const lines = await dbAll<{ id: string }>(
+      env,
+      `SELECT id FROM outbound_calls WHERE id IN (${marks}) AND brief = 'Owner on his JARVIS line'`,
+      ids,
+    );
+    for (const line of lines) ownerLine.add(line.id);
+  } catch {
+    // Caller ID alone still filters.
+  }
+  return rows.filter((row) => !ownerLine.has(row.call_id) && !isOwnerCaller(phones.get(row.call_id) ?? null, owner));
 }
 
 export async function getCallMessage(env: Env, id: string): Promise<Response> {

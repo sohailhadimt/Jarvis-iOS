@@ -7,7 +7,7 @@ token="${JARVIS_APP_TOKEN:-}"
 
 hit() {
   local name="$1" method="$2" path="$3" body="${4:-}" auth="${5:-}"
-  local args=(-sS -o "/tmp/live-${name}.json" -w "%{http_code}" -X "$method" --max-time 20)
+  local args=(-sS -o "/tmp/live-${name}.json" -w "%{http_code}" -X "$method" --max-time "${CURL_MAX:-20}")
   if [ "$auth" = "yes" ]; then
     args+=(-H "authorization: Bearer ${token}")
   fi
@@ -45,7 +45,7 @@ hit brain_line POST /brain/line '{"source":"sms","role":"user","text":"The boile
 hit brain_history GET /brain/history "" yes
 hit sms_sim_offer POST /debug/sms-simulate '{"text":"Call 07700 900123 with a greeting and a Modern Warfare brief"}' yes
 hit sms_sim_fix POST /debug/sms-simulate '{"text":"No you got the number wrong its 07700 900 456"}' yes
-hit sms_sim_yes POST /debug/sms-simulate '{"text":"YES"}' yes
+# No YES step: a simulated YES dials through Twilio. The offer and the correction must still wait for YES.
 hit sms_log GET /debug/last-sms "" yes
 
 node --input-type=module <<'NODE'
@@ -97,23 +97,19 @@ if (!found || history.revision !== "brain-1" || history.voice !== "George") {
 }
 const offer = read("sms_sim_offer") || {};
 const fix = read("sms_sim_fix") || {};
-const yes = read("sms_sim_yes") || {};
 const smsLog = read("sms_log") || {};
 const brains = Array.isArray(smsLog.messages) ? smsLog.messages.map((row) => row && row.brain).filter(Boolean) : [];
-const yesReply = String(yes.reply || "");
-const calling = /\bcalling\b/i.test(yesReply);
-const honest = /nothing was dialled/i.test(yesReply);
-const claimed = /has been placed|being initiated/i.test(yesReply);
-console.log(`sms_yes brains=${[...new Set(brains)].join(",")} calling=${calling} honest=${honest} claimed=${claimed}`);
+console.log(`sms_offer brains=${[...new Set(brains)].join(",")}`);
 if (!String(offer.reply || "").includes("Reply YES") || !String(fix.reply || "").includes("Reply YES")) {
   console.error("sms simulate did not wait for YES");
   process.exit(1);
 }
-if (claimed || (calling && honest) || (!calling && !honest)) {
-  console.error("sms YES did not follow the call SID rule");
+const premature = /\b(calling now|has been placed|being initiated)\b/i;
+if (premature.test(String(offer.reply || "")) || premature.test(String(fix.reply || ""))) {
+  console.error("sms offer claimed a call before YES");
   process.exit(1);
 }
-const smsDump = JSON.stringify({ brains, calling, honest, claimed });
+const smsDump = JSON.stringify({ brains });
 if (/\+\d{8,}/.test(smsDump)) {
   console.error("sms simulate leaked a phone number");
   process.exit(1);
@@ -131,3 +127,126 @@ if [ "$outbound_code" != "not_approved" ]; then
   exit 1
 fi
 rm -f /tmp/live-*.json
+
+# Owner SMS conversation: three simulated texts on a test thread (an Ofcom drama number). Nothing is sent.
+if [ -n "$token" ]; then
+  CURL_MAX=45 hit chat_1 POST /debug/sms-simulate '{"text":"Evening Jarvis, how are you doing tonight?","thread":"1","reset":true}' yes
+  CURL_MAX=45 hit chat_2 POST /debug/sms-simulate '{"text":"Bit tired. I had fish and chips from the Yellow Fisherman for dinner.","thread":"1"}' yes
+  CURL_MAX=45 hit chat_3 POST /debug/sms-simulate '{"text":"What did I just say I had for dinner?","thread":"1"}' yes
+  node --input-type=module <<'NODE'
+import { readFileSync } from "node:fs";
+const read = (name) => { try { return JSON.parse(readFileSync(`/tmp/live-${name}.json`, "utf8")); } catch { return {}; } };
+const turns = ["chat_1", "chat_2", "chat_3"].map(read);
+turns.forEach((turn, i) => console.log(`sms_chat_${i + 1} history=${turn.history ?? ""} sent=${turn.sent} chars=${String(turn.reply || "").length} reply=${JSON.stringify(String(turn.reply || "").replace(/\+\d{6,}/g, "[number]"))}`));
+const third = String(turns[2].reply || "");
+if (turns.some((turn) => turn.sent === true)) { console.error("simulate sent a text"); process.exit(1); }
+if (turns[2].history !== 6) console.error(`sms chat history expected 6, got ${turns[2].history}`);
+if (!/fish|chips|yellow fisherman/i.test(third)) console.error("sms chat did not recall the earlier text");
+NODE
+  rm -f /tmp/live-chat_*.json
+fi
+
+# Voice notes. Each simulated request runs once per nonce (in voice-check.nonce), so a deploy does not
+# spend ElevenLabs credits twice. The clip links are public by design: the link is the key to one clip.
+if [ -n "$token" ]; then
+  here="$(cd "$(dirname "$0")" && pwd)"
+  nonce="$(tr -dc 'A-Za-z0-9_-' < "$here/voice-check.nonce" 2>/dev/null || true)"
+  if [ -n "$nonce" ]; then
+    CURL_MAX=60 hit voice_beatbox POST /debug/voice-once "{\"nonce\":\"${nonce}-beatbox\",\"text\":\"Send me a voice message of you beatboxing\"}" yes
+    CURL_MAX=60 hit voice_speech POST /debug/voice-once "{\"nonce\":\"${nonce}-speech\",\"text\":\"Send me a voice note saying good night\"}" yes
+    CURL_MAX=60 hit voice_speech2 POST /debug/voice-once "{\"nonce\":\"${nonce}-speech2\",\"text\":\"Send me a voice note wishing me luck for tomorrow\"}" yes
+    CURL_MAX=60 hit voice_rap POST /debug/voice-once "{\"nonce\":\"${nonce}-rap\",\"text\":\"Can you rap for me about fish and chips\"}" yes
+  fi
+  if [ -f "$here/voice-proof.on" ]; then
+    CURL_MAX=60 hit voice_proof POST /debug/voice-proof '{}' yes
+  fi
+  hit voice_notes GET /debug/voice-notes "" yes
+  for f in voice_beatbox voice_speech voice_speech2 voice_rap voice_proof voice_notes; do
+    [ -f "/tmp/live-$f.json" ] && echo "$f $(sed -E 's/\+[0-9]{6,}/[number]/g' "/tmp/live-$f.json" | cut -c1-700)"
+  done
+  rm -f /tmp/live-voice_*.json
+fi
+
+# Beatbox lab: candidates run once per nonce in voice-lab.nonce. voice-send.json texts Sir one chosen
+# note once per nonce (the worker refuses a repeat) and reports Twilio's delivery status.
+if [ -n "$token" ]; then
+  here="$(cd "$(dirname "$0")" && pwd)"
+  lab="$(tr -dc 'A-Za-z0-9_-' < "$here/voice-lab.nonce" 2>/dev/null || true)"
+  if [ -n "$lab" ]; then
+    CURL_MAX=120 hit voice_lab POST /debug/voice-lab "{\"nonce\":\"${lab}\"}" yes
+    echo "voice_lab_result $(cut -c1-1500 /tmp/live-voice_lab.json)"
+  fi
+  if [ -f "$here/voice-send.json" ]; then
+    CURL_MAX=60 hit voice_send POST /debug/voice-send "$(cat "$here/voice-send.json")" yes
+    echo "voice_send_result $(sed -E 's/\+[0-9]{6,}/[number]/g' /tmp/live-voice_send.json | cut -c1-600)"
+  fi
+  rm -f /tmp/live-voice_lab.json /tmp/live-voice_send.json
+fi
+
+# Text-line extras. Simulations send nothing (Ofcom drama numbers, capture mode). Voice notes and the
+# run once per nonce in extras.nonce, so a rerun spends nothing. No step here replies YES or dials.
+if [ -n "$token" ]; then
+  here="$(cd "$(dirname "$0")" && pwd)"
+  sim() {
+    local name="$1" text="$2" thread="${3:-20}" extra="${4:-}"
+    CURL_MAX=45 hit "x_${name}" POST /debug/sms-simulate "{\"text\":\"${text}\",\"thread\":\"${thread}\"${extra}}" yes
+    echo "x_${name}_reply $(sed -E 's/\+[0-9]{6,}/[number]/g' "/tmp/live-x_${name}.json" | cut -c1-700)"
+  }
+  sim help "help" 20 ',"reset":true'
+  sim remind "remind me in 2 mins to stretch" 20
+  sim remind_at "remind me at 6 to call mum" 20
+  sim remind_list "my reminders" 20
+  sim remind_cancel "cancel my reminders" 20
+  sim remind_soon "remind me in 1 min to drink water" 20
+  sim morning_stop "stop morning" 20
+  sim morning_start "start morning" 20
+  sim morning_view "morning text" 20
+  sim photo_link "what is this? https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png" 21
+  sim photo_mms "" 21 ',"media":["https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png"]'
+  sim near_pharmacy "nearest open pharmacy" 22
+  sim near_petrol "closest petrol station near Folkestone" 22
+  sim near_chippy "nearest chippy" 22
+  sim watch_stock "watch tesla stock and text me when it's under \$200" 23 ',"reset":true'
+  sim watch_item "watch PS5 and text me when under £400" 23
+  sim watch_list "my watches" 23
+  sim watch_stop "stop watching all" 23
+  sim agent "tell Project Money to find 5 leads in Ashford" 24
+  sim prank_bad "prank call 07700 900123 and say it's customs and their parcel is held" 25 ',"reset":true'
+  sim prank_ok "prank 07700 900123 with a fake award for best kettle in Kent" 25
+  # No prank YES: it would dial through Twilio. The offer above must ask for YES and dial nothing.
+  sim ring_name "ring Dominos in Ashford and ask if they deliver to TN24 tonight" 26 ',"reset":true'
+  sim ring_personal "ring my mum and ask if she wants dinner" 26
+  sim diss_bad "make a diss track about how fat my cousin is" 27
+  sim chat_still "how are you doing?" 27
+  for biz in "Halfords|Ashford" "Ashford Borough Council|Ashford" "Dominos|Ashford"; do
+    n="${biz%%|*}"; p="${biz##*|}"
+    CURL_MAX=40 hit x_phone POST /debug/extras "{\"action\":\"find-phone\",\"name\":\"${n}\",\"place\":\"${p}\"}" yes
+    echo "x_phone_result ${n}: $(cut -c1-200 /tmp/live-x_phone.json)"
+  done
+  CURL_MAX=40 hit x_search POST /debug/extras '{"action":"search","q":"Halfords Ashford Kent phone number"}' yes
+  echo "x_search_result $(sed -E 's/\+[0-9]{6,}/[number]/g' /tmp/live-x_search.json | cut -c1-1500)"
+  CURL_MAX=40 hit x_quote POST /debug/extras '{"action":"quote","symbol":"TSLA"}' yes
+  echo "x_quote_result $(cut -c1-300 /tmp/live-x_quote.json)"
+  CURL_MAX=40 hit x_morning POST /debug/extras '{"action":"morning"}' yes
+  echo "x_morning_result $(cut -c1-500 /tmp/live-x_morning.json)"
+  xn="$(tr -dc 'A-Za-z0-9_-' < "$here/extras.nonce" 2>/dev/null || true)"
+  if [ -n "$xn" ]; then
+    for kind in roast hype diss; do
+      case "$kind" in
+        roast) t="roast me" ;;
+        hype) t="hype me up for the gym" ;;
+        diss) t="make a diss track about my cousin's terrible cooking" ;;
+      esac
+      CURL_MAX=90 hit "x_voice_${kind}" POST /debug/voice-once "{\"nonce\":\"${xn}-${kind}\",\"text\":\"${t}\"}" yes
+      echo "x_voice_${kind}_result $(cut -c1-500 "/tmp/live-x_voice_${kind}.json")"
+    done
+    # The reminder-call test is gone: CI never places a real Twilio call.
+  fi
+  CURL_MAX=30 hit x_state POST /debug/extras '{"action":"state"}' yes
+  echo "x_state_result $(sed -E 's/\+[0-9]{6,}/[number]/g' /tmp/live-x_state.json | cut -c1-3000)"
+  if [ -f "$here/extras-summary.json" ]; then
+    CURL_MAX=30 hit x_summary POST /debug/extras "$(cat "$here/extras-summary.json")" yes
+    echo "x_summary_result $(sed -E 's/\+[0-9]{6,}/[number]/g' /tmp/live-x_summary.json | cut -c1-400)"
+  fi
+  rm -f /tmp/live-x_*.json
+fi

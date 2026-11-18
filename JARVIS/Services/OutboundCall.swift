@@ -402,13 +402,46 @@ enum CallLogStore {
         guard let data = UserDefaults.standard.data(forKey: key) else { return [] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return (try? decoder.decode([StoredCall].self, from: data)) ?? []
+        let rows = (try? decoder.decode([StoredCall].self, from: data)) ?? []
+        // Older builds could save the same call twice. Duplicate ids crash or confuse SwiftUI lists.
+        var seen = Set<String>()
+        return rows.filter { seen.insert($0.id).inserted }
     }
 
     static func add(_ row: StoredCall) {
+        update(row)
+    }
+
+    /// Open inbound calls saved on this phone (the server is the source of truth for their end).
+    static func openInbound() -> [StoredCall] {
+        entries().filter { $0.direction == "inbound" && CallDeskStage.of($0) != .ended && !$0.id.hasPrefix("local_") }
+    }
+
+    /// Marks one saved call as ended so its card and the "On the call" header clear.
+    static func end(id: String) {
         var rows = entries()
-        rows.insert(row, at: 0)
+        guard let index = rows.firstIndex(where: { $0.id == id }) else { return }
+        rows[index].status = "completed"
+        rows[index].stage = "ended"
+        rows[index].spoken = true
+        rows[index].updatedAt = Date()
         save(rows)
+    }
+
+    /// No real call stays live for hours. A card whose end never reached the phone is closed here.
+    static func settleStale(now: Date = Date()) {
+        var rows = entries()
+        var changed = false
+        for index in rows.indices where CallDeskStage.of(rows[index]) != .ended {
+            let age = now.timeIntervalSince(rows[index].updatedAt)
+            let limit: TimeInterval = rows[index].direction == "inbound" ? 30 * 60 : 45 * 60
+            guard age > limit else { continue }
+            rows[index].status = "completed"
+            rows[index].stage = "ended"
+            rows[index].spoken = true
+            changed = true
+        }
+        if changed { save(rows) }
     }
 
     static func update(_ row: StoredCall) {

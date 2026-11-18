@@ -243,3 +243,7 @@ npx tsc --noEmit
 npx vitest run
 npx wrangler dev
 ```
+
+## CI live check
+
+`.github/scripts/live-check.sh` runs after each deploy against the live Worker. It never replies YES, never dials and never places a Twilio call: call offers are checked only for asking "Reply YES" and claiming nothing was dialled.

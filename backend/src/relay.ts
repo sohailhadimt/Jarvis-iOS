@@ -1,3 +1,4 @@
+import { publicBase, twilioUrl } from "./public-url";
 import { dbAll, dbFirst, dbRun } from "./db";
 import { apiError, asString, isRecord, json, newId, nowIso } from "./http";
 import type { CallLine } from "./calls";
@@ -90,7 +91,7 @@ export async function sweepQuestions(env: Env): Promise<void> {
     if (changes === 0) continue;
     const call = await dbFirst<{ twilio_sid: string | null }>(env, "SELECT twilio_sid FROM outbound_calls WHERE id = ?", [row.call_id]);
     if (call?.twilio_sid && row.origin) {
-      await redirectCall(env, call.twilio_sid, `${row.origin}/calls/voice/${row.call_id}?mode=callback`);
+      await redirectCall(env, call.twilio_sid, twilioUrl(publicBase(env, row.origin), `/calls/voice/${encodeURIComponent(row.call_id)}`, { mode: "callback" }));
     }
     const followId = newId("task");
     await dbRun(
@@ -166,7 +167,7 @@ async function answerQuestion(request: Request, env: Env, callId: string): Promi
   const call = await dbFirst<{ twilio_sid: string | null }>(env, "SELECT twilio_sid FROM outbound_calls WHERE id = ?", [callId]);
   const origin = row.origin || new URL(request.url).origin;
   if (call?.twilio_sid) {
-    const moved = await redirectCall(env, call.twilio_sid, `${origin}/calls/voice/${callId}?mode=relay`);
+    const moved = await redirectCall(env, call.twilio_sid, twilioUrl(publicBase(env, origin), `/calls/voice/${encodeURIComponent(callId)}`, { mode: "relay" }));
     if (!moved) return apiError(502, "twilio", "The answer was saved, but the live call could not be updated.");
   }
   return json({ ok: true });

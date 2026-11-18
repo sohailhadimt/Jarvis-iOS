@@ -19,6 +19,7 @@ final class GeminiLiveTests: XCTestCase {
         let text = LiveWire.setup(instruction: "You are JARVIS. Known: the gate code.", declarations: declarations, modality: .text)
         XCTAssertTrue(text.contains("gemini-3.8-live"))
         XCTAssertTrue(text.contains("\"TEXT\""))
+        XCTAssertTrue(text.contains("generationConfig"), "Live API closes 1007 on a top-level responseModalities")
         XCTAssertTrue(text.contains("You are JARVIS"))
         XCTAssertTrue(text.contains("web_search"))
         XCTAssertTrue(text.contains("BLOCKING"))

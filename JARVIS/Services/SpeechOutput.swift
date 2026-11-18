@@ -1,4 +1,5 @@
 import AVFoundation
+import CallKit
 import Foundation
 
 /// Speaks replies with ElevenLabs streaming PCM. The British device voice is the fallback when that cannot start.
@@ -351,7 +352,12 @@ final class SpeechOutput: NSObject {
     /// Playback engine. Voice processing and a mic tap are attached only when the listener
     /// engine is not already holding the microphone.
     private func openEngine(monitorMicrophone: Bool) throws -> AVAudioPlayerNode {
+        // During a phone call iOS owns the audio hardware and the output format reads 0 Hz / 0 channels.
+        // Connecting a player or tapping the mixer then raises an Objective-C exception that kills the app.
+        guard !CellularCall.active else { throw ListenerError.noInput }
         let engine = AVAudioEngine()
+        let hardware = engine.outputNode.outputFormat(forBus: 0)
+        guard hardware.sampleRate > 0, hardware.channelCount > 0 else { throw ListenerError.noInput }
         var monitoring = false
         if monitorMicrophone {
             do {
@@ -444,6 +450,10 @@ final class SpeechOutput: NSObject {
             guard levels.allow() else { return }
             Task { @MainActor in self?.onLevel?(value) }
         }
+        let format = mixer.outputFormat(forBus: 0)
+        guard format.sampleRate > 0, format.channelCount > 0 else { return }
+        // A second tap on the same bus is an Objective-C exception, so clear any tap left by a rebuilt engine.
+        mixer.removeTap(onBus: 0)
         mixer.installTap(onBus: 0, bufferSize: 1024, format: nil, block: AudioTaps.levelTap(levelHandler))
         sharedTapInstalled = true
     }
@@ -553,6 +563,59 @@ final class SpeechOutput: NSObject {
         if fillerActive { stopFiller() }
     }
 
+    // MARK: Streaming agent audio (ElevenLabs Agents)
+
+    /// Called on the main actor when every agent buffer handed over so far has been heard.
+    var onAgentAudioDrained: (() -> Void)?
+    private var agentPending = 0
+    private var agentGeneration = 0
+
+    /// A byte left over when a chunk splits a 16-bit sample. Dropping it would shift every later sample into noise.
+    private var agentCarry: UInt8?
+    /// Silence ahead of the first chunk of each reply, so a late second chunk does not stutter.
+    private static let agentCushionFrames: Int = 1_440  // 60 ms at 24 kHz
+
+    /// Plays one 24 kHz 16-bit PCM chunk from the agent at once, gapless behind the previous chunk.
+    func playAgentPCM(_ data: Data) {
+        var bytes = data
+        if let carry = agentCarry {
+            bytes.insert(carry, at: bytes.startIndex)
+            agentCarry = nil
+        }
+        if bytes.count % 2 == 1, let last = bytes.last {
+            agentCarry = last
+            bytes.removeLast()
+        }
+        guard let buffer = makeBuffer(bytes),
+              let player = try? ensureEngine(monitorMicrophone: false) else { return }
+        if agentPending == 0, let cushion = makeBuffer(Data(count: Self.agentCushionFrames * 2)) {
+            noteScheduled(cushion, on: player)
+            player.scheduleBuffer(cushion, completionHandler: nil)
+        }
+        track(buffer)
+        noteScheduled(buffer, on: player)
+        agentPending += 1
+        let generation = agentGeneration
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, generation == self.agentGeneration else { return }
+                self.agentPending = max(0, self.agentPending - 1)
+                if self.agentPending == 0 { self.onAgentAudioDrained?() }
+            }
+        }
+    }
+
+    /// Barge-in: drops everything queued for the agent's current reply.
+    func stopAgentPCM() {
+        agentGeneration += 1
+        agentPending = 0
+        agentCarry = nil
+        preparePlayback()
+        stop()
+    }
+
+    var agentAudioQueued: Bool { agentPending > 0 }
+
     func stop() {
         fillerActive = false
         deviceSpeech.stop()
@@ -634,5 +697,14 @@ final class DeviceSpeech: NSObject, AVSpeechSynthesizerDelegate, @unchecked Send
         signal = nil
         lock.unlock()
         pending?.fire()
+    }
+}
+
+/// True while a cellular, FaceTime or VoIP call is up on this iPhone.
+enum CellularCall {
+    private static let observer = CXCallObserver()
+
+    static var active: Bool {
+        observer.calls.contains { !$0.hasEnded }
     }
 }

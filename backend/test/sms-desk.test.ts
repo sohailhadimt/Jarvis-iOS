@@ -75,7 +75,7 @@ describe("text desk", () => {
     const bubbles = capabilityBubbles();
     expect(bubbles.join(" ")).toContain("book me a dentist this week");
     expect(bubbles.join(" ")).toContain("find a plumber who can come today");
-    expect(bubbles.at(-1)).toBe("I'll text or call you when something needs you.");
+    expect(bubbles.at(-1)).toContain("Text 'help'");
     expect(smsBubbles("Of course, Sir. I can do that. Shall I go ahead?")).toEqual([
       "Of course, Sir.",
       "I can do that.",
@@ -377,7 +377,7 @@ describe("text desk", () => {
       return new Response("{}", { status: 404 });
     }) as typeof fetch;
     try {
-      await handleInboundSms(env, "+15557654321", "What is the weather in Paris");
+      await handleInboundSms(env, "+15557654321", "What is the capital of Peru");
       expect(sentSchema).not.toContain("additionalProperties");
       expect(texts.join(" ")).toContain("couldn't reach my notes");
       const logged = JSON.parse(kv.get("sms_last_errors") ?? "[]") as Array<{ where: string; error: string }>;
@@ -513,7 +513,8 @@ describe("text desk", () => {
       expect(calls).toHaveLength(1);
       expect(models).toHaveLength(0);
       const missed = texts.join(" ");
-      expect(missed).toContain("Twilio did not return a call SID");
+      expect(missed).toContain("didn't go through");
+      expect(missed).not.toMatch(/Twilio|SID|https?:/);
       expect(missed).toContain("Nothing was dialled");
       expect(missed.toLowerCase()).not.toMatch(/\bcalling\b/);
       expect(missed.toLowerCase()).not.toContain("has been placed");
@@ -730,7 +731,8 @@ describe("text desk", () => {
       expect(calls).toHaveLength(1);
       expect(models).toHaveLength(0);
       const missing = texts.join(" ");
-      expect(missing).toContain("Twilio did not return a call SID.");
+      expect(missing).toContain("Nothing was dialled");
+      expect(missing).not.toMatch(/Twilio|SID|https?:/);
       expect(missing.toLowerCase()).not.toMatch(/\bcalling\b/);
 
       calls.length = 0;
@@ -739,8 +741,8 @@ describe("text desk", () => {
       await handleInboundSms(env, "+447700900123", ask);
       expect(calls).toHaveLength(1);
       const failed = texts.join(" ");
-      expect(failed).toContain("21211");
-      expect(failed).toContain("The number is not valid.");
+      expect(failed).toContain("isn't one I can ring");
+      expect(failed).not.toMatch(/21211|Twilio/);
       expect(failed.toLowerCase()).not.toMatch(/\bcalling\b/);
 
       calls.length = 0;

@@ -17,6 +17,7 @@ struct JARVISApp: App {
             RootView()
                 .environment(engine)
                 .environment(settings)
+                .task { ContactSync.shared.syncOnLaunch() }
         }
         .modelContainer(JarvisStore.container)
     }
