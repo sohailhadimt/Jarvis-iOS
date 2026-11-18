@@ -550,7 +550,7 @@ async function createCall(request: Request, env: Env, approvedRoute = false): Pr
 
 async function listCalls(env: Env): Promise<Response> {
   try {
-    const rows = await dbAll<CallRow>(env, "SELECT * FROM outbound_calls ORDER BY created_at DESC LIMIT 50");
+    const rows = await dbAll<CallRow>(env, "SELECT * FROM outbound_calls WHERE to_number NOT LIKE '+447700900%' ORDER BY created_at DESC LIMIT 50");
     const calls = await Promise.all(rows.map((row) => presentCall(env, fromRow(row))));
     return json({ calls });
   } catch {

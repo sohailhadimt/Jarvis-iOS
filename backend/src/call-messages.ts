@@ -120,6 +120,8 @@ export async function rememberInboundMessage(env: Env, callId: string): Promise<
     inbound = true;
     // Sir ringing his own line is a conversation with JARVIS, never a message card from a stranger.
     if (isOwnerCaller(screen.caller_phone ?? null, await readOwnerMobile(env))) return true;
+    const line = await dbFirst<{ brief: string | null }>(env, "SELECT brief FROM outbound_calls WHERE id = ?", [callId]).catch(() => null);
+    if (line?.brief === "Owner on his JARVIS line") return true;
     const call = await dbFirst<CallBits>(
       env,
       "SELECT status, summary, created_at FROM outbound_calls WHERE id = ?",
@@ -491,7 +493,18 @@ export async function withoutOwnerCalls<T extends { call_id: string; caller_name
   } catch {
     return rows;
   }
-  return rows.filter((row) => !isOwnerCaller(phones.get(row.call_id) ?? null, owner));
+  const ownerLine = new Set<string>();
+  try {
+    const lines = await dbAll<{ id: string }>(
+      env,
+      `SELECT id FROM outbound_calls WHERE id IN (${marks}) AND brief = 'Owner on his JARVIS line'`,
+      ids,
+    );
+    for (const line of lines) ownerLine.add(line.id);
+  } catch {
+    // Caller ID alone still filters.
+  }
+  return rows.filter((row) => !ownerLine.has(row.call_id) && !isOwnerCaller(phones.get(row.call_id) ?? null, owner));
 }
 
 export async function getCallMessage(env: Env, id: string): Promise<Response> {

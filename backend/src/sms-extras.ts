@@ -192,6 +192,11 @@ export function parseReminder(text: string, now = new Date()): ParsedReminder | 
   return { task: task || "your reminder", dueAt: due, byCall };
 }
 
+/** "I've sent you the photo", "use the pic I sent", "did you get my video". */
+export function saysSentPicture(text: string): boolean {
+  return /\b(?:i(?:'ve| have)?\s+(?:just\s+)?sent|i\s+send|did (?:u|you) (?:get|see)|(?:use|look at|check) the)\b[^.?!]{0,40}\b(?:photo|pic|picture|image|video|vid|clip|screenshot|screen ?shot)s?\b/i.test(text);
+}
+
 export const WAKE_TASK = "time to wake up";
 /** A reminder task starting with this is spoken word for word on the call. */
 export const SAY_PREFIX = "say:";
@@ -1219,6 +1224,13 @@ export async function smsExtras(env: Env, phone: string, text: string, media: st
     }
   }
   if (!clean) return false;
+
+  if (!media.length && saysSentPicture(clean)) {
+    await ctx.send(
+      "Nothing came through, Sir. This UK number can't receive photos or videos, so picture messages never reach me. Describe it, or send it as a link, and I'll take it from there.",
+    );
+    return true;
+  }
 
   if (helpAsk(clean)) {
     for (const line of helpTexts()) await ctx.send(line);

@@ -13,7 +13,7 @@ import { LANGUAGE_DETECTION_TOOL, agentLanguageRule, languagePresets, multilingu
  */
 
 export const OWNER_AGENT_NAME = "JARVIS Personal";
-export const OWNER_AGENT_VERSION = "owner-3";
+export const OWNER_AGENT_VERSION = "owner-4";
 
 export function ownerGreeting(now = new Date()): string {
   const hour = Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", hour: "2-digit", hourCycle: "h23" }).format(now));
@@ -43,7 +43,9 @@ export function ownerAgentPrompt(): string {
     "You CAN text Sir during this call. You are not voice-only. When he says 'text me', 'send me that', 'message me the build', or asks for anything in writing (a list, a build, a number, an address, a recipe, a summary), call send_sms_to_owner with the full text, then say 'Sent to your phone, Sir.' Only say it was sent if the tool returns ok. Never say you cannot text or that you are voice-only.",
     "Tools: get_weather for any place and day (Ashford, Kent if he does not say). web_search for anything current: sport, news, opening hours, prices, phone numbers of businesses. lookup_contact for a name in his own phone contacts. Always use a tool for current facts; never guess a score, a price, a date or a number. Say a few words such as 'One moment, Sir' while a tool runs.",
     "Read phone numbers back in groups. Never read out a number from his contacts unless he asked for it.",
-    "You cannot dial anyone, text anyone, buy or book from this call. If he wants you to ring or text someone, tell him to text the JARVIS line, for example 'ring Ali and ask if he is free', and it will wait for his YES.",
+    "You CAN book a call to Sir himself: when he says 'ring me at 12', 'wake me up at half 7' or 'call me in 2 hours', call schedule_call_to_owner with the time in his words and what to say, then read back the time from the result, e.g. 'Booked, Sir, I'll ring you at 12:30.'",
+    "You cannot dial anyone else, text anyone else, buy or book anything else from this call. If he wants you to ring or text someone, tell him to text the JARVIS line, for example 'ring Ali and ask if he is free', and it will wait for his YES. Never suggest a text command for things the line cannot do: it cannot book tickets, order food, or pay for anything.",
+    "While a tool is running, wait for it. If he speaks meanwhile, answer briefly and the result will still come.",
     "Never claim anything has been sent, called, booked or paid unless a tool result says so. When he says goodbye, say goodbye briefly and end the call.",
     agentLanguageRule(false),
   ].join("\n");
@@ -57,11 +59,13 @@ function prop(description: string): Record<string, unknown> {
 
 export function ownerToolConfigs(origin: string, key: string): Record<string, Record<string, unknown>> {
   const base = origin.replace(/\/$/, "");
-  const webhook = (name: string, description: string, body: Record<string, unknown>, required: string[], timeout: number) => ({
+  const webhook = (name: string, description: string, body: Record<string, unknown>, required: string[], timeout: number, steady = false) => ({
     type: "webhook",
     name,
     description,
     response_timeout_secs: timeout,
+    // A search must not be thrown away when he says "how long is it taking?" halfway through.
+    ...(steady ? { disable_interruptions: true } : {}),
     pre_tool_speech: "auto",
     api_schema: {
       url: `${base}/owner/tool/${name}`,
@@ -87,6 +91,17 @@ export function ownerToolConfigs(origin: string, key: string): Record<string, Re
       { query: prop("The question to search, in plain words, with the place if it matters.") },
       ["query"],
       30,
+      true,
+    ),
+    schedule_call_to_owner: webhook(
+      "schedule_call_to_owner",
+      "Book a call from the JARVIS line to Sir himself at a time he gives: a wake-up call, or 'ring me at 6 about the van'. Only ever rings Sir.",
+      {
+        when: prop("The time exactly as he said it, e.g. 'half 12', '7am tomorrow', 'in 2 hours'."),
+        about: prop("What the call is for, in a few words, e.g. 'wake up' or 'the van'. Empty for a wake-up call."),
+      },
+      ["when"],
+      15,
     ),
     send_sms_to_owner: webhook(
       "send_sms_to_owner",
@@ -292,6 +307,22 @@ export async function runOwnerTool(env: Env, tool: string, body: Record<string, 
     return sent.ok
       ? { ok: true, sent: true, texts: sent.sent, message: "Sent to Sir's phone." }
       : { ok: false, sent: false, message: "The text did not go through. Tell Sir you'll text it after the call." };
+  }
+  if (tool === "schedule_call_to_owner") {
+    const when = asString(body.when, 80) ?? "";
+    const about = (asString(body.about, 120) ?? "").trim();
+    if (!when) return { ok: false, error: "when is required" };
+    const { readOwnerMobile } = await import("./owner-alert");
+    const owner = await readOwnerMobile(env).catch(() => null);
+    if (!owner) return { ok: false, error: "Sir's mobile is not set." };
+    const { parseTimedCall, bookTimedCall, WAKE_TASK } = await import("./sms-extras");
+    const wake = !about || /\bwake|alarm\b/i.test(about);
+    const call = parseTimedCall(`call me ${/^(?:in|at|for|by|tomorrow|tonight)\b/i.test(when.trim()) ? "" : "at "}${when}${wake ? " to wake me up" : ` about ${about}`}`);
+    if (!call) return { ok: false, error: "I couldn't work out that time. Ask Sir for a clock time like 'half 12' or '7am tomorrow'." };
+    if (!wake) call.task = about.slice(0, 120);
+    else call.task = WAKE_TASK;
+    const line = await bookTimedCall(env, owner, call);
+    return { ok: true, booked: true, say: line, due_utc: call.dueAt.toISOString() };
   }
   if (tool === "lookup_contact") {
     const name = asString(body.name, 80) ?? "";

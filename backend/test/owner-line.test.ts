@@ -132,7 +132,8 @@ describe("Sir ringing his own JARVIS line", () => {
 describe("personal agent tools", () => {
   it("tools point at the public base with the owner key and carry the call id", async () => {
     const configs = ownerToolConfigs("https://jarvis-backend.jarvis-hadi.workers.dev", "k");
-    expect(Object.keys(configs).sort()).toEqual(["get_weather", "lookup_contact", "send_sms_to_owner", "web_search"]);
+    expect(Object.keys(configs).sort()).toEqual(["get_weather", "lookup_contact", "schedule_call_to_owner", "send_sms_to_owner", "web_search"]);
+    expect((configs.web_search as Record<string, unknown>).disable_interruptions).toBe(true);
     for (const c of Object.values(configs)) {
       expect(() => new URL(c.api_schema.url)).not.toThrow();
       expect(c.api_schema.url.startsWith("https://jarvis-backend.jarvis-hadi.workers.dev/owner/tool/")).toBe(true);
@@ -193,6 +194,21 @@ describe("personal agent tools", () => {
     expect(res.weather).toContain("Ashford, Kent");
     expect(res.weather).toContain("light rain");
     expect(res.weather).toContain("80% chance of rain");
+  });
+  it("books a wake-up call to Sir from his call, once, and never for a stranger", async () => {
+    const { env: e, raw } = env();
+    seedCall(raw, "call_owner2", OWNER);
+    seedCall(raw, "call_stranger2", "+447700900998", "Caller");
+    const no = await (await callTool(e, "schedule_call_to_owner", { call_id: "call_stranger2", when: "half 12" })).json();
+    expect(no.ok).toBe(false);
+    const first = await (await callTool(e, "schedule_call_to_owner", { call_id: "call_owner2", when: "in 2 hours" })).json();
+    expect(first.ok).toBe(true);
+    expect(first.say).toMatch(/^Booked, Sir, I'll ring you at \d{1,2}:\d{2}/);
+    await callTool(e, "schedule_call_to_owner", { call_id: "call_owner2", when: "in 2 hours" });
+    const rows = raw.prepare("SELECT phone, via, task FROM sms_reminders WHERE status = 'pending'").all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].via).toBe("call");
+    expect(rows[0].task).toBe("time to wake up");
   });
 });
 

@@ -63,6 +63,12 @@ export function brainSystem(channel: "sms" | "app", options?: { detail?: boolean
       "If you are unsure about something current, say so briefly or use web_search. Never invent facts, prices, or phone numbers.",
       "You cannot dial from this chat. Never say you are calling now, ringing now, or that a call has been placed. The server places calls.",
       "A message that starts with call, ring, or phone waits until he replies YES. Replying 1, you call, or call him back to a call message is already approved.",
+      "Never ask him to reply YES yourself, and never say a call, reminder or booking is scheduled, pending or booked: the server books those and confirms them itself. For 'call me at 12' just tell him to text it as 'call me at 12'.",
+      "He texts in UK slang: yh, ye and ya mean yeah; u is you; ur is your; wdym is what do you mean; 'waste man' is banter. Yh is never a name, a place or a shop.",
+      "Knock-knock jokes: you are the one listening. Reply only 'Who's there?', then '<name> who?', then laugh at the punchline.",
+      "For games (loadouts, metas, weapon stats), films, TV, sport, releases and prices, call web_search first and answer only from what it returns. Never invent fire rates, recoil, stats, cast lists, filming locations or dates.",
+      "This UK number cannot receive photos or videos: picture messages never reach you. If he says he sent one, say plainly that it didn't come through on this line and ask him to describe it or send a link.",
+      "Do not end with 'let me know if…', 'take care' or an offer of more help.",
     ].join("\n");
   }
   return [
@@ -144,7 +150,7 @@ export async function syncCalls(env: Env): Promise<void> {
   // Ids and stamps first. The transcripts are only read when a call changed since the last sync.
   const recent = (await dbAll<{ id: string; updated_at: string | null }>(
     env,
-    "SELECT id, updated_at FROM outbound_calls ORDER BY updated_at DESC LIMIT 8",
+    "SELECT id, updated_at FROM outbound_calls WHERE to_number NOT LIKE '+447700900%' ORDER BY updated_at DESC LIMIT 8",
   ).catch(() => [])).filter((call) => /^call_[A-Za-z0-9]+$/.test(call.id));
   if (!recent.length) return;
   const signature = recent.map((call) => `${call.id}@${call.updated_at ?? ""}`).join(",");
@@ -304,8 +310,20 @@ export async function brainReply(
 }
 
 /** SMS chat text: no links or markdown, and short unless he asked for detail. */
+/** Drops a trailing "let me know if…" / "take care" sentence when something else was said. */
+export function dropTrailingOffers(text: string): string {
+  const parts = text.split(/(?<=[.!?])\s+/);
+  while (parts.length > 1 && /^(?:please\s+|do\s+)?(?:let me know|feel free|take care|i'?m here (?:if|whenever)|is there anything else|anything else i can|how (?:else )?may i (?:help|assist))/i.test(parts[parts.length - 1]!.trim())) {
+    parts.pop();
+  }
+  return parts.join(" ");
+}
+
 export function smsAnswer(raw: string, detail: boolean): string | null {
-  if (!detail) return spokenAnswer(raw.replace(/[*_#`]+/g, ""));
+  if (!detail) {
+    const spoken = spokenAnswer(raw.replace(/[*_#`]+/g, ""));
+    return spoken ? dropTrailingOffers(spoken) : spoken;
+  }
   const text = raw
     .replace(/https?:\/\/\S+/gi, " ")
     .replace(/\[[^\]]*\]\([^)]*\)/g, " ")
@@ -313,7 +331,7 @@ export function smsAnswer(raw: string, detail: boolean): string | null {
     .replace(/^\s*[-•]\s+/gm, "")
     .replace(/\s+/g, " ")
     .trim();
-  return text.length < 2 ? null : text.slice(0, 900);
+  return text.length < 2 ? null : dropTrailingOffers(text).slice(0, 900);
 }
 
 function londonNow(): string {

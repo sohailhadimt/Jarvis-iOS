@@ -739,6 +739,14 @@ async function settlePayload(env: Env, payload: unknown, preferredId = ""): Prom
     ]);
     return { call_id: row.id, message_id: null, spoken: null, summary: null, status: "failed" };
   }
+  if (await isOwnerLineRow(env, row.id)) {
+    await dbRun(
+      env,
+      `UPDATE outbound_calls SET status = 'completed', summary = ?, transcript_json = ?, conversation_id = COALESCE(?, conversation_id), updated_at = ? WHERE id = ?`,
+      [ownerCallSummary(read.lines, read.summary), JSON.stringify(read.lines.slice(0, 80)), conversationId || null, new Date().toISOString(), row.id],
+    );
+    return { call_id: row.id, message_id: null, spoken: null, summary: null, status: "completed" };
+  }
   const brief = await summariseCall(env, read.lines, read.summary, row.created_at);
   const said = brief.spoken || brief.said || brief.reason || stripPhones(read.summary ?? "") || guessCaller(read.lines).reason;
   const clean = spokenCallMessage(brief.name, row.created_at, said);
@@ -838,8 +846,28 @@ async function closeDisconnected(env: Env, rows: OpenCall[]): Promise<SettleHit[
   return hits;
 }
 
+/** Sir ringing his own line is his own conversation with JARVIS, never "Sir, X called to tell you". */
+export async function isOwnerLineRow(env: Env, callId: string): Promise<boolean> {
+  const row = await dbFirst<{ brief: string | null }>(env, "SELECT brief FROM outbound_calls WHERE id = ?", [callId]).catch(() => null);
+  return row?.brief === "Owner on his JARVIS line";
+}
+
+export function ownerCallSummary(lines: { role: string; text: string }[], summary: string | null): string {
+  const asked = lines.filter((line) => line.role === "them").map((line) => line.text.trim()).filter(Boolean);
+  const gist = (summary ?? "").replace(/\s+/g, " ").trim() || asked.slice(0, 3).join(" ");
+  return `You rang JARVIS${gist ? `: ${gist}` : "."}`.slice(0, 600);
+}
+
 async function finishLocal(env: Env, row: OpenCall, live: string): Promise<SettleHit | null> {
   const lines = linesFromJson(row.transcript_json);
+  if (await isOwnerLineRow(env, row.id)) {
+    await dbRun(env, "UPDATE outbound_calls SET status = 'completed', summary = ?, updated_at = ? WHERE id = ?", [
+      ownerCallSummary(lines, storedSaid(row) || null),
+      new Date().toISOString(),
+      row.id,
+    ]);
+    return { call_id: row.id, message_id: null, spoken: null, summary: null, status: "completed" };
+  }
   const said = storedSaid(row);
   if (!said) {
     const status = live === "completed" ? "completed" : "failed";
