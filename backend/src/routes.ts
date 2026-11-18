@@ -134,6 +134,7 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     if (request.method === "GET" && path === "/debug/last-calls") return lastCallDebug(env);
     if (request.method === "GET" && path === "/debug/last-sms-errors") return lastSmsErrors(env);
     if (request.method === "GET" && path === "/debug/last-sms") return lastSmsLog(env);
+    if (request.method === "GET" && path === "/debug/sweep") return (await import("./sweep")).sweepRoute(env, url);
     if (request.method === "POST" && path === "/debug/sms-simulate") return simulateSmsRoute(request, env);
     if (request.method === "POST" && path === "/debug/voice-proof") return (await import("./sms-desk")).voiceProofRoute(env);
     if (request.method === "POST" && path === "/debug/voice-lab") return (await import("./sms-desk")).voiceLabRoute(request, env);
