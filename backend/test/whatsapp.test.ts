@@ -67,3 +67,48 @@ describe("WhatsApp channel", () => {
     expect(urls[1]).toContain("gemini-3.5-flash-lite");
   });
 });
+
+import { twilioSignature } from "../src/calls";
+import { route } from "../src/routes";
+
+describe("WhatsApp inbound from Sir", () => {
+  it("is treated as Sir (prefix stripped) and his video goes to the vision path, answered on WhatsApp", async () => {
+    const e = env({ TWILIO_WHATSAPP_FROM: "whatsapp:+14155238886", OWNER_PHONE: OWNER, JARVIS_APP_TOKEN: "secret-token", ELEVENLABS_API_KEY: "elevenlabs-key-example-value", ELEVENLABS_AGENT_ID: "agent_example" });
+    const params = {
+      MessageSid: "MM123",
+      From: `whatsapp:${OWNER}`,
+      To: "whatsapp:+14155238886",
+      Body: "what's wrong with it?",
+      NumMedia: "1",
+      MediaUrl0: "https://api.twilio.com/2010-04-01/Accounts/AC1/Messages/MM123/Media/ME1",
+      MediaContentType0: "video/mp4",
+    };
+    const url = "https://jarvis-backend.jarvis-hadi.workers.dev/calls/sms";
+    const signature = await twilioSignature(url, params, "twilio-auth-token-example");
+    const sent = [];
+    const seen = [];
+    vi.stubGlobal("fetch", async (input, init) => {
+      const u = String(input);
+      seen.push(u);
+      if (u.includes("/Media/ME1")) return new Response(new Uint8Array(5000), { headers: { "content-type": "video/mp4" } });
+      if (u.includes("generativelanguage")) return Response.json({ candidates: [{ content: { parts: [{ text: "Your boiler shows E119, Sir: top up the pressure." }] } }] });
+      if (u.includes("/Messages.json")) {
+        const f = new URLSearchParams(init.body);
+        sent.push([f.get("From"), f.get("To"), f.get("Body")]);
+        return Response.json({ sid: "SM1", status: "queued" }, { status: 201 });
+      }
+      return new Response("{}", { status: 200 });
+    });
+    const jobs = [];
+    const ctx = { waitUntil: (p) => jobs.push(Promise.resolve(p).catch(() => undefined)), passThroughOnException() {}, props: {} };
+    const res = await route(
+      new Request(url, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "X-Twilio-Signature": signature }, body: new URLSearchParams(params).toString() }),
+      e,
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    await Promise.all(jobs);
+    expect(seen.some((u) => u.includes("generativelanguage"))).toBe(true);
+    expect(sent).toContainEqual(["whatsapp:+14155238886", `whatsapp:${OWNER}`, "Your boiler shows E119, Sir: top up the pressure."]);
+  });
+});

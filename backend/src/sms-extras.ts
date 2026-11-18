@@ -925,7 +925,7 @@ async function fetchImage(env: Env, url: string, video = false): Promise<{ mime:
     const kind = video ? /^video\/(?:mp4|3gpp|quicktime|webm|mpeg)$/ : /^image\/(?:jpeg|jpg|png|webp|gif|heic|heif)$/;
     if (!response.ok || !kind.test(mime)) return null;
     const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.length < 200 || bytes.length > (video ? 14_000_000 : 6_000_000)) return null;
+    if (bytes.length < 200 || bytes.length > (video ? 11_000_000 : 6_000_000)) return null;
     let binary = "";
     for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
     return { mime: mime === "image/jpg" ? "image/jpeg" : mime, b64: btoa(binary) };
@@ -1275,7 +1275,7 @@ export async function smsExtras(env: Env, phone: string, text: string, media: st
       return true;
     }
     if (media.length) {
-      await ctx.send("I couldn't open that photo, Sir. Try sending it again, or as a link.");
+      await ctx.send("I couldn't open that, Sir. Photos up to 6MB and videos up to about 11MB (roughly 30 seconds) work; try again or send a shorter clip.");
       return true;
     }
   }
@@ -1292,8 +1292,11 @@ export async function smsExtras(env: Env, phone: string, text: string, media: st
   }
 
   if (!media.length && saysSentPicture(clean)) {
+    const { whatsappFrom } = await import("./whatsapp");
     await ctx.send(
-      "Nothing came through, Sir. This UK number can't receive photos or videos, so picture messages never reach me. Describe it, or send it as a link, and I'll take it from there.",
+      whatsappFrom(env)
+        ? "Nothing came through by text, Sir: this UK number can't receive photos or videos. Send it to me on WhatsApp instead and I'll take a look."
+        : "Nothing came through, Sir. This UK number can't receive photos or videos, so picture messages never reach me. Describe it, or send it as a link, and I'll take it from there.",
     );
     return true;
   }
