@@ -199,6 +199,10 @@ final class AssistantEngine {
     @ObservationIgnored private var audioObservers: [NSObjectProtocol] = []
     @ObservationIgnored private var audioInterrupted = false
     @ObservationIgnored private var audioRecoveryTask: Task<Void, Never>?
+    /// Recent engine-configuration restarts. Too many in a short window means the restarts cause the changes.
+    @ObservationIgnored private var engineConfigRestarts: [Date] = []
+    /// Configuration changes before this time come from our own restart settling and are ignored.
+    @ObservationIgnored private var engineConfigQuietUntil = Date.distantPast
     @ObservationIgnored private var liveReconnects = 0
     @ObservationIgnored private var liveReopening = false
     /// Speech was heard while George was talking. Volume is ducked until the transcript says user or echo.
@@ -1251,10 +1255,13 @@ final class AssistantEngine {
                 self?.scheduleAudioRecovery("media-reset", reconfigure: true)
             }
         })
-        audioObservers.append(center.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] _ in
+        audioObservers.append(center.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] note in
+            let source = (note.object as AnyObject?).map { ObjectIdentifier($0) }
             Task { @MainActor in
-                // Our rebuilt engine is already running. A stopped capture engine means the hardware format moved.
-                guard let self, !self.listener.isEngineRunning else { return }
+                // Only the capture engine matters. The playback and voice-ID engines post these too.
+                guard let self, let source, source == self.listener.engineIdentity else { return }
+                // Our restarted engine is already running. A stopped capture engine means the hardware format moved.
+                guard !self.listener.isEngineRunning else { return }
                 self.scheduleAudioRecovery("engine-config", reconfigure: false)
             }
         })
@@ -1293,6 +1300,10 @@ final class AssistantEngine {
 
     private func recoverLiveAudio(_ reason: String, reconfigure: Bool) async {
         guard liveVoiceUp, !audioInterrupted else { return }
+        if reason == "engine-config" {
+            await restartAfterEngineConfig()
+            return
+        }
         VoiceDebugLog.note("audio-recover", reason)
         if usingElevenAgent { output.stopAgentPCM() } else { output.stop() }
         if phase == .speaking { phase = .listening }
@@ -1319,6 +1330,46 @@ final class AssistantEngine {
         }
         output.bindSharedPlayer(listener.sharedPlayback)
         output.prewarm()
+        noteCapturePath()
+        pushActivity()
+    }
+
+    /// A configuration change stops the capture engine. Restart the same engine in place instead of building
+    /// a new one: a new engine re-enables voice processing, which posts another change, which used to loop
+    /// once a second so the agent never heard a word. Three restarts in ten seconds means the route is still
+    /// settling, so wait a moment and restart once more with further notices ignored for a while.
+    private func restartAfterEngineConfig() async {
+        let now = Date()
+        guard now >= engineConfigQuietUntil else {
+            if !listener.isEngineRunning { try? listener.restartLiveEngine() }
+            return
+        }
+        engineConfigRestarts = engineConfigRestarts.filter { now.timeIntervalSince($0) < 10 } + [now]
+        let looping = engineConfigRestarts.count >= 3
+        VoiceDebugLog.note("audio-recover", looping ? "engine-config loop, settling" : "engine-config restart")
+        if looping {
+            engineConfigRestarts.removeAll()
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            guard liveVoiceUp, !audioInterrupted else { return }
+            engineConfigQuietUntil = Date().addingTimeInterval(8)
+        } else {
+            engineConfigQuietUntil = Date().addingTimeInterval(1.5)
+        }
+        do {
+            try listener.restartLiveEngine()
+        } catch {
+            VoiceDebugLog.note("audio-recover", "restart failed \(VoiceDebugLog.safe(error.localizedDescription))")
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard liveVoiceUp, !audioInterrupted else { return }
+            do {
+                try listener.rebuildLiveEngine()
+                engineConfigQuietUntil = Date().addingTimeInterval(8)
+            } catch {
+                fallBackFromLive("audio-recover")
+                return
+            }
+        }
+        output.bindSharedPlayer(listener.sharedPlayback)
         noteCapturePath()
         pushActivity()
     }
@@ -3350,7 +3401,8 @@ final class AssistantEngine {
     }
 
     private func speak(_ text: String, voiceID: String = "") async {
-        let monitor = !listener.isEngineRunning && !microphoneMuted
+        // During live voice the capture engine owns the microphone; a second voice-processing engine fights it.
+        let monitor = !listener.isEngineRunning && !microphoneMuted && !listener.isLiveFeed
         listener.refreshVoiceProcessing()
         listener.gate.turn.setEchoCancelled(listener.voiceProcessingEnabled)
         let mic = microphoneMuted ? "mic-muted" : "mic-open"

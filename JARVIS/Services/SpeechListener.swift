@@ -89,10 +89,19 @@ final class SpeechListener {
 
     var isOnDevice: Bool { recognizer?.supportsOnDeviceRecognition ?? false }
     var isEngineRunning: Bool { engine?.isRunning ?? false }
+    /// True while the raw microphone feed for a live voice session is installed.
+    var isLiveFeed: Bool { liveFeed }
+    /// Identity of the capture engine, so the engine only reacts to its own configuration changes.
+    var engineIdentity: ObjectIdentifier? { engine.map { ObjectIdentifier($0) } }
 
     /// Starts a silent input tap when recognition could not, so the process is not suspended.
     func keepEngineAlive() throws {
         if isEngineRunning, tapInstalled { return }
+        // Never swap the live microphone feed for a silent tap: the agent would hear nothing.
+        if liveFeed {
+            try restartLiveEngine()
+            return
+        }
         try installTap(AudioTaps.silentTap(), bufferSize: 1024)
     }
 
@@ -182,6 +191,21 @@ final class SpeechListener {
         let size = currentTapSize
         teardownEngine()
         try installTap(block, bufferSize: size)
+        playbackPlayer?.play()
+        liveFeed = true
+        refreshVoiceProcessing()
+    }
+
+    /// After a configuration change iOS stops the engine. Restart the same engine and reinstall the live tap
+    /// on the current hardware format. Voice processing is not toggled again, because toggling it posts
+    /// another configuration change and the rebuild would loop forever.
+    func restartLiveEngine() throws {
+        guard liveFeed, let block = currentTap else { return }
+        guard engine != nil else {
+            try rebuildLiveEngine()
+            return
+        }
+        try installTap(block, bufferSize: currentTapSize)
         playbackPlayer?.play()
         liveFeed = true
         refreshVoiceProcessing()
