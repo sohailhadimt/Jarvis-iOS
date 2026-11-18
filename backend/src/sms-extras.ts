@@ -936,29 +936,48 @@ async function fetchImage(env: Env, url: string): Promise<{ mime: string; b64: s
 const VISION_PROMPT =
   "You are J.A.R.V.I.S., Sir's British assistant, answering by text message. Look at the photo and reply with what matters: what it is, any key facts, numbers, dates, deadlines, amounts due, or what he should do next. If he asked a question, answer it directly. Plain text, no markdown, under 300 characters, call him Sir once.";
 
-export async function describeImage(env: Env, image: { mime: string; b64: string }, question: string): Promise<string | null> {
-  const user = [
-    { type: "text", text: question.trim() || "What's in this photo, and what matters?" },
-    { type: "image_url", image_url: { url: `data:${image.mime};base64,${image.b64}` } },
-  ];
-  const providers: [string, string | undefined, string][] = [
-    [GEMINI_URL, env.GEMINI_API_KEY, GEMINI_MODEL],
-    [GEMINI_URL, env.GEMINI_API_KEY, "gemini-2.5-flash"],
-    [GROQ_URL, env.GROQ_API_KEY, "meta-llama/llama-4-scout-17b-16e-instruct"],
-  ];
-  for (const [url, key, model] of providers) {
+/** Vision models still served on the free keys, best first. gemini-2.5-flash and llama-4-scout are gone. */
+export const VISION_MODELS: ["gemini" | "groq", string][] = [
+  ["gemini", GEMINI_MODEL],
+  ["gemini", "gemini-3.5-flash-lite"],
+  ["gemini", "gemini-flash-lite-latest"],
+  ["groq", "qwen/qwen3.8-27b"],
+];
+
+export interface VisionOptions {
+  prompt?: string;
+  maxChars?: number;
+  /** Earlier turns, oldest first, so a camera chat shares memory with the text thread. */
+  history?: { role: "user" | "assistant"; content: string }[];
+}
+
+export async function describeImage(env: Env, image: { mime: string; b64: string } | null, question: string, options: VisionOptions = {}): Promise<string | null> {
+  const maxChars = options.maxChars ?? 300;
+  const user = image
+    ? [
+        { type: "text", text: question.trim() || "What's in this photo, and what matters?" },
+        { type: "image_url", image_url: { url: `data:${image.mime};base64,${image.b64}` } },
+      ]
+    : question.trim() || "Hello";
+  const messages = [{ role: "system", content: options.prompt ?? VISION_PROMPT }, ...(options.history ?? []), { role: "user", content: user }];
+  for (const [kind, model] of VISION_MODELS) {
+    const key = kind === "gemini" ? env.GEMINI_API_KEY : env.GROQ_API_KEY;
     if (!key) continue;
     try {
-      const response = await fetch(url, {
+      const response = await fetch(kind === "gemini" ? GEMINI_URL : GROQ_URL, {
         method: "POST",
         headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-        body: JSON.stringify({ model, max_tokens: 400, messages: [{ role: "system", content: VISION_PROMPT }, { role: "user", content: user }] }),
+        body: JSON.stringify({ model, max_tokens: 500, messages }),
         signal: AbortSignal.timeout(12_000),
       });
       if (!response.ok) continue;
       const body = (await response.json()) as { choices?: { message?: { content?: string } }[] };
-      const text = (body.choices?.[0]?.message?.content ?? "").replace(/[*_#`]+/g, "").replace(/\s+/g, " ").trim();
-      if (text) return text.slice(0, 300);
+      const text = (body.choices?.[0]?.message?.content ?? "")
+        .replace(/<think>[\s\S]*?<\/think>/gi, " ")
+        .replace(/[*_#`]+/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text) return text.slice(0, maxChars);
     } catch {
       // next provider
     }
@@ -1224,6 +1243,16 @@ export async function smsExtras(env: Env, phone: string, text: string, media: st
     }
   }
   if (!clean) return false;
+
+  if (!media.length) {
+    const look = await import("./look");
+    if (look.wantsToShow(clean)) {
+      const { noteOrigin } = await import("./voice-notes");
+      const link = await look.createLookLink(env, phone, await noteOrigin(env));
+      await ctx.send(look.lookLinkText(link.url));
+      return true;
+    }
+  }
 
   if (!media.length && saysSentPicture(clean)) {
     await ctx.send(

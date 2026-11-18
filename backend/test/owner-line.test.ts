@@ -132,7 +132,7 @@ describe("Sir ringing his own JARVIS line", () => {
 describe("personal agent tools", () => {
   it("tools point at the public base with the owner key and carry the call id", async () => {
     const configs = ownerToolConfigs("https://jarvis-backend.jarvis-hadi.workers.dev", "k");
-    expect(Object.keys(configs).sort()).toEqual(["get_weather", "lookup_contact", "schedule_call_to_owner", "send_sms_to_owner", "web_search"]);
+    expect(Object.keys(configs).sort()).toEqual(["get_weather", "lookup_contact", "schedule_call_to_owner", "send_camera_link", "send_sms_to_owner", "web_search"]);
     expect((configs.web_search as Record<string, unknown>).disable_interruptions).toBe(true);
     for (const c of Object.values(configs)) {
       expect(() => new URL(c.api_schema.url)).not.toThrow();

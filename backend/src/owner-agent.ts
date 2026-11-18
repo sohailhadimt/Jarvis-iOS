@@ -13,7 +13,7 @@ import { LANGUAGE_DETECTION_TOOL, agentLanguageRule, languagePresets, multilingu
  */
 
 export const OWNER_AGENT_NAME = "JARVIS Personal";
-export const OWNER_AGENT_VERSION = "owner-4";
+export const OWNER_AGENT_VERSION = "owner-5";
 
 export function ownerGreeting(now = new Date()): string {
   const hour = Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", hour: "2-digit", hourCycle: "h23" }).format(now));
@@ -44,6 +44,7 @@ export function ownerAgentPrompt(): string {
     "Tools: get_weather for any place and day (Ashford, Kent if he does not say). web_search for anything current: sport, news, opening hours, prices, phone numbers of businesses. lookup_contact for a name in his own phone contacts. Always use a tool for current facts; never guess a score, a price, a date or a number. Say a few words such as 'One moment, Sir' while a tool runs.",
     "Read phone numbers back in groups. Never read out a number from his contacts unless he asked for it.",
     "You CAN book a call to Sir himself: when he says 'ring me at 12', 'wake me up at half 7' or 'call me in 2 hours', call schedule_call_to_owner with the time in his words and what to say, then read back the time from the result, e.g. 'Booked, Sir, I'll ring you at 12:30.'",
+    "You CAN see through his camera: when he says 'let me show you', 'can you see this', 'look at this' or wants you to see his screen, call send_camera_link, then say 'I've texted you a link, Sir. Open it and point your camera; I'll answer you there.' His iPhone can't share its screen with a web page; for the screen, he takes a screenshot and taps Screenshot on that page.",
     "You cannot dial anyone else, text anyone else, buy or book anything else from this call. If he wants you to ring or text someone, tell him to text the JARVIS line, for example 'ring Ali and ask if he is free', and it will wait for his YES. Never suggest a text command for things the line cannot do: it cannot book tickets, order food, or pay for anything.",
     "While a tool is running, wait for it. If he speaks meanwhile, answer briefly and the result will still come.",
     "Never claim anything has been sent, called, booked or paid unless a tool result says so. When he says goodbye, say goodbye briefly and end the call.",
@@ -108,6 +109,13 @@ export function ownerToolConfigs(origin: string, key: string): Record<string, Re
       "Text Sir on his own mobile right now, during this call. Use whenever he asks you to text, send or message him something, or wants it in writing. Plain text, no markdown or links; up to about 900 characters.",
       { text: prop("The full message to text him, written for reading on a phone (short lines, no markdown).") },
       ["text"],
+      20,
+    ),
+    send_camera_link: webhook(
+      "send_camera_link",
+      "Text Sir a private link (valid 30 minutes) that opens his phone camera so you can see what he wants to show you and answer out loud. Use when he says 'let me show you', 'can you see this', 'look at this', or asks you to see his screen.",
+      {},
+      [],
       20,
     ),
     lookup_contact: webhook(
@@ -307,6 +315,19 @@ export async function runOwnerTool(env: Env, tool: string, body: Record<string, 
     return sent.ok
       ? { ok: true, sent: true, texts: sent.sent, message: "Sent to Sir's phone." }
       : { ok: false, sent: false, message: "The text did not go through. Tell Sir you'll text it after the call." };
+  }
+  if (tool === "send_camera_link") {
+    const { readOwnerMobile } = await import("./owner-alert");
+    const owner = await readOwnerMobile(env).catch(() => null);
+    if (!owner) return { ok: false, error: "Sir's mobile is not set." };
+    const look = await import("./look");
+    const { noteOrigin } = await import("./voice-notes");
+    const link = await look.createLookLink(env, owner, await noteOrigin(env));
+    const { textOwnerLong } = await import("./sms-desk");
+    const sent = await textOwnerLong(env, owner, look.lookLinkText(link.url), "camera-link");
+    return sent.ok
+      ? { ok: true, sent: true, message: "Camera link texted to Sir. Tell him to open it and point his camera; you'll answer him on that page." }
+      : { ok: false, sent: false, message: "The link text did not go through. Tell Sir to text JARVIS 'let me show you' instead." };
   }
   if (tool === "schedule_call_to_owner") {
     const when = asString(body.when, 80) ?? "";

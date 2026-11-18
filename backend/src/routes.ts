@@ -99,6 +99,10 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
       if (pa.isAlertWebhook(request.method, path)) return pa.alertWebhook(request, env, path);
     }
     if (isCallWebhook(request.method, path)) return handleCallWebhook(request, env, path);
+    if (path.startsWith("/look/")) {
+      const look = await import("./look");
+      if (look.isLookRoute(request.method, path)) return look.handleLook(request, env, path);
+    }
     {
       const own = await import("./owner-agent");
       if (own.isOwnerTool(request.method, path)) return own.handleOwnerTool(request, env, path);
