@@ -87,8 +87,43 @@ const NUMBER_WORDS: Record<string, number> = {
   fifteen: 15, twenty: 20, thirty: 30, forty: 40, "forty five": 45, half: 30,
 };
 
+const AT_TIME = /\b(?:at|for|by)\s+(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?(?=\W|$)|\b(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)\b|\b(noon|midday|midnight)\b/i;
+
+const HOUR_WORDS: Record<string, number> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+};
+const H = "(\\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)";
+
+/** British clock talk to digits: "half 12" and "half past 12" are 12:30, "quarter to 8" is 7:45, "2 and a half hours" is 150 mins. */
+export function normaliseClockWords(text: string): string {
+  const hourOf = (raw: string) => (/^\d+$/.test(raw) ? Number(raw) : HOUR_WORDS[raw.toLowerCase()] ?? NaN);
+  const qty = (raw: string) => (/^\d+$/.test(raw) ? Number(raw) : NUMBER_WORDS[raw.toLowerCase()] ?? NaN);
+  const clock = (suffix: string, shift = 0) => (m: string, h: string, mer?: string) => {
+    let v = hourOf(h);
+    if (!(v >= 1 && v <= 12)) return m;
+    v = v + shift;
+    if (v < 1) v = 12;
+    return `${v}:${suffix}${mer ?? ""}`;
+  };
+  return text
+    .replace(/\bin (?:about|around|roughly|like|approx(?:imately)?)\s+/gi, "in ")
+    .replace(/\b(?:in\s+)?an hour and a half\b/gi, "in 90 mins")
+    .replace(/\b(?:in\s+)?(\d{1,2}|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+and a half\s+(?:hours?|hrs?)\b/gi, (m: string, n: string) => {
+      const v = qty(n);
+      return Number.isFinite(v) ? `in ${v * 60 + 30} mins` : m;
+    })
+    .replace(/\bin half an hour\b/gi, "in 30 mins")
+    .replace(new RegExp(`\\bhalf(?:\\s+past)?\\s+${H}(?:\\s*o'?clock)?(?:\\s*(am|pm)\\b)?`, "gi"), clock("30"))
+    .replace(new RegExp(`\\bquarter\\s+past\\s+${H}(?:\\s*(am|pm)\\b)?`, "gi"), clock("15"))
+    .replace(new RegExp(`\\bquarter\\s+to\\s+${H}(?:\\s*(am|pm)\\b)?`, "gi"), clock("45", -1))
+    .replace(new RegExp(`\\b${H}\\s*o'?clock\\b`, "gi"), (m: string, h: string) => {
+      const v = hourOf(h);
+      return v >= 1 && v <= 12 ? `${v}` : m;
+    });
+}
+
 export function parseReminder(text: string, now = new Date()): ParsedReminder | "unclear" | null {
-  const clean = text.replace(/\s+/g, " ").trim().replace(/[.!]+$/, "");
+  const clean = normaliseClockWords(text.replace(/\s+/g, " ").trim().replace(/[.!]+$/, ""));
   const m = /^(?:jarvis,?\s+)?(?:please\s+|can you\s+|could you\s+)?(?:remind me|set (?:a|me a) reminder|reminder)\b\s*(.*)$/i.exec(clean);
   if (!m) return null;
   let rest = ` ${m[1] ?? ""} `;
@@ -98,7 +133,9 @@ export function parseReminder(text: string, now = new Date()): ParsedReminder | 
   const today = londonParts(now).ymd;
 
   const rel = /\bin\s+(an?|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty five|forty|half an?|\d{1,4})\s*(hours?|hrs?|h|minutes?|mins?|m)\b/i.exec(rest);
-  if (rel) {
+  // When he gives both ("at half 12, so in about 2 and a half hours"), the first one he said wins.
+  const clockFirst = AT_TIME.exec(rest);
+  if (rel && !(clockFirst && clockFirst.index < rel.index)) {
     const raw = rel[1]!.toLowerCase();
     let qty = /^\d+$/.test(raw) ? Number(raw) : NUMBER_WORDS[raw.replace(/ an?$/, "")] ?? 1;
     let unit = rel[2]!.toLowerCase().startsWith("h") ? 60 : 1;
@@ -112,7 +149,7 @@ export function parseReminder(text: string, now = new Date()): ParsedReminder | 
     const tomorrow = /\btomorrow\b/i.test(rest);
     const tonight = /\b(?:tonight|this evening)\b/i.test(rest);
     const morning = /\b(?:in the morning|this morning)\b/i.test(rest);
-    const at = /\b(?:at|for|by)\s+(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?(?=\W|$)|\b(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)\b|\b(noon|midday|midnight)\b/i.exec(rest);
+    const at = AT_TIME.exec(rest);
     if (at || tomorrow) {
       let hour = 9;
       let minute = 0;
@@ -153,6 +190,75 @@ export function parseReminder(text: string, now = new Date()): ParsedReminder | 
     .trim();
   if (due.getTime() - now.getTime() > 366 * 86_400_000) return "unclear";
   return { task: task || "your reminder", dueAt: due, byCall };
+}
+
+export const WAKE_TASK = "time to wake up";
+/** A reminder task starting with this is spoken word for word on the call. */
+export const SAY_PREFIX = "say:";
+
+/**
+ * "Call me at half 12 to wake me up", "ring me in 2 hours", "wake me up at 7". A timed call to Sir himself.
+ * Only his own number is ever rung, so this books straight away, like a reminder by call.
+ */
+export function parseTimedCall(text: string, now = new Date()): ParsedReminder | null {
+  const clean = text.replace(/\s+/g, " ").trim().replace(/^(?:hey\s+|ok(?:ay)?\s+)?jarvis[,!.]?\s*/i, "");
+  if (/^(?:please\s+|can you\s+|could you\s+)?(?:remind me|set (?:a|me a) reminder|reminder)\b/i.test(clean)) return null;
+  const wake = /\bwake\s*(?:me\s*)?up\b|\bwake me\b|\bwake[- ]?up call\b|\balarm call\b/i.test(clean);
+  const callMe = wake || /\b(?:call|ring|phone|bell) me\b|\bgive me a (?:call|ring|bell)\b/i.test(clean);
+  if (!callMe) return null;
+  const parsed = parseReminder(`remind me ${clean} call me`, now);
+  if (!parsed || parsed === "unclear") return null;
+  let task = parsed.task
+    .split(/[,.;!?]|\b(?:so|okay|ok|make sure|because|cos|cuz|i've got|ive got|i have)\b/i)[0]!
+    .replace(/\b(?:give me a (?:call|ring|bell)|wake\s*(?:me\s*)?up(?: call)?|wake me|alarm call)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^(?:to|and|for|please)\s+/i, "")
+    .replace(/\s+(?:to|and|please)$/i, "")
+    .trim();
+  if (wake) task = WAKE_TASK;
+  else if (!task || task.length < 3 || /^(?:me|it|up|to)$/i.test(task)) task = "you asked me to ring";
+  return { task: task.slice(0, 120), dueAt: parsed.dueAt, byCall: true };
+}
+
+export function bookedCallLine(dueAt: Date, now = new Date()): string {
+  const p = londonParts(dueAt);
+  const time = `${p.hour % 12 || 12}:${String(p.minute).padStart(2, "0")}`;
+  const label = clockLabel(dueAt, now);
+  const day = /tomorrow|\bon\b/.test(label) ? label.replace(/^\S+/, "").trim() : "";
+  return `Booked, Sir, I'll ring you at ${time}${day ? ` ${day}` : ""}.`;
+}
+
+/** Books a timed call to Sir. One pending call in the same minute is enough, so a repeat or a YES does not double it. */
+export async function bookTimedCall(env: Env, phone: string, call: ParsedReminder, now = new Date()): Promise<string> {
+  await ensureExtrasTables(env);
+  const minute = new Date(Math.floor(call.dueAt.getTime() / 60_000) * 60_000);
+  const existing = await dbFirst<{ id: number }>(
+    env,
+    "SELECT id FROM sms_reminders WHERE phone = ? AND via = 'call' AND status = 'pending' AND due_at >= ? AND due_at < ?",
+    [phone, minute.toISOString(), new Date(minute.getTime() + 60_000).toISOString()],
+  ).catch(() => null);
+  if (!existing) await addReminder(env, phone, call);
+  return bookedCallLine(call.dueAt, now);
+}
+
+/**
+ * YES with nothing else waiting: if one of his texts in the last 30 minutes asked for a timed call
+ * (and the chat offered it instead of booking it), book that call now.
+ */
+export async function bookTimedCallFromRecent(env: Env, phone: string, now = new Date()): Promise<string | null> {
+  const since = new Date(now.getTime() - 30 * 60_000).toISOString();
+  const rows = await dbAll<{ body: string; created_at: string }>(
+    env,
+    "SELECT body, created_at FROM sms_turns WHERE phone = ? AND role = 'user' AND created_at >= ? ORDER BY created_at DESC LIMIT 6",
+    [phone, since],
+  ).catch(() => [] as { body: string; created_at: string }[]);
+  for (const row of rows) {
+    const asked = new Date(row.created_at);
+    const call = parseTimedCall(row.body, Number.isNaN(asked.getTime()) ? now : asked);
+    if (call && call.dueAt.getTime() > now.getTime()) return bookTimedCall(env, phone, call, now);
+  }
+  return null;
 }
 
 const readyDbs = new WeakSet<object>();
@@ -217,6 +323,8 @@ function sentenceCase(text: string): string {
 }
 
 function reminderSpeech(task: string): string {
+  if (task.startsWith(SAY_PREFIX)) return task.slice(SAY_PREFIX.length).trim();
+  if (task === WAKE_TASK) return "Good day, Sir. JARVIS here with your wake-up call. Time to get up. Goodbye.";
   return `Good day, Sir. JARVIS here with your reminder: ${task.replace(/\bmy\b/gi, "your").replace(/\bI\b/g, "you")}. That's all. Goodbye.`;
 }
 
@@ -242,9 +350,12 @@ export async function fireDueReminders(env: Env, now = new Date()): Promise<numb
       if (!owner || owner !== row.phone) {
         status = "skipped";
       } else if (row.via === "call") {
-        const ok = await reminderCall(env, owner, row.task);
-        if (!ok) await sendSms(env, owner, `Reminder, Sir: ${row.task}. (I couldn't ring, so here it is by text.)`);
-        status = ok ? "called" : "sent";
+        const call = await reminderCall(env, owner, row.task);
+        if (!call.ok) await sendSms(env, owner, `Reminder, Sir: ${spokenTask(row.task)}. (I couldn't ring, so here it is by text.)`);
+        else await queueAnswerCheck(env, row.phone, 1, call.sid, row.task, now);
+        status = call.ok ? "called" : "sent";
+      } else if (row.via === "call-check") {
+        status = await answerCheck(env, owner, row.task, now);
       } else {
         await sendSms(env, owner, `Reminder, Sir: ${sentenceCase(row.task)}.`);
       }
@@ -255,7 +366,60 @@ export async function fireDueReminders(env: Env, now = new Date()): Promise<numb
   return fired;
 }
 
-async function reminderCall(env: Env, owner: string, task: string): Promise<boolean> {
+function spokenTask(task: string): string {
+  if (task.startsWith(SAY_PREFIX)) return "your call";
+  return task === WAKE_TASK ? "your wake-up call" : task;
+}
+
+/** Four minutes after a timed call, see whether he picked up. Attempt 1 unanswered rings once more; attempt 2 texts. */
+async function queueAnswerCheck(env: Env, phone: string, attempt: number, sid: string, task: string, now: Date): Promise<void> {
+  if (!/^CA[0-9a-f]{32}$/i.test(sid)) return;
+  await dbRun(env, "INSERT INTO sms_reminders (phone, task, due_at, via, status, created_at) VALUES (?, ?, ?, 'call-check', 'pending', ?)", [
+    phone,
+    `${attempt}|${sid}|${task}`.slice(0, 600),
+    new Date(now.getTime() + 4 * 60_000).toISOString(),
+    now.toISOString(),
+  ]);
+}
+
+export const UNANSWERED = ["no-answer", "busy", "failed", "canceled"];
+
+async function twilioCallStatus(env: Env, sid: string): Promise<string> {
+  const account = (env.TWILIO_ACCOUNT_SID ?? "").trim();
+  const token = (env.TWILIO_AUTH_TOKEN ?? "").trim();
+  if (!account || !token) return "";
+  try {
+    const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${account}/Calls/${sid}.json`, {
+      headers: { authorization: `Basic ${btoa(`${account}:${token}`)}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) return "";
+    const body = (await response.json()) as { status?: string };
+    return body.status ?? "";
+  } catch {
+    return "";
+  }
+}
+
+async function answerCheck(env: Env, owner: string, raw: string, now: Date): Promise<string> {
+  const [attemptText, sid, ...rest] = raw.split("|");
+  const task = rest.join("|");
+  const attempt = Number(attemptText) || 1;
+  if (!sid) return "skipped";
+  const state = await twilioCallStatus(env, sid);
+  if (!UNANSWERED.includes(state)) return `answered:${state || "unknown"}`;
+  const { sendSms } = await import("./sms-desk");
+  if (attempt >= 2) {
+    await sendSms(env, owner, `Sir, I rang twice for ${spokenTask(task)} and couldn't reach you.`);
+    return "texted";
+  }
+  const again = await reminderCall(env, owner, task);
+  if (again.ok) await queueAnswerCheck(env, owner, 2, again.sid, task, now);
+  else await sendSms(env, owner, `Sir, you didn't pick up for ${spokenTask(task)}, and I couldn't ring again.`);
+  return again.ok ? "retried" : "texted";
+}
+
+async function reminderCall(env: Env, owner: string, task: string): Promise<{ ok: boolean; sid: string }> {
   const { callAndPlay, escapeXml, speak, storeNote, elevenCredits } = await import("./voice-notes");
   const words = reminderSpeech(task);
   let twiml = `<Response><Pause length="1"/><Say voice="Polly.Brian" language="en-GB">${escapeXml(words)}</Say></Response>`;
@@ -268,18 +432,18 @@ async function reminderCall(env: Env, owner: string, task: string): Promise<bool
     }
   }
   const call = await callAndPlay(env, owner, twiml, 90);
-  return call.ok;
+  return { ok: call.ok, sid: call.sid };
 }
 
 async function listReminders(env: Env, phone: string): Promise<string> {
   await ensureExtrasTables(env);
   const rows = await dbAll<{ task: string; due_at: string; via: string }>(
     env,
-    "SELECT task, due_at, via FROM sms_reminders WHERE phone = ? AND status = 'pending' ORDER BY due_at LIMIT 6",
+    "SELECT task, due_at, via FROM sms_reminders WHERE phone = ? AND status = 'pending' AND via IN ('sms', 'call') ORDER BY due_at LIMIT 6",
     [phone],
   );
   if (!rows.length) return "No reminders waiting, Sir. Text 'remind me in 20 mins to stretch' to set one.";
-  return `Your reminders, Sir: ${rows.map((r) => `${clockLabel(new Date(r.due_at))} ${r.task}${r.via === "call" ? " (call)" : ""}`).join("; ")}.`;
+  return `Your reminders, Sir: ${rows.map((r) => `${clockLabel(new Date(r.due_at))} ${spokenTask(r.task)}${r.via === "call" ? " (call)" : ""}`).join("; ")}.`;
 }
 
 // ---------------------------------------------------------------- morning text
@@ -321,7 +485,7 @@ export async function morningText(env: Env, phone: string, now = new Date()): Pr
   const end = atLondon(addDays(today, 1), 0, 0).toISOString();
   const rows = await dbAll<{ task: string; due_at: string }>(
     env,
-    "SELECT task, due_at FROM sms_reminders WHERE phone = ? AND status = 'pending' AND due_at < ? ORDER BY due_at LIMIT 4",
+    "SELECT task, due_at FROM sms_reminders WHERE phone = ? AND status = 'pending' AND via IN ('sms', 'call') AND due_at < ? ORDER BY due_at LIMIT 4",
     [phone, end],
   ).catch(() => []);
   const reminders = rows.length ? `Today: ${rows.map((r) => `${clockLabel(new Date(r.due_at), now)} ${r.task}`).join("; ")}.` : "No reminders today.";
@@ -1086,6 +1250,11 @@ export async function smsExtras(env: Env, phone: string, text: string, media: st
     await ctx.send(n ? `Cancelled ${n} reminder${n === 1 ? "" : "s"}, Sir.` : "No reminders to cancel, Sir.");
     return true;
   }
+  const timedCall = parseTimedCall(clean);
+  if (timedCall) {
+    await ctx.send(await bookTimedCall(env, phone, timedCall));
+    return true;
+  }
   const reminder = parseReminder(clean);
   if (reminder === "unclear") {
     await ctx.send("When should I remind you, Sir? Try 'remind me at 6 to call mum' or 'remind me in 20 mins to stretch'.");
@@ -1236,6 +1405,23 @@ export async function extrasDebugRoute(request: Request, env: Env): Promise<Resp
     await setState(env, key, JSON.stringify({ queued: true, at: new Date().toISOString() }));
     await addReminder(env, owner, { task, dueAt: new Date(Date.now() + 30_000), byCall: true });
     return json({ ok: true, queued: true, fires: "next minute cron" });
+  }
+  if (action === "book-call") {
+    // A timed call to Sir from his own line, booked by the operator on his say-so. Nothing dials now.
+    const at = new Date(asString(body.value.at, 40) ?? "");
+    const say = (asString(body.value.say, 400) ?? "").trim();
+    const confirm = (asString(body.value.confirm, 300) ?? "").trim();
+    if (Number.isNaN(at.getTime()) || at.getTime() <= Date.now() + 60_000) return apiError(400, "bad_request", "at must be a future time.");
+    const call = { task: say ? `${SAY_PREFIX} ${say}` : WAKE_TASK, dueAt: at, byCall: true };
+    const line = await bookTimedCall(env, owner, call);
+    let texted = false;
+    if (confirm) {
+      const { textOwnerLong } = await import("./sms-desk");
+      texted = (await textOwnerLong(env, owner, confirm, "booked-call")).ok;
+    }
+    const saved = { booked: true, due_at: at.toISOString(), line, texted };
+    await setState(env, key, JSON.stringify(saved));
+    return json({ ok: true, ...saved });
   }
   if (action === "summary") {
     const text = (asString(body.value.text, 900) ?? "").trim();

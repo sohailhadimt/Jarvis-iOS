@@ -772,6 +772,12 @@ async function answerOwner(env: Env, phone: string, text: string, media: string[
         await reply(env, phone, started.message, "yes-hunt");
         return;
       }
+      const { bookTimedCallFromRecent } = await import("./sms-extras");
+      const booked = await bookTimedCallFromRecent(env, phone).catch(() => null);
+      if (booked) {
+        await replyLine(env, phone, booked, "yes-timed-call");
+        return;
+      }
       await reply(env, phone, "Nothing is waiting to be dialled, Sir. Nothing was dialled.", "yes-empty");
       return;
     }
